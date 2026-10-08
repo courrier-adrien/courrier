@@ -1,0 +1,19 @@
+# Environnements et fichiers generes
+venv/
+venv_*/
+__pycache__/
+*.pyc
+build/
+dist/
+*.zip
+
+# Donnees personnelles : ne jamais publier
+*.json
+*.csv
+*.log
+*.bak*
+oauth_tokens/
+rclone/
+rclone.conf
+journal.txt
+crash_*.txt

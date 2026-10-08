@@ -1,0 +1,66 @@
+COURRIER
+========
+
+COURRIER est un client mail multi-comptes (IMAP / Outlook).
+Merci de signaler tout probleme rencontre a adrienmel@gmail.com
+En cas de plantage, joignez si possible les fichiers journal.txt et
+crash_traceback.txt du dossier %LOCALAPPDATA%\COURRIER (voir VOS DONNEES).
+
+INSTALLATION
+  1. Decompressez tout le dossier ou vous voulez (Bureau, Documents...).
+     Ne deplacez pas COURRIER ADRIEN.exe seul : il a besoin du dossier _internal.
+  2. Double-cliquez sur COURRIER ADRIEN.exe.
+  3. Si Windows affiche "Windows a protege votre ordinateur" (SmartScreen) :
+     cliquez sur "Informations complementaires" puis "Executer quand meme".
+     Ce message apparait car le programme n'est pas signe numeriquement.
+     Certains antivirus peuvent aussi le signaler a tort : c'est un programme
+     Python empaquete, sans rien d'installe sur votre PC.
+
+PREMIER LANCEMENT
+  La fenetre COMPTES s'ouvre toute seule. Ajoutez votre compte mail
+  (choisissez votre fournisseur, entrez votre adresse et votre mot de passe),
+  puis supprimez le compte "A CONFIGURER".
+  Pour un compte Gmail, il faut generalement un "mot de passe d'application".
+
+TELEPHONE ET SMS (boutons TEL et SMS)
+  Le bouton TEL affiche l'ecran de votre telephone sur le PC ; le bouton SMS
+  envoie des SMS par votre telephone (avec votre forfait, un par un).
+  - ANDROID UNIQUEMENT : les iPhone ne sont pas compatibles (Apple ne permet
+    pas a un PC de piloter un iPhone).
+  - A faire une seule fois sur le telephone :
+      1. Parametres > A propos du telephone > Informations sur le logiciel :
+         touchez 7 fois "Numero de version" (les "Options pour les
+         developpeurs" apparaissent dans les Parametres).
+      2. Dans "Options pour les developpeurs", activez "Debogage USB"
+         (et "Debogage sans fil" pour vous connecter en Wi-Fi).
+      3. Branchez le telephone en USB et acceptez le PC sur l'ecran du
+         telephone ("Autoriser le debogage USB").
+  - Le plus simple est le cable USB. Le Wi-Fi (Android 11 et plus,
+    telephone et PC sur le meme reseau) demande en plus un appairage par
+    code que COURRIER ne sait pas encore faire.
+  - Pendant un envoi de SMS, laissez le telephone allume et deverrouille :
+    sinon l'envoi se met en pause (bouton REPRENDRE).
+  - L'envoi automatique a ete teste avec l'appli Messages de Samsung. Avec
+    une autre appli SMS ou un telephone double SIM, il peut ne pas trouver
+    le bouton Envoyer : dans ce cas rien n'est envoye, l'envoi se met en
+    pause et le journal l'indique.
+  - Les operateurs peuvent bloquer temporairement une ligne qui envoie
+    beaucoup de SMS d'affilee : gardez un intervalle suffisant entre deux
+    envois (20 secondes minimum).
+
+VOS DONNEES
+  Tout est stocke uniquement sur votre PC, dans :
+     %LOCALAPPDATA%\COURRIER
+  (collez ce chemin dans la barre d'adresse de l'Explorateur Windows).
+  Rien n'est envoye ailleurs qu'a votre fournisseur de messagerie.
+
+DESINSTALLATION
+  Supprimez le dossier decompresse, puis le dossier %LOCALAPPDATA%\COURRIER.
+  Aucune cle de registre n'est creee au lancement normal.
+
+LICENCE
+  PolyForm Noncommercial 1.0.0 : usage non commercial uniquement.
+  Le texte complet est dans le menu A PROPOS du logiciel.
+  Logiciels tiers : le bouton TEL utilise scrcpy et ses composants (FFmpeg,
+  SDL, libusb, adb), redistribues sous leurs propres licences : voir
+  _internal\ressources\scrcpy\LICENCES_TIERS.txt.

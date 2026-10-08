@@ -1,0 +1,30 @@
+LOGICIELS TIERS EMBARQUES DANS CE DOSSIER (bouton TEL de COURRIER)
+===================================================================
+
+Ces programmes ne font pas partie de COURRIER. Ils sont redistribues
+sans modification, sous leurs propres licences, et ne sont pas concernes
+par la licence PolyForm Noncommercial de COURRIER.
+
+scrcpy 5.0 (scrcpy.exe, scrcpy-server, icones)
+  Copyright (C) 2018 Genymobile
+  Copyright (C) 2018-2026 Romain Vimont
+  Licence Apache 2.0 : texte complet dans LICENSE.txt (ce dossier).
+  Source : https://github.com/Genymobile/scrcpy
+
+FFmpeg (avcodec-63.dll, avformat-63.dll, avutil-61.dll, swresample-7.dll)
+  Compile en LGPL version 2.1 ou ulterieure (sans option GPL ni nonfree),
+  avec le decodeur dav1d (licence BSD 2 clauses).
+  Source : https://ffmpeg.org  -  https://code.videolan.org/videolan/dav1d
+  Scripts de compilation : https://github.com/Genymobile/scrcpy (dossier app/deps)
+  Ces bibliotheques peuvent etre remplacees par une autre version compatible.
+
+SDL 3 (SDL3.dll)
+  Licence zlib.  Source : https://libsdl.org
+
+libusb (libusb-1.0.dll)
+  Licence LGPL version 2.1 ou ulterieure.  Source : https://libusb.info
+
+adb - Android Debug Bridge (adb.exe, AdbWinApi.dll, AdbWinUsbApi.dll)
+  Android SDK Platform-Tools (Google), code source sous licence Apache 2.0
+  (Android Open Source Project).  Source : https://source.android.com
+  Binaires tels que fournis dans la distribution Windows officielle de scrcpy.
