@@ -198,6 +198,38 @@ class PontEditeur(QObject):
             self._rendu_visuel_termine(nb_images)
 
 
+def _page_mail_locale(client_mail):
+    """Vrai si le panneau de lecture affiche exactement la page que COURRIER
+    vient d'écrire (_afficher_dans_cef : mail ou aperçu de PJ, protégée par
+    la CSP), faux pour un site web externe ou tout autre fichier local (une
+    PJ .html ouverte en externe vit aussi dans DOSSIER_APERCU, sans CSP).
+    Voir _reserve_page_mail."""
+    try:
+        url = client_mail.webview.url()
+        attendu = getattr(client_mail, '_temp_html', None)
+        if not attendu or not url.isLocalFile():
+            return False
+        return (os.path.normcase(os.path.realpath(url.toLocalFile()))
+                == os.path.normcase(os.path.realpath(attendu)))
+    except Exception:
+        return False
+
+def _reserve_page_mail(methode):
+    """Sécurité (09/10/2026) : le pont pyBridge est aussi joignable depuis
+    les sites web ouverts dans le panneau (SCRIPT_BADGE_IMAGES_EXTERNES).
+    N'importe quel site pouvait donc ouvrir une pièce jointe du mail
+    courant, l'enregistrer, supprimer le mail (touche_pressee)... Les
+    méthodes décorées ne répondent plus qu'aux pages de COURRIER."""
+    import functools
+
+    @functools.wraps(methode)
+    def enveloppe(self, *args):
+        if not _page_mail_locale(self._cm):
+            print(f"[SECURITE] pyBridge.{methode.__name__} refusé depuis {self._cm.webview.url().toString()[:200]}")
+            return None
+        return methode(self, *args)
+    return enveloppe
+
 class PontLecture(QObject):
     """Pont JS <-> Python pour le panneau de lecture (ClientMail), exposé
     côté JS sous le nom 'pyBridge'. Remplace les cef.JavascriptBindings
@@ -210,39 +242,48 @@ class PontLecture(QObject):
         self._cm = client_mail
 
     @Slot(int)
+    @_reserve_page_mail
     def ouvrirPieceJointe(self, index):
         self._cm._ouvrir_pj_depuis_js(index)
 
     @Slot()
+    @_reserve_page_mail
     def enregistrerPiecesJointes(self):
         self._cm._enregistrer_pieces_jointes()
 
     @Slot()
+    @_reserve_page_mail
     def enregistrerTout(self):
         self._cm._enregistrer_tout_direct()
 
     @Slot()
+    @_reserve_page_mail
     def ouvrirMailReponse(self):
         self._cm._ouvrir_mail_reponse_depuis_js()
 
     @Slot()
+    @_reserve_page_mail
     def revenirCorpsPJ(self):
         self._cm._revenir_corps_mail_pj()
 
     @Slot(int)
+    @_reserve_page_mail
     def ouvrirPJExterneBinding(self, index):
         self._cm._ouvrir_pj_externe_depuis_js(index)
 
     @Slot()
+    @_reserve_page_mail
     def retournerOrigine(self):
         self._cm._retourner_origine_depuis_js()
 
     @Slot()
+    @_reserve_page_mail
     def recharger_mail(self):
         """Bouton RECHARGER intégré au bandeau du mail lui-même."""
         self._cm._recharger_mail_courant()
 
     @Slot(str)
+    @_reserve_page_mail
     def imprimer_pdf(self, sujet):
         """Bouton PDF intégré au bandeau du mail (à côté de RECHARGER)."""
         self._cm._imprimer_mail_pdf(sujet)
@@ -322,6 +363,7 @@ class PontLecture(QObject):
         self._cm._telecharger_image_survol(src)
 
     @Slot(str, str)
+    @_reserve_page_mail
     def ouvrirAdresseCliquee(self, adresse, nom):
         """Clic sur une adresse dans le bandeau De/À/Cc/Cci — ouvre le
         carnet d'adresses pré-rempli, prêt à choisir le dossier et
@@ -329,6 +371,7 @@ class PontLecture(QObject):
         self._cm._sur_clic_adresse_dans_bandeau(adresse, nom)
 
     @Slot(str, bool)
+    @_reserve_page_mail
     def touche_pressee(self, touche, ctrl):
         """Relais clavier depuis le JS de la page — remplace
         CefKeyboardHandler.OnPreKeyEvent (qui interceptait ces mêmes touches
@@ -804,6 +847,14 @@ SCRIPT_ASCENSEUR_WEB = """
 """
 
 
+# Types de requêtes file:// laissés passer par l'intercepteur (voir
+# installer_protections_web) : la page elle-même et ses ressources passives.
+# XHR/fetch, cadres (<iframe>), <object>, workers... sont bloqués.
+_TYPES_FICHIER_LOCAL_AUTORISES = frozenset({
+    "ResourceTypeMainFrame", "ResourceTypeImage", "ResourceTypeStylesheet",
+    "ResourceTypeFontResource", "ResourceTypeMedia", "ResourceTypeFavicon",
+})
+
 def installer_protections_web(profil):
     """Installe sur un profil QtWebEngine le bloqueur de pub réseau et les
     ascenseurs rouges (valables pour toutes les pages chargées avec ce
@@ -815,6 +866,17 @@ def installer_protections_web(profil):
         def interceptRequest(self, info):
             try:
                 url = info.requestUrl()
+                # Sécurité (09/10/2026) : un mail est affiché depuis un
+                # fichier local (Apercu\), et LocalContentCanAccessFileUrls
+                # doit rester actif pour les images du cache disque. Sans ce
+                # filtre, un script glissé dans un mail pouvait lire n'importe
+                # quel fichier local (XHR ou <iframe> vers ../comptes.json,
+                # oauth_tokens\...) et l'envoyer sur Internet. Seuls les
+                # types de ressources passifs restent autorisés en file://.
+                if url.scheme() == "file" and info.resourceType().name not in _TYPES_FICHIER_LOCAL_AUTORISES:
+                    print(f"[SECURITE] Accès local bloqué ({info.resourceType().name}) : {url.toString()[:200]}")
+                    info.block(True)
+                    return
                 hote = url.host()
                 if _hote_est_bloque(hote):
                     info.block(True)
@@ -948,6 +1010,20 @@ def reprendre_focus_avec_tentatives(fenetre, duree_max_ms=3000, intervalle_ms=10
     _tentative()
 
 DOSSIER_APERCU = os.path.join(DOSSIER_APP, "Apercu")
+# Politique de sécurité des pages de mail (09/10/2026). Le HTML d'un mail
+# vient de l'expéditeur : sans elle, ses <script>, onclick=, onerror=,
+# liens javascript:... s'exécutaient dans le panneau de lecture avec accès
+# au pont pyBridge (ouvrir/enregistrer une PJ, supprimer le mail...). Seuls
+# les scripts de COURRIER, porteurs du jeton tiré à chaque lancement, sont
+# autorisés ; le navigateur bloque tout le reste. Les scripts injectés
+# depuis Python (runJavaScript, QWebEngineScript) n'y sont pas soumis.
+# Conséquence à retenir : plus aucun onclick="..." dans le HTML généré par
+# COURRIER — utiliser data-courrier-action (voir _actionsCourrier dans
+# script_pont, _afficher_dans_cef).
+import secrets as _secrets
+JETON_CSP = _secrets.token_urlsafe(18)
+CSP_PAGES_MAIL = ("script-src 'nonce-" + JETON_CSP + "' qrc:; object-src 'none'; "
+                  "frame-src 'none'; child-src 'none'; worker-src 'none'")
 os.makedirs(DOSSIER_APERCU, exist_ok=True)
 
 # Cache d'images distantes dédupliqué par URL (27/07/2026) — voir
@@ -1132,22 +1208,118 @@ def _memoire_processus_actuel_mo():
         pass
     return None
 
+# Chiffrement des mots de passe et jetons sur disque (09/10/2026) : DPAPI,
+# la protection de Windows liée à la session de l'utilisateur (celle
+# qu'utilisent Chrome, Edge, Outlook...). Seule cette session Windows, sur
+# ce PC, peut déchiffrer : un comptes.json copié ailleurs (sauvegarde,
+# clé USB, dossier partagé, programme malveillant qui l'envoie sur
+# Internet) ne contient plus de mot de passe lisible. Pas de mot de passe
+# maître à retenir, pas de dépendance (ctypes + crypt32.dll).
+# Contrepartie : après une réinstallation de Windows ou un changement de
+# PC, les mots de passe sont à ressaisir.
+PREFIXE_DPAPI = "dpapi:"
+_ENTROPIE_DPAPI = b"COURRIER-comptes-v1"
+
+def _dpapi(donnees, chiffrer):
+    import ctypes
+
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    def _blob(octets):
+        tampon = ctypes.create_string_buffer(octets, len(octets))
+        return _BLOB(len(octets), ctypes.cast(tampon, ctypes.POINTER(ctypes.c_char))), tampon
+
+    entree, _t1 = _blob(donnees)
+    entropie, _t2 = _blob(_ENTROPIE_DPAPI)
+    sortie = _BLOB()
+    crypt32 = ctypes.windll.crypt32
+    fonction = crypt32.CryptProtectData if chiffrer else crypt32.CryptUnprotectData
+    CRYPTPROTECT_UI_FORBIDDEN = 0x1
+    if chiffrer:
+        ok = fonction(ctypes.byref(entree), "COURRIER", ctypes.byref(entropie),
+                      None, None, CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(sortie))
+    else:
+        ok = fonction(ctypes.byref(entree), None, ctypes.byref(entropie),
+                      None, None, CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(sortie))
+    if not ok:
+        raise OSError(f"DPAPI : échec ({ctypes.GetLastError()})")
+    try:
+        return ctypes.string_at(sortie.pbData, sortie.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(sortie.pbData)
+
+def chiffrer_secret(texte):
+    import base64
+    return PREFIXE_DPAPI + base64.b64encode(_dpapi(texte.encode("utf-8"), True)).decode("ascii")
+
+def dechiffrer_secret(valeur):
+    """Texte en clair d'une valeur chiffrée par chiffrer_secret. Lève une
+    exception si la valeur vient d'une autre session Windows / d'un autre PC."""
+    import base64
+    return _dpapi(base64.b64decode(valeur[len(PREFIXE_DPAPI):]), False).decode("utf-8")
+
+def _ecrire_fichier_atomique(chemin, texte):
+    """Écrit via un fichier temporaire puis le renomme : un plantage en
+    pleine écriture ne laisse jamais un fichier tronqué (perdre comptes.json
+    coûterait désormais la ressaisie de tous les mots de passe)."""
+    tmp = chemin + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(texte)
+    os.replace(tmp, chemin)
+
 def charger_comptes():
     if os.path.exists(FICHIER_COMPTES):
         try:
             with open(FICHIER_COMPTES, "r", encoding="utf-8") as f:
-                return json.load(f)
+                comptes = json.load(f)
         except Exception:
-            pass
+            comptes = None
+        if comptes is not None:
+            a_migrer = False
+            for c in comptes:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("mdp_chiffre"):
+                    try:
+                        c["mdp"] = dechiffrer_secret(c["mdp_chiffre"])
+                        del c["mdp_chiffre"]
+                    except Exception as e:
+                        # Autre PC / autre session Windows : mot de passe à
+                        # ressaisir. mdp_chiffre est gardé tel quel pour ne
+                        # rien détruire à la prochaine sauvegarde.
+                        print(f"[SECURITE] Mot de passe illisible pour {c.get('adresse', '?')} : {e}")
+                        c["mdp"] = ""
+                elif c.get("mdp"):
+                    a_migrer = True
+                c.setdefault("mdp", "")
+            if a_migrer:
+                print("[SECURITE] Mots de passe en clair trouvés dans comptes.json : chiffrement")
+                sauvegarder_comptes(comptes)
+            return comptes
     # Premier lancement : sauvegarder les comptes par défaut
     sauvegarder_comptes(COMPTES_DEFAUT)
     return COMPTES_DEFAUT
 
 def sauvegarder_comptes(comptes):
+    """Écrit comptes.json avec les mots de passe chiffrés (mdp_chiffre). En
+    mémoire, compte["mdp"] reste en clair : le reste du code n'a pas à
+    savoir que le fichier est chiffré."""
     try:
-        with open(FICHIER_COMPTES, "w", encoding="utf-8") as f:
-            json.dump(comptes, f, ensure_ascii=False, indent=2)
+        sur_disque = []
+        for c in comptes:
+            if not isinstance(c, dict):
+                sur_disque.append(c)
+                continue
+            copie = dict(c)
+            mdp = copie.pop("mdp", "") or ""
+            if mdp:
+                copie["mdp_chiffre"] = chiffrer_secret(mdp)
+            sur_disque.append(copie)
+        _ecrire_fichier_atomique(FICHIER_COMPTES, json.dumps(sur_disque, ensure_ascii=False, indent=2))
     except Exception as e:
+        # Jamais de repli en clair : mieux vaut ne rien écrire (l'ancien
+        # fichier reste intact) que réécrire les mots de passe lisibles.
         print(f"Erreur sauvegarde comptes : {e}")
 
 import threading as _threading
@@ -1238,6 +1410,12 @@ def _charger_cache_oauth(adresse):
         try:
             with open(chemin, "r", encoding="utf-8") as f:
                 contenu = f.read()
+            if contenu.startswith(PREFIXE_DPAPI):
+                contenu = dechiffrer_secret(contenu)
+            else:
+                # Ancien cache en clair (avant le 09/10/2026) : chiffré tout de suite
+                _ecrire_fichier_atomique(chemin, chiffrer_secret(contenu))
+                print(f"[SECURITE] Cache OAuth chiffré pour {adresse}")
             cache.deserialize(contenu)
             print(f"[OAUTH] Cache chargé pour {adresse} ({chemin}, {len(contenu)} octets)")
         except Exception as e:
@@ -1250,8 +1428,7 @@ def _sauvegarder_cache_oauth(adresse, cache):
     if cache.has_state_changed:
         chemin = _chemin_cache_oauth(adresse)
         try:
-            with open(chemin, "w", encoding="utf-8") as f:
-                f.write(cache.serialize())
+            _ecrire_fichier_atomique(chemin, chiffrer_secret(cache.serialize()))
             print(f"[OAUTH] Cache sauvegardé pour {adresse} ({chemin})")
         except Exception as e:
             print(f"Erreur sauvegarde cache OAuth ({adresse}) : {e}")
@@ -5951,6 +6128,56 @@ def decoder_entete(valeur):
         if isinstance(valeur, bytes):
             return valeur.decode("latin-1", errors="replace")
         return str(valeur)
+
+_NOMS_RESERVES_WINDOWS = {"CON", "PRN", "AUX", "NUL",
+                          *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+def nom_fichier_sur(nom, defaut="piece_jointe"):
+    """Nom de pièce jointe utilisable sans danger comme nom de fichier
+    (sécurité, 09/10/2026). Le nom vient de l'expéditeur : sans ce
+    nettoyage, "..\\..\\AppData\\...\\Startup\\x.bat" ou "C:\\..." faisait
+    écrire la pièce jointe n'importe où sur le disque à l'enregistrement.
+    Retire aussi les caractères interdits par Windows (dont ':' = flux
+    NTFS caché) et les caractères d'inversion de sens d'écriture, qui
+    servent à déguiser "photo[U+202E]gpj.exe" en "photoexe.jpg"."""
+    nom = str(nom or "").replace("\\", "/").split("/")[-1]
+    nom = re.sub(r'[\x00-\x1f\x7f<>:"|?*\u200e\u200f\u202a-\u202e\u2066-\u2069]', "_", nom)
+    nom = nom.strip(" .")
+    if not nom:
+        return defaut
+    if os.path.splitext(nom)[0].split(".")[0].upper() in _NOMS_RESERVES_WINDOWS:
+        nom = "_" + nom
+    if len(nom) > 180:
+        racine, ext = os.path.splitext(nom)
+        nom = racine[:180 - len(ext[:20])] + ext[:20]
+    return nom
+
+def _extension_sure(nom):
+    """Extension d'un nom de PJ réduite à des lettres/chiffres (".a&calc" ->
+    ""), pour les fichiers temporaires confiés à Windows."""
+    ext = os.path.splitext(str(nom or ""))[1].lower()
+    return ext if re.fullmatch(r"\.[a-z0-9]{1,15}", ext) else ""
+
+# Types qui s'exécutent à l'ouverture : confirmation obligatoire (voir
+# ClientMail._lancer_pj_avec_appli_windows).
+EXTENSIONS_PJ_DANGEREUSES = frozenset({
+    ".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".msi", ".msp", ".msc",
+    ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".ps1", ".psm1",
+    ".lnk", ".url", ".reg", ".cpl", ".jar", ".appref-ms", ".application",
+    ".iso", ".img", ".vhd", ".vhdx", ".chm", ".scf", ".inf", ".gadget",
+    ".py", ".pyw", ".dll", ".sys", ".settingcontent-ms", ".library-ms",
+})
+
+def marquer_provenance_internet(chemin):
+    """Ajoute la marque Windows "téléchargé depuis Internet" (flux NTFS
+    Zone.Identifier, zone 3) — celle que pose un navigateur. Sans elle,
+    une PJ ouverte depuis COURRIER échappait à SmartScreen et Office
+    exécutait ses macros sans le bandeau "Mode protégé"."""
+    try:
+        with open(chemin + ":Zone.Identifier", "w", encoding="ascii") as f:
+            f.write("[ZoneTransfer]\r\nZoneId=3\r\n")
+    except Exception as e:
+        print(f"[SECURITE] Marquage Internet impossible pour {chemin} : {e}")
 
 def _decoder_payload(payload_bytes, charset):
     """Essaie de décoder avec le charset donné, puis UTF-8, puis latin-1."""
@@ -11182,7 +11409,7 @@ class ChargeurDepuisCache(QThread):
             cid = part.get("Content-ID", "").strip("<>")
             nom = part.get_filename()
             if nom:
-                nom = decoder_entete(nom)
+                nom = nom_fichier_sur(decoder_entete(nom))
             payload = part.get_payload(decode=True)
             if not payload:
                 continue
@@ -11378,7 +11605,7 @@ class PreChargeurMassif(QThread):
                     cid = part.get("Content-ID", "").strip("<>")
                     nom = part.get_filename()
                     if nom:
-                        nom = decoder_entete(nom)
+                        nom = nom_fichier_sur(decoder_entete(nom))
                     data = part.get_payload(decode=True)
                     if not data:
                         continue
@@ -12188,7 +12415,7 @@ class ChargeurCorps(QThread):
                     cid = part.get("Content-ID", "").strip("<>")
                     nom = part.get_filename()
                     if nom:
-                        nom = decoder_entete(nom)
+                        nom = nom_fichier_sur(decoder_entete(nom))
                     payload = part.get_payload(decode=True)
                     if not payload:
                         continue
@@ -16921,7 +17148,8 @@ class FenetreRedaction(QDialog):
 
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<meta http-equiv="Content-Security-Policy" content="{CSP_PAGES_MAIL}">
+<script src="qrc:///qtwebchannel/qwebchannel.js" nonce="{JETON_CSP}"></script>
 <style>
   html, body {{
       margin: 0; padding: 0; background: white;
@@ -16935,7 +17163,7 @@ class FenetreRedaction(QDialog):
 </style></head>
 <body>
 <div id="zone-edition" contenteditable="true">{corps}</div>
-<script>
+<script nonce="{JETON_CSP}">
   var pyBridge = null;
   new QWebChannel(qt.webChannelTransport, function(channel) {{
       pyBridge = channel.objects.pyBridge;
@@ -18620,7 +18848,8 @@ class GestionnaireModeles(QDialog):
         with open(chemin, "w", encoding="utf-8") as f:
             f.write(f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<meta http-equiv="Content-Security-Policy" content="{CSP_PAGES_MAIL}">
+<script src="qrc:///qtwebchannel/qwebchannel.js" nonce="{JETON_CSP}"></script>
 <style>
   html, body {{
       margin: 0; padding: 0; background: white;
@@ -18631,7 +18860,7 @@ class GestionnaireModeles(QDialog):
 </style></head>
 <body>
 <div id="zone-edition" contenteditable="true">{corps}</div>
-<script>
+<script nonce="{JETON_CSP}">
   var pyBridge = null;
   new QWebChannel(qt.webChannelTransport, function(channel) {{
       pyBridge = channel.objects.pyBridge;
@@ -26512,7 +26741,7 @@ if (typeof module === 'object') {
         for pj in entree.get("pieces_jointes", []):
             try:
                 data = _b64_modif.b64decode(pj["data_b64"])
-                chemin_tmp = os.path.join(DOSSIER_APERCU, f"pj_attente_{mail_id}_{pj['nom']}")
+                chemin_tmp = os.path.join(DOSSIER_APERCU, nom_fichier_sur(f"pj_attente_{mail_id}_{pj['nom']}"))
                 with open(chemin_tmp, "wb") as f:
                     f.write(data)
                 chemins_restaures.append(chemin_tmp)
@@ -27438,7 +27667,7 @@ if (typeof module === 'object') {
             nom = part.get_filename()
             if not nom:
                 continue
-            nom = decoder_entete(nom)
+            nom = nom_fichier_sur(decoder_entete(nom))
             payload = part.get_payload(decode=True)
             if not payload:
                 continue
@@ -27512,7 +27741,7 @@ if (typeof module === 'object') {
             if not payload or not ct_reel:
                 continue
             nom = part.get_filename()
-            nom = decoder_entete(nom) if nom else (cid_hdr.split("@")[0] or "image")
+            nom = nom_fichier_sur(decoder_entete(nom) if nom else (cid_hdr.split("@")[0] or "image"), "image")
             if not os.path.splitext(nom)[1]:
                 nom += {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
                         "image/webp": ".webp", "image/bmp": ".bmp"}.get(ct_reel, "")
@@ -29125,54 +29354,44 @@ if (typeof module === 'object') {
     margin:2px 4px 2px 0; overflow:hidden;
     font-family:Verdana; font-size:11px; color:#333;
     vertical-align:middle;">
-<span onclick="ouvrirPJ({i})" style="
+<span data-courrier-action="ouvrirPJ" data-index="{i}" style="
     display:inline-flex; align-items:center; gap:5px;
     padding:3px 6px 3px 8px; cursor:pointer;"
-    onmouseover="this.style.background='#ffeee';"
-    onmouseout="this.style.background='';"
     title="{nom} ({taille}) — aperçu dans le panneau">{emoji} <b>{nom}</b> <span style="color:#888;">({taille})</span></span>
-<span onclick="ouvrirPJExterne({i})" style="
+<span data-courrier-action="ouvrirPJExterne" data-index="{i}" class="cpj-ext" style="
     display:inline-flex; align-items:center; justify-content:center;
     padding:3px 8px; cursor:pointer; border-left:1px solid #ccc;
     color:#555; font-weight:bold;"
-    onmouseover="this.style.background='#A52A2A';this.style.color='white';"
-    onmouseout="this.style.background='';this.style.color='#555';"
     title="Ouvrir avec l'application par défaut">↗</span>
 </span>"""
 
-        btn_enregistrer = """<span onclick="enregistrerPJ()" style="
+        btn_enregistrer = """<span data-courrier-action="enregistrerPJ" class="cpj-btn" style="
     display:inline-flex; align-items:center;
     background:#A52A2A; border:1px solid #8a1a1a; border-radius:3px;
     padding:3px 10px; margin:2px 4px; cursor:pointer;
     font-family:Verdana; font-size:11px; color:white; font-weight:bold;
     vertical-align:middle;"
-    onmouseover="this.style.background='#c03030';"
-    onmouseout="this.style.background='#A52A2A';"
     title="Enregistrer les pièces jointes"> Enregistrer</span>"""
 
         # Enregistrer (avec dialogue) + Enregistrer tout (direct) : toujours les deux,
         # même quand il n'y a qu'une seule PJ
-        btn_tout = """<span onclick="if(window.enregistrerTout)enregistrerTout();" style="
+        btn_tout = """<span data-courrier-action="enregistrerTout" class="cpj-btn" style="
     display:inline-flex; align-items:center;
     background:#A52A2A; border:1px solid #8a1a1a; border-radius:3px;
     padding:3px 10px; margin:2px 4px; cursor:pointer;
     font-family:Verdana; font-size:11px; color:white; font-weight:bold;
     vertical-align:middle;"
-    onmouseover="this.style.background='#c03030';"
-    onmouseout="this.style.background='#A52A2A';"
     title="Enregistrer toutes les pièces jointes directement"> Enregistrer tout</span>"""
 
         # Bouton CORPS : caché par défaut, révélé en JS quand une PJ est
         # ouverte et remplace le corps du mail (cf. _afficher_page_pdf,
         # _recalculer_hauteur_doc_viewer et le viewer image)
-        btn_corps = """<span id="__btn_corps_pj__" onclick="if(window.revenirCorps)revenirCorps();" style="
+        btn_corps = """<span id="__btn_corps_pj__" data-courrier-action="revenirCorps" class="cpj-corps" style="
     display:none; align-items:center;
     background:#555; border:1px solid #333; border-radius:3px;
     padding:3px 10px; margin:2px 4px; cursor:pointer;
     font-family:Verdana; font-size:11px; color:white; font-weight:bold;
     vertical-align:middle;"
-    onmouseover="this.style.background='#777';"
-    onmouseout="this.style.background='#555';"
     title="Revenir au corps du mail"> ◀ Corps</span>"""
 
         if len(pjs) == 1:
@@ -29193,7 +29412,7 @@ if (typeof module === 'object') {
                 f'<div id="__pj_items__">{items_html}</div>'
                 f'<div id="__pj_repli__" style="display:none; text-align:center; '
                 f'margin-top:4px;">'
-                f'<span onclick="if(window.__pjBasculerRepli)window.__pjBasculerRepli();" style="'
+                f'<span data-courrier-action="basculerRepli" style="'
                 f'display:inline-flex; align-items:center; cursor:pointer; '
                 f'background:#A52A2A; border:1px solid #8a1a1a; border-radius:3px; '
                 f'color:white; font-weight:bold; font-family:Verdana; font-size:11px; '
@@ -29205,6 +29424,11 @@ if (typeof module === 'object') {
         bloc_pj = f"""<div id="__bloc_pj__" style="
     background:#f9f9f9; border-top:1px solid #ddd; border-bottom:1px solid #ddd;
     padding:5px 10px; font-family:Verdana; font-size:11px; line-height:2;">
+  <style>
+    #__bloc_pj__ .cpj-ext:hover {{ background:#A52A2A !important; color:white !important; }}
+    #__bloc_pj__ .cpj-btn:hover {{ background:#c03030 !important; }}
+    #__bloc_pj__ .cpj-corps:hover {{ background:#777 !important; }}
+  </style>
   {contenu_bloc}
 </div>"""
 
@@ -29242,6 +29466,7 @@ if (typeof module === 'object') {
     div.innerHTML = {json.dumps(bloc_pj)};
     var bloc = div.firstElementChild;
     if (!bloc) return;
+    if (window.__courrierRacine) window.__courrierRacine(bloc);
     // Insérer après le premier div (bandeau De/Date)
     var body = document.body;
     if (!body) return;
@@ -29366,20 +29591,44 @@ if (typeof module === 'object') {
         import tempfile
         nom = pj.get("nom", "piece_jointe")
         data = pj["data"]
-        ext = os.path.splitext(nom)[1].lower() or ".bin"
+        ext = _extension_sure(nom) or ".bin"
         with tempfile.NamedTemporaryFile(
             delete=False, suffix=ext, prefix='courrier_pj_', dir=DOSSIER_APERCU
         ) as f:
             f.write(data)
             chemin = f.name
+        self._lancer_pj_avec_appli_windows(chemin, nom)
+
+    def _lancer_pj_avec_appli_windows(self, chemin, nom_affiche):
+        """Point de passage unique (sécurité, 09/10/2026) pour toute pièce
+        jointe confiée à l'application Windows par défaut :
+          - le fichier est marqué "provenant d'Internet" (comme le fait un
+            navigateur), pour que SmartScreen et le mode protégé d'Office
+            (macros bloquées) se déclenchent ;
+          - un type exécutable demande confirmation, bouton Non par défaut —
+            un script glissé dans un mail pouvait déclencher l'ouverture
+            sans aucun clic (pont pyBridge) ;
+          - plus de "cmd /c start" : un nom de PJ contenant & ou | y
+            devenait une commande exécutée."""
+        from PySide6.QtWidgets import QMessageBox
+        marquer_provenance_internet(chemin)
+        ext = os.path.splitext(chemin)[1].lower()
+        if ext in EXTENSIONS_PJ_DANGEREUSES:
+            rep = QMessageBox.warning(
+                self, "Pièce jointe dangereuse",
+                f"« {nom_affiche} » est un programme ou un script ({ext}).\n\n"
+                "L'ouvrir l'exécute sur cet ordinateur. Ne continuez que si "
+                "vous attendiez ce fichier d'un expéditeur de confiance.\n\n"
+                "Ouvrir quand même ?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if rep != QMessageBox.StandardButton.Yes:
+                print(f"[SECURITE] Ouverture refusée : {nom_affiche}")
+                return
         try:
             os.startfile(chemin)
-        except Exception:
-            try:
-                import subprocess
-                subprocess.Popen(["cmd", "/c", "start", "", chemin], shell=True)
-            except Exception as e:
-                print(f"[PJ-DEBUG] EXCEPTION ouverture externe (fallback) : {e}")
+        except Exception as e:
+            print(f"[PJ-DEBUG] EXCEPTION ouverture externe : {e}")
 
     def _ouvrir_pj_externe_depuis_js(self, index):
         """Appelée depuis le JS (double-clic sur une PJ dans le bandeau, ou
@@ -29933,12 +30182,11 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             # ne peut pas le supprimer ici ; il sera nettoyé au prochain
             # démarrage de COURRIER (voir le nettoyage dans __init__).
             with tempfile.NamedTemporaryFile(
-                delete=False, suffix=ext or ".bin", prefix='courrier_pj_', dir=DOSSIER_APERCU
+                delete=False, suffix=_extension_sure(nom) or ".bin", prefix='courrier_pj_', dir=DOSSIER_APERCU
             ) as f:
                 f.write(data)
                 chemin = f.name
-            import subprocess
-            subprocess.Popen(["cmd", "/c", "start", "", chemin], shell=True)
+            self._lancer_pj_avec_appli_windows(chemin, nom)
 
     # --- Prévisualisation vidéo via Qt Multimedia (25/09/2026) ---
     # Pourquoi pas une simple balise <video> dans la page : le QtWebEngine
@@ -31356,8 +31604,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
                 # fichier n'est donc plus supprimé dans ce cas ; il sera
                 # nettoyé au prochain démarrage de COURRIER, comme les autres
                 # PJ ouvertes en externe (voir _telecharger_clic).
-                import subprocess
-                subprocess.Popen(["cmd", "/c", "start", "", chemin], shell=True)
+                self._lancer_pj_avec_appli_windows(chemin, nom)
                 return
             # Conversion réussie : le fichier temporaire n'est plus nécessaire
             try:
@@ -32192,7 +32439,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
                 data = pj.get("data")
                 nom  = pj.get("nom", "pj")
                 if data:
-                    chemin_dest = os.path.join(chemin, nom)
+                    chemin_dest = os.path.join(chemin, nom_fichier_sur(nom))
                     with open(chemin_dest, "wb") as f:
                         f.write(data)
                     nb += 1
@@ -32350,7 +32597,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             self._dernier_chemin_pj = dossier
             nb_ok = 0
             for _, pj in selectionnees:
-                chemin_fichier = os.path.join(dossier, pj["nom"])
+                chemin_fichier = os.path.join(dossier, nom_fichier_sur(pj["nom"]))
                 try:
                     with open(chemin_fichier, "wb") as f:
                         f.write(pj["data"])
@@ -32827,9 +33074,9 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
   <div><b>Date :</b> {date_affichee}</div>
   {"<div><b>Taille :</b> " + taille_esc + "</div>" if taille_esc else ""}
   <div id="__ligne_boutons_bandeau__" style="clear:both;margin-top:4px;display:flex;align-items:center;flex-wrap:wrap;">
-    <button onclick="var t=document.body.innerText;var el=document.createElement('textarea');el.value=t;document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el);this.innerText='✓ Copié';setTimeout(function(){{this.innerText='COPIER'}}.bind(this),2000);" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">COPIER</button>
-    <button onclick="if(pyBridge) pyBridge.recharger_mail();" title="Force le retéléchargement complet de ce mail (texte + images distantes) — utile si une image reste cassée suite à un échec réseau ponctuel" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">RECHARGER</button>
-    <button id="__btn_pdf__" onclick="var s=document.getElementById('__bandeau_sujet__');if(pyBridge) pyBridge.imprimer_pdf(s?s.innerText:'');" title="Imprimer ce mail dans un fichier PDF" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">PDF</button>
+    <button data-courrier-action="copier" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">COPIER</button>
+    <button data-courrier-action="recharger" title="Force le retéléchargement complet de ce mail (texte + images distantes) — utile si une image reste cassée suite à un échec réseau ponctuel" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">RECHARGER</button>
+    <button id="__btn_pdf__" data-courrier-action="pdf" title="Imprimer ce mail dans un fichier PDF" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">PDF</button>
   </div>
 </div>
 """
@@ -32870,7 +33117,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             # Envoyés (chercher_reponse_locale) et mémorise le pointeur pour
             # les fois suivantes — voir _ouvrir_mail_reponse_depuis_js.
             bouton_repondu = (
-                f'<button onclick="ouvrirMailReponse()" style="{STYLE_BOUTON_BANDEAU}" '
+                f'<button data-courrier-action="ouvrirMailReponse" style="{STYLE_BOUTON_BANDEAU}" '
                 f'title="Ouvrir le mail de réponse">{texte_rep}</button>'
             )
             bandeau = bandeau.replace(
@@ -32891,7 +33138,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             uid_str_courant = uid.decode() if isinstance(uid, bytes) else str(uid)
             if retour_info.get("uid_cible") == uid_str_courant:
                 bouton_retour = (
-                    f'<button onclick="retournerOrigine()" style="{STYLE_BOUTON_BANDEAU}" '
+                    f'<button data-courrier-action="retournerOrigine" style="{STYLE_BOUTON_BANDEAU}" '
                     f'title="Revenir au message qui contenait la mention \'Vous avez répondu\'">'
                     f'◀ Message d\'origine</button>'
                 )
@@ -32899,13 +33146,18 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             else:
                 self._retour_apres_ouverture_reponse = None
 
+        # Seuls les éléments enregistrés ainsi (script porteur du jeton CSP,
+        # donc impossible à imiter depuis le HTML du mail) déclenchent les
+        # actions data-courrier-action — voir _actionsCourrier.
+        reg_bandeau = ('<script nonce="' + JETON_CSP + '">window.__courrierRacine && '
+                       'window.__courrierRacine(document.currentScript.previousElementSibling);</script>')
         # Injecter le bandeau après <body> ou en tête, et envelopper le reste
         # du corps dans __corps_mail__ pour pouvoir le masquer/réafficher
         # d'un bloc lors de l'ouverture d'une PJ (cf. bouton CORPS)
         import re
         if re.search(r'<body[^>]*>', corps, re.IGNORECASE):
             corps = re.sub(
-                r'(<body[^>]*>)', r'\1' + bandeau + '<div id="__corps_mail__">',
+                r'(<body[^>]*>)', r'\1' + bandeau + reg_bandeau + '<div id="__corps_mail__">',
                 corps, count=1, flags=re.IGNORECASE
             )
             if re.search(r'</body>', corps, re.IGNORECASE):
@@ -32913,7 +33165,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             else:
                 corps = corps + '</div>'
         else:
-            corps = bandeau + '<div id="__corps_mail__">' + corps + '</div>'
+            corps = bandeau + reg_bandeau + '<div id="__corps_mail__">' + corps + '</div>'
 
         # Boutons flottants Haut/Bas (11/08/2026, demandé par l'utilisateur
         # — même principe que WordPress) : n'apparaissent que si le mail
@@ -32932,8 +33184,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         # __bandeau_entete__) plutôt qu'un décalage fixe côté Python.
         boutons_nav_scroll = """
 <div id="__nav_scroll__" style="position:fixed; right:14px; top:14px; z-index:9999; display:none; flex-direction:column; gap:6px;">
-  <button onclick="window.scrollTo({top:0, behavior:'smooth'});" title="Haut de la page" style="width:32px; height:32px; border-radius:50%; border:none; background:#A52A2A; color:white; font-size:14px; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,0.4);">▲</button>
-  <button onclick="window.scrollTo({top:document.body.scrollHeight, behavior:'smooth'});" title="Bas de la page" style="width:32px; height:32px; border-radius:50%; border:none; background:#A52A2A; color:white; font-size:14px; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,0.4);">▼</button>
+  <button data-courrier-action="hautPage" title="Haut de la page" style="width:32px; height:32px; border-radius:50%; border:none; background:#A52A2A; color:white; font-size:14px; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,0.4);">▲</button>
+  <button data-courrier-action="basPage" title="Bas de la page" style="width:32px; height:32px; border-radius:50%; border:none; background:#A52A2A; color:white; font-size:14px; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,0.4);">▼</button>
 </div>
 <script>
 (function() {
@@ -32985,6 +33237,9 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 })();
 </script>
 """
+        boutons_nav_scroll = boutons_nav_scroll.replace(
+            "<script>", '<script nonce="' + JETON_CSP + '">\nwindow.__courrierRacine && '
+            'window.__courrierRacine(document.currentScript.previousElementSibling);', 1)
         if re.search(r'</body>', corps, re.IGNORECASE):
             corps = re.sub(r'</body>', boutons_nav_scroll + '</body>', corps, count=1, flags=re.IGNORECASE)
         else:
@@ -33051,9 +33306,54 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         # Ctrl+A, Ctrl+R) — voir PontLecture et CefKeyboardHandler (déplacé
         # côté JS ici).
         script_pont = """
-<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-<script>
+<script src="qrc:///qtwebchannel/qwebchannel.js" nonce="__JETON_CSP__"></script>
+<script nonce="__JETON_CSP__">
   var pyBridge = null;
+
+  // Boutons de COURRIER (bandeau, bloc PJ, Haut/Bas) sans onclick="..."
+  // (bloqué par la CSP, voir CSP_PAGES_MAIL) : un écouteur unique lit
+  // data-courrier-action. Il n'agit que sur les éléments enregistrés par un
+  // script de COURRIER (__courrierRacine) : un mail qui imiterait le balisage
+  // de nos boutons n'obtient rien.
+  var _racinesCourrier = new WeakSet();
+  window.__courrierRacine = function(el) { if (el) _racinesCourrier.add(el); };
+  function _estElementCourrier(el) {
+      for (var n = el; n; n = n.parentElement) { if (_racinesCourrier.has(n)) return true; }
+      return false;
+  }
+  var _actionsCourrier = {
+      copier: function(el) {
+          var ta = document.createElement('textarea');
+          ta.value = document.body.innerText;
+          document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+          document.body.removeChild(ta);
+          el.innerText = '✓ Copié';
+          setTimeout(function() { el.innerText = 'COPIER'; }, 2000);
+      },
+      recharger: function() { if (pyBridge) pyBridge.recharger_mail(); },
+      pdf: function() {
+          var s = document.getElementById('__bandeau_sujet__');
+          if (pyBridge) pyBridge.imprimer_pdf(s ? s.innerText : '');
+      },
+      ouvrirMailReponse: function() { ouvrirMailReponse(); },
+      retournerOrigine: function() { retournerOrigine(); },
+      hautPage: function() { window.scrollTo({top: 0, behavior: 'smooth'}); },
+      basPage: function() { window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'}); },
+      ouvrirPJ: function(el) { if (window.ouvrirPJ) window.ouvrirPJ(parseInt(el.dataset.index, 10)); },
+      ouvrirPJExterne: function(el) { if (window.ouvrirPJExterne) window.ouvrirPJExterne(parseInt(el.dataset.index, 10)); },
+      enregistrerPJ: function() { if (window.enregistrerPJ) window.enregistrerPJ(); },
+      enregistrerTout: function() { if (window.enregistrerTout) window.enregistrerTout(); },
+      revenirCorps: function() { if (window.revenirCorps) window.revenirCorps(); },
+      basculerRepli: function() { if (window.__pjBasculerRepli) window.__pjBasculerRepli(); }
+  };
+  document.addEventListener('click', function(e) {
+      var el = e.target.closest ? e.target.closest('[data-courrier-action]') : null;
+      if (!el || !_estElementCourrier(el)) return;
+      var nom = el.dataset.courrierAction;
+      if (!Object.prototype.hasOwnProperty.call(_actionsCourrier, nom)) return;
+      e.preventDefault();
+      _actionsCourrier[nom](el);
+  });
   new QWebChannel(qt.webChannelTransport, function(channel) {
       pyBridge = channel.objects.pyBridge;
       if (document.readyState === 'complete') { _mesurerRenduVisuel(); }
@@ -33178,7 +33478,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
   // tout souci d'échappement avec des noms contenant apostrophes/guillemets.
   document.addEventListener('click', function(e) {
     var el = e.target.closest ? e.target.closest('.adr-carnet') : null;
-    if (el && pyBridge) {
+    if (el && pyBridge && _estElementCourrier(el)) {
       pyBridge.ouvrirAdresseCliquee(el.dataset.adresse || '', el.dataset.nom || '');
     }
   });
@@ -33195,8 +33495,18 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             )
         else:
             _icone_img_html = '<span style="font-size:18px;color:#A52A2A;">&#11015;</span>'  # repli texte si le PNG est absent
-        script_pont = script_pont.replace("__ICONE_IMG_HTML__", _icone_img_html)
+        script_pont = script_pont.replace("__ICONE_IMG_HTML__", _icone_img_html).replace("__JETON_CSP__", JETON_CSP)
         html_force = re.sub(r'(<meta charset="utf-8">)', r'\1' + script_pont.replace('\\', '\\\\'), html_force, count=1)
+        # Politique de sécurité (voir CSP_PAGES_MAIL) : posée avant tout le
+        # reste du document, pour qu'aucun script du mail placé tôt dans son
+        # <head> ne s'exécute avant elle. Juste après un <!DOCTYPE> éventuel,
+        # pour ne pas faire basculer la page en mode de compatibilité.
+        meta_csp = '<meta http-equiv="Content-Security-Policy" content="' + CSP_PAGES_MAIL + '">'
+        m_doctype = re.match(r'\s*<!DOCTYPE[^>]*>', html_force, re.IGNORECASE)
+        if m_doctype:
+            html_force = html_force[:m_doctype.end()] + meta_csp + html_force[m_doctype.end():]
+        else:
+            html_force = meta_csp + html_force
         # Supprimer le fichier d'aperçu précédent avant d'en écrire un nouveau :
         # sans ça, chaque affichage de mail laissait un .html orphelin dans le
         # dossier temporaire, jamais nettoyé (potentiellement des milliers de
@@ -34050,7 +34360,15 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         if not os.path.exists(chemin_source):
             self._statut_temporaire("  Échec du téléchargement de l'image (fichier introuvable).")
             return
-        extension = os.path.splitext(chemin_source)[1] or ".jpg"
+        # Sécurité (09/10/2026) : l'appel vient du JS de la page (pyBridge) —
+        # ne copier que depuis les dossiers d'images de COURRIER, jamais un
+        # fichier quelconque du disque désigné par un script de mail.
+        reel = os.path.normcase(os.path.realpath(chemin_source))
+        if not any(reel.startswith(os.path.normcase(os.path.realpath(d)) + os.sep)
+                   for d in (DOSSIER_CACHE_IMAGES, DOSSIER_APERCU)):
+            print(f"[SECURITE] Copie refusée hors du cache d'images : {chemin_source}")
+            return
+        extension = _extension_sure(chemin_source) or ".jpg"
         nom = f"image_{_dt.datetime.now().strftime('%Y-%m-%d_%H%M%S')}{extension}"
         chemin = os.path.join(dossier, nom)
         base_chemin, ext_chemin = os.path.splitext(chemin)

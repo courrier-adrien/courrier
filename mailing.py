@@ -42,12 +42,44 @@ STYLE = """
     QComboBox QAbstractItemView { background-color: #1e1e1e; color: white; selection-background-color: #A52A2A; }
 """
 
+def _dechiffrer_mdp(valeur):
+    """Mot de passe chiffré par COURRIER (DPAPI Windows, voir
+    chiffrer_secret dans courrier.py — même entropie obligatoire)."""
+    import base64, ctypes
+
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    donnees = base64.b64decode(valeur[len("dpapi:"):])
+    t1 = ctypes.create_string_buffer(donnees, len(donnees))
+    t2 = ctypes.create_string_buffer(b"COURRIER-comptes-v1", 19)
+    entree = _BLOB(len(donnees), ctypes.cast(t1, ctypes.POINTER(ctypes.c_char)))
+    entropie = _BLOB(19, ctypes.cast(t2, ctypes.POINTER(ctypes.c_char)))
+    sortie = _BLOB()
+    if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(entree), None, ctypes.byref(entropie),
+                                                    None, None, 0x1, ctypes.byref(sortie)):
+        raise OSError("DPAPI : déchiffrement impossible")
+    try:
+        return ctypes.string_at(sortie.pbData, sortie.cbData).decode("utf-8")
+    finally:
+        ctypes.windll.kernel32.LocalFree(sortie.pbData)
+
 def charger_comptes():
     try:
         with open(FICHIER_COMPTES, encoding="utf-8") as f:
-            return json.load(f)
+            comptes = json.load(f)
     except Exception:
         return []
+    for c in comptes:
+        if isinstance(c, dict) and c.get("mdp_chiffre"):
+            try:
+                c["mdp"] = _dechiffrer_mdp(c["mdp_chiffre"])
+            except Exception as e:
+                print(f"Mot de passe illisible pour {c.get('adresse', '?')} : {e}")
+                c["mdp"] = ""
+        if isinstance(c, dict):
+            c.setdefault("mdp", "")
+    return comptes
 
 def charger_carnet():
     """Carnet d'adresses de COURRIER : {"dossiers": [...], "contacts": [{"nom", "email", "dossier"}, ...]}"""
