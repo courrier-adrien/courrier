@@ -1259,14 +1259,37 @@ def dechiffrer_secret(valeur):
     import base64
     return _dpapi(base64.b64decode(valeur[len(PREFIXE_DPAPI):]), False).decode("utf-8")
 
+import threading as _threading_secrets
+# Sérialise lectures et écritures des fichiers de secrets (comptes.json,
+# jetons OAuth). Bug du 09/10/2026 : au premier lancement après le
+# chiffrement, plusieurs threads Graph ont migré le même cache OAuth en
+# même temps via le même ".tmp" — WinError 32, et ces threads se sont
+# retrouvés sans jeton.
+_VERROU_FICHIERS_SECRETS = _threading_secrets.RLock()
+
 def _ecrire_fichier_atomique(chemin, texte):
     """Écrit via un fichier temporaire puis le renomme : un plantage en
     pleine écriture ne laisse jamais un fichier tronqué (perdre comptes.json
     coûterait désormais la ressaisie de tous les mots de passe)."""
-    tmp = chemin + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(texte)
-    os.replace(tmp, chemin)
+    tmp = f"{chemin}.{os.getpid()}.{_threading_secrets.get_ident()}.tmp"
+    with _VERROU_FICHIERS_SECRETS:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(texte)
+        for essai in range(10):
+            try:
+                os.replace(tmp, chemin)
+                return
+            except PermissionError:
+                # Fichier ouvert au même instant par un autre programme
+                # (antivirus, sauvegarde...) : Windows refuse le
+                # remplacement, on réessaie brièvement.
+                if essai == 9:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                    raise
+                time.sleep(0.05)
 
 def charger_comptes():
     if os.path.exists(FICHIER_COMPTES):
@@ -1408,7 +1431,7 @@ def _charger_cache_oauth(adresse):
     chemin = _chemin_cache_oauth(adresse)
     if os.path.exists(chemin):
         try:
-            with open(chemin, "r", encoding="utf-8") as f:
+            with _VERROU_FICHIERS_SECRETS, open(chemin, "r", encoding="utf-8") as f:
                 contenu = f.read()
             if contenu.startswith(PREFIXE_DPAPI):
                 contenu = dechiffrer_secret(contenu)
@@ -2011,17 +2034,31 @@ def _chemin_delta_dossier(compte, id_dossier):
     adresse = compte["adresse"].replace("@", "_at_")
     dossier_compte = os.path.join(DOSSIER_STORAGE, adresse)
     os.makedirs(dossier_compte, exist_ok=True)
-    nom_fichier = "_delta_link_" + re.sub(r'[^A-Za-z0-9_-]', '_', id_dossier)[:80] + ".txt"
-    return os.path.join(dossier_compte, nom_fichier)
+    # Identifiant complet, haché (09/10/2026) : il était tronqué à 80
+    # caractères, or tous les dossiers d'une boîte Outlook.com partagent un
+    # préfixe d'identifiant plus long que ça — tous les dossiers écrivaient
+    # donc dans LE MÊME fichier, et chacun interrogeait les changements du
+    # dossier synchronisé juste avant lui. La Boîte de réception ne voyait
+    # plus jamais ses nouveaux mails ("0 nouveau(x)" à chaque passage).
+    import hashlib
+    empreinte = hashlib.sha1(id_dossier.encode("utf-8")).hexdigest()[:20]
+    return os.path.join(dossier_compte, f"_delta_link_v2_{empreinte}.txt")
 
 def _lire_delta_dossier(compte, id_dossier):
     chemin = _chemin_delta_dossier(compte, id_dossier)
     if os.path.exists(chemin):
         try:
             with open(chemin, "r", encoding="utf-8") as f:
-                return f.read().strip() or None
+                lien = f.read().strip() or None
         except Exception:
             return None
+        # Garde-fou : un repère qui désigne un autre dossier est ignoré
+        # (repartir d'une synchronisation complète vaut mieux que de rater
+        # des mails sans le savoir).
+        if lien and id_dossier not in lien:
+            print(f"[SYNCHRO-GRAPH] repère d'un autre dossier ignoré pour {id_dossier[-12:]}")
+            return None
+        return lien
     return None
 
 def _ecrire_delta_dossier(compte, id_dossier, delta_link):
@@ -2338,6 +2375,9 @@ class SynchroniseurGraph(QThread):
                 for i_dossier, (nom_dossier, id_dossier) in enumerate(dossiers):
                     if not self._actif:
                         break
+                    moteur_activite(adresse, "synchro_graph",
+                                    f"Synchronisation Microsoft — dossier {i_dossier + 1}/{nb_dossiers_total}",
+                                    i_dossier + 1, nb_dossiers_total)
                     try:
                         uids_locaux = uids_en_cache(compte, id_dossier)
 
@@ -2369,9 +2409,12 @@ class SynchroniseurGraph(QThread):
                         ids_serveur = []
                         ids_supprimes = []
                         nouveau_delta_link = None
+                        reprise = None
                         try:
                             while lien:
-                                reponse = _appel_graph(compte, "GET", lien, params=params)
+                                # 60 s (10/10/2026) : sur un gros dossier, Microsoft
+                                # met parfois plus de 20 s à servir une page.
+                                reponse = _appel_graph(compte, "GET", lien, params=params, timeout=60)
                                 params = None
                                 for m in reponse.get("value", []):
                                     if "@removed" in m:
@@ -2400,12 +2443,34 @@ class SynchroniseurGraph(QThread):
                                 except Exception:
                                     pass
                                 continue
-                            raise
+                            if not (ids_serveur or ids_supprimes) or not lien:
+                                raise
+                            # Page en échec au milieu d'une longue synchronisation
+                            # (10/10/2026) : on garde ce qui est déjà reçu, et la
+                            # page en cours sert de point de reprise au passage
+                            # suivant — avant, tout recommençait depuis le début
+                            # et un gros dossier n'aboutissait jamais.
+                            reprise = lien if lien.startswith("http") else URL_GRAPH_BASE + lien
+                            print(f"[SYNCHRO-GRAPH] {adresse} — {nom_dossier} — page en échec "
+                                  f"({type(e).__name__}), {len(ids_serveur)} mail(s) déjà reçus traités, "
+                                  f"reprise au prochain passage")
+                            moteur_evenement(adresse, f"Microsoft lent : synchronisation de "
+                                             f"« {nom_dossier} » reprise au prochain passage")
 
                         if nouveau_delta_link:
                             _ecrire_delta_dossier(compte, id_dossier, nouveau_delta_link)
+                        elif reprise:
+                            _ecrire_delta_dossier(compte, id_dossier, reprise)
 
-                        manquants = [i for i in ids_serveur if i not in uids_locaux]
+                        # Mails en attente de contenu (mode « en-têtes d'abord ») :
+                        # pas « manquants », RemplisseurCorps s'en charge ; et
+                        # retirés de l'index si Microsoft les signale supprimés.
+                        entetes_seuls = uids_entetes_seuls(compte, id_dossier)
+                        manquants = [i for i in ids_serveur
+                                     if i not in uids_locaux and i not in entetes_seuls]
+                        if entetes_seuls & set(ids_supprimes):
+                            retirer_entetes_seuls(compte, id_dossier, entetes_seuls & set(ids_supprimes))
+                        manquants = basculer_en_entetes_graph(compte, id_dossier, manquants)
 
                         # Suppressions signalées par delta — retrait direct
                         # du cache local, aucune supposition à faire.
@@ -2487,6 +2552,8 @@ class SynchroniseurGraph(QThread):
                             self.progression.emit(
                                 f"{adresse} — {nom_court} ({i + 1}/{total})", i + 1, total
                             )
+                            moteur_activite(adresse, "synchro_graph",
+                                            f"Synchronisation Microsoft — {nom_court}", i + 1, total)
                             try:
                                 msg_json = _appel_graph(compte, "GET", f"/me/messages/{id_msg}")
                                 m = _graph_message_vers_eml(compte, msg_json)
@@ -2535,6 +2602,8 @@ class SynchroniseurGraph(QThread):
             except Exception as e:
                 print(f"[SYNCHRO-GRAPH] {adresse} : {e}")
                 continue
+            finally:
+                moteur_fin(adresse, "synchro_graph")
         self.termine.emit()
 
 
@@ -6985,8 +7054,8 @@ class ChargeurNonLus(QThread):
                 # Seuls les mails COMPLETS sur le disque (.eml + .html) sont
                 # comptés — voir uids_complets_en_cache (définition unique,
                 # partagée avec les listes et la recherche).
-                uids_locaux = uids_complets_en_cache(compte, dossier_inbox)
                 meta_local, meta_fiable = lire_cache_meta(compte, dossier_inbox)
+                uids_locaux = uids_visibles_en_cache(compte, dossier_inbox, meta_local)
                 if not meta_fiable and uids_locaux:
                     # _meta.json existe mais illisible à cet instant (écriture
                     # concurrente, fichier corrompu...) : le traiter comme
@@ -7064,6 +7133,12 @@ class ChargeurDossiers(QThread):
             # Format IMAP LIST : (\Flags) "sep" "nom_dossier"
             # Le séparateur peut être "." (o2switch) ou "/" (Free, Gmail...) ou NIL
             _pat = _re.compile(r'\(.*?\)\s+"?([^"]*)"?\s+"?(.*?)"?\s*$')
+            # Dossiers \Noselect (10/10/2026, demandé par l'utilisateur) : pur
+            # conteneur qui ne peut contenir aucun mail, comme "[Gmail]" chez
+            # Gmail — affiché vide, il ne faisait que semer le doute. Masqué,
+            # sauf s'il porte des sous-dossiers rangés avec des points
+            # (arborescence o2switch), pour ne rien changer à leur présentation.
+            non_selectionnables = set()
             for d in dossiers:
                 if isinstance(d, bytes):
                     d = d.decode("utf-8", errors="replace")
@@ -7071,9 +7146,18 @@ class ChargeurDossiers(QThread):
                 if m:
                     nom_brut = m.group(2).strip().strip('"')
                     if nom_brut:
+                        m_drapeaux = _re.match(r'\((.*?)\)', d.strip())
+                        if m_drapeaux and _re.search(r'\\(Noselect|NonExistent)\b',
+                                                     m_drapeaux.group(1), _re.IGNORECASE):
+                            non_selectionnables.add(nom_brut)
                         nom_affiche = self._decoder_utf7(nom_brut)
                         noms_affiches.append(nom_affiche)
                         tuples.append((nom_affiche, nom_brut))
+            masques = {n for n in non_selectionnables
+                       if not any(b.startswith(n + ".") for _a, b in tuples)}
+            if masques:
+                tuples = [(a, b) for a, b in tuples if b not in masques]
+                noms_affiches = [a for a, _b in tuples]
             self.dossiers_charges.emit(noms_affiches)
             self.map_imap_pret.emit(tuples)
         except Exception as e:
@@ -7294,6 +7378,98 @@ class RenommeurDossierGraph(QThread):
         except Exception as e:
             self.termine.emit(False, str(e))
 
+# ── Noms de fichiers des mails Outlook (Graph) : sensibles à la casse ────
+# (10/10/2026) Les identifiants Graph distinguent majuscules et minuscules
+# ("…YO8xwAA" ≠ "…YO8XwAA"), Windows non : deux mails différents tombaient sur
+# le MÊME fichier et s'écrasaient (2 103 mails touchés chez l'utilisateur, ex.
+# 7 Éléments envoyés invisibles car leur .html était celui d'un autre mail).
+# Pour un compte Graph, le nom de fichier = identifiant + "~" + 8 caractères
+# d'empreinte de l'identifiant EXACT : deux identifiants qui ne diffèrent que
+# par la casse donnent deux fichiers distincts. Les UID IMAP (des nombres)
+# ne changent pas. "~" n'apparaît jamais dans un identifiant (base64url).
+# RÈGLE : ne jamais fabriquer un nom de fichier de mail à la main — passer par
+# chemin_cache_eml ; et pour revenir d'un nom de fichier à l'identifiant,
+# uid_depuis_nom_fichier.
+def nom_fichier_uid(compte, uid):
+    uid = uid.decode() if isinstance(uid, bytes) else str(uid)
+    if compte.get("protocole") == "graph":
+        import hashlib
+        return f"{uid}~{hashlib.sha1(uid.encode('utf-8')).hexdigest()[:8]}"
+    return uid
+
+def uid_depuis_nom_fichier(nom_sans_extension):
+    return nom_sans_extension.split("~", 1)[0]
+
+def migrer_noms_fichiers_graph():
+    """Une seule fois par compte Graph (marqueur _noms_fichiers_v2) : renomme
+    le cache au nouveau format. Fichier sans ambiguïté (un seul identifiant
+    de l'index correspond, casse ignorée) : simple renommage, rien n'est
+    retéléchargé. Collision (plusieurs identifiants pour un même nom) : le
+    contenu est indémêlable — fichiers supprimés, et le repère de
+    synchronisation du dossier effacé pour que Microsoft renvoie tout le
+    dossier (les mails manquants sont alors retéléchargés, en mode
+    « en-têtes d'abord » s'ils sont nombreux)."""
+    import time as _t
+    for compte in list(COMPTES):
+        if compte.get("protocole") != "graph":
+            continue
+        base = os.path.join(DOSSIER_STORAGE, compte["adresse"].replace("@", "_at_"))
+        marqueur = os.path.join(base, "_noms_fichiers_v2")
+        if not os.path.isdir(base) or os.path.exists(marqueur):
+            continue
+        t0 = _t.time()
+        nb_renommes = nb_supprimes = 0
+        dossiers_a_resynchroniser = []
+        for dossier_safe in os.listdir(base):
+            chemin_dossier = os.path.join(base, dossier_safe)
+            if not os.path.isdir(chemin_dossier):
+                continue
+            try:
+                noms = os.listdir(chemin_dossier)
+                meta = charger_cache_meta(compte, dossier_safe)
+            except OSError:
+                continue
+            ids_par_cle = {}
+            for u in meta:
+                ids_par_cle.setdefault(u.lower(), []).append(u)
+            supprimes_ici = 0
+            for nom in noms:
+                racine, ext = os.path.splitext(nom)
+                if ext not in (".eml", ".html", ".incomplet", ".reply") or "~" in racine \
+                        or racine.startswith("_"):
+                    continue
+                candidats = ids_par_cle.get(racine.lower()) or [racine]
+                ancien = os.path.join(chemin_dossier, nom)
+                try:
+                    if len(candidats) == 1:
+                        nouveau = os.path.join(chemin_dossier, nom_fichier_uid(compte, candidats[0]) + ext)
+                        os.replace(ancien, nouveau)
+                        nb_renommes += 1
+                    else:
+                        os.remove(ancien)
+                        supprimes_ici += 1
+                except OSError as e:
+                    print(f"[MIGRATION-CASSE] {compte['adresse']} {dossier_safe} {nom} : {e}")
+            if supprimes_ici:
+                nb_supprimes += supprimes_ici
+                dossiers_a_resynchroniser.append(dossier_safe)
+                try:
+                    os.remove(_chemin_delta_dossier(compte, dossier_safe))
+                except OSError:
+                    pass
+        try:
+            with open(marqueur, "w", encoding="ascii") as f:
+                f.write(str(int(_t.time())))
+        except OSError:
+            pass
+        print(f"[MIGRATION-CASSE] {compte['adresse']} : {nb_renommes} fichier(s) renommé(s), "
+              f"{nb_supprimes} fichier(s) de mails en collision supprimé(s) — dossiers à "
+              f"resynchroniser : {len(dossiers_a_resynchroniser)} ({_t.time() - t0:.1f} s)")
+        if nb_supprimes:
+            moteur_evenement(compte["adresse"],
+                             f"Réparation du cache : {nb_supprimes // 2 or nb_supprimes} mail(s) "
+                             f"mélangé(s) retéléchargé(s) depuis Microsoft")
+
 def chemin_cache_eml(compte, dossier, uid):
     """Retourne le chemin du fichier .eml en cache."""
     adresse = compte["adresse"].replace("@", "_at_")
@@ -7301,7 +7477,7 @@ def chemin_cache_eml(compte, dossier, uid):
     dossier_cache = os.path.join(DOSSIER_STORAGE, adresse, dossier_safe)
     os.makedirs(dossier_cache, exist_ok=True)
     uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
-    return os.path.join(dossier_cache, f"{uid_str}.eml")
+    return os.path.join(dossier_cache, nom_fichier_uid(compte, uid_str) + ".eml")
 
 def lire_cache_eml(compte, dossier, uid):
     """Lit un .eml depuis le cache. Retourne bytes ou None."""
@@ -7427,19 +7603,24 @@ def lire_etat_incomplet(chemin_eml):
         if isinstance(etat, dict):
             return {"urls": list(etat.get("urls", [])),
                     "depuis": float(etat.get("depuis", mtime)),
-                    "echec": bool(etat.get("echec", False))}
+                    "echec": bool(etat.get("echec", False)),
+                    "provisoire": bool(etat.get("provisoire", False))}
     except Exception:
         pass
     return {"urls": [l for l in texte.splitlines() if l.strip()],
             "depuis": mtime, "echec": False}
 
-def ecrire_etat_incomplet(chemin_eml, urls, depuis, echec=False):
-    """Écrit (atomiquement) le marqueur .incomplet d'un mail listé avec défaut."""
+def ecrire_etat_incomplet(chemin_eml, urls, depuis, echec=False, provisoire=False):
+    """Écrit (atomiquement) le marqueur .incomplet d'un mail listé avec défaut.
+    provisoire=True : affichage immédiat d'un mail cliqué, images chargées
+    depuis Internet (voir generer_html_cache_eml) — ni bandeau ni indicateur,
+    ServiceCompletudeHtml le remplace par la version complète."""
     chemin = chemin_eml.replace(".eml", ".incomplet")
     tmp = f"{chemin}.{os.getpid()}.{_threading.get_ident()}.tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"urls": sorted(set(urls)), "depuis": depuis, "echec": bool(echec)}, f)
+            json.dump({"urls": sorted(set(urls)), "depuis": depuis, "echec": bool(echec),
+                       "provisoire": bool(provisoire)}, f)
         os.replace(tmp, chemin)
         return True
     except Exception:
@@ -7465,8 +7646,8 @@ def etats_incomplets_dossier(compte, dossier):
     for n in noms:
         if n.endswith(".incomplet"):
             etat = lire_etat_incomplet(os.path.join(dossier_cache, n[:-10] + ".eml"))
-            if etat is not None:
-                resultat[n[:-10]] = etat
+            if etat is not None and not etat.get("provisoire"):
+                resultat[uid_depuis_nom_fichier(n[:-10])] = etat
     return resultat
 
 def dossier_est_spam(dossier):
@@ -7999,7 +8180,7 @@ def type_image_reel(ct_declare, donnees):
         return "image/bmp"
     return None
 
-def generer_html_cache_eml(compte, dossier, uid_str, raw, forcer=False):
+def generer_html_cache_eml(compte, dossier, uid_str, raw, forcer=False, provisoire=False):
     """Génère le .html pré-rendu d'un mail (photos incluses) à partir de son
     contenu brut (.eml). Retourne True si un .html a été écrit, False sinon.
 
@@ -8020,6 +8201,11 @@ def generer_html_cache_eml(compte, dossier, uid_str, raw, forcer=False):
     listé avec une photo manquante qu'un mail invisible indéfiniment (c'est
     le bug "Acosta unbeatable in Austria" invisible dans MGP 1).
 
+    provisoire=True (09/10/2026, mail cliqué en mode « en-têtes d'abord ») :
+    les images distantes ne sont PAS téléchargées — elles restent des liens
+    que le panneau de lecture charge directement, le mail s'affiche donc tout
+    de suite ; marqueur .incomplet "provisoire" (sans bandeau), et
+    ServiceCompletudeHtml écrit ensuite la version complète sur le disque.
     Un échec NON réseau (MIME illisible...) est déterministe — réessayer ne
     servirait à rien : on écrit alors un .html de secours (texte brut) plutôt
     que de laisser le mail invisible, en le journalisant.
@@ -8069,11 +8255,14 @@ def generer_html_cache_eml(compte, dossier, uid_str, raw, forcer=False):
                       f"{len(_cids_orphelins)} référence(s) cid: non résolue(s) "
                       f"({sorted(_cids_orphelins)}) — image absente du message ou type "
                       f"non reconnu, voir images_cid ci-dessus")
-            corps = incorporer_images_distantes(corps, rapport=rapport, dossier=dossier)
+            if provisoire:
+                rapport = re.findall(r"src=[\"'](https?://[^\"']+)", corps)
+            else:
+                corps = incorporer_images_distantes(corps, rapport=rapport, dossier=dossier)
         except Exception as e_html:
             derniere_erreur = e_html
             continue
-        if rapport and not forcer:
+        if rapport and not forcer and not provisoire:
             print(f"[HTML-INCOMPLET] {compte.get('adresse','?')} {dossier} UID={uid_str} : "
                   f"{len(set(rapport))} image(s) pas encore téléchargée(s) (réseau) — "
                   f"mail non listé, nouvelle tentative automatique")
@@ -8083,7 +8272,13 @@ def generer_html_cache_eml(compte, dossier, uid_str, raw, forcer=False):
                   f"écriture du .html impossible (disque ?) — nouvelle tentative automatique")
             return False
         try:
-            if rapport:
+            if rapport and provisoire:
+                import time as _t_gen
+                ecrire_etat_incomplet(chemin_eml, rapport, _t_gen.time(), provisoire=True)
+                print(f"[HTML-PROVISOIRE] {compte.get('adresse','?')} {dossier} UID={uid_str} : "
+                      f"affiché tout de suite, {len(set(rapport))} image(s) chargée(s) depuis "
+                      f"Internet en attendant la version complète")
+            elif rapport:
                 # "depuis" (début de la phase 2) est conservé d'un passage à
                 # l'autre : c'est lui qui fixe la fin des 60 min de réessais.
                 import time as _t_gen
@@ -8183,6 +8378,12 @@ def marquer_tombes_cache(compte, dossier, uids):
                 tombes[_uid_en_texte(u)] = maintenant
     except Exception:
         pass
+    # Mail du mode « en-têtes d'abord » sans contenu : rien d'autre ne
+    # l'effacerait de _meta.json, il reviendrait à l'expiration de la tombe.
+    try:
+        retirer_entetes_seuls(compte, dossier, {_uid_en_texte(u) for u in uids}, silencieux=True)
+    except Exception:
+        pass
 
 def liberer_tombes_cache(compte, dossier, uids):
     """Le serveur n'a PAS supprimé/déplacé ces mails (copie refusée, connexion
@@ -8224,7 +8425,7 @@ def purger_fantomes_cache(compte, dossier):
     dossier_cache = os.path.join(DOSSIER_STORAGE, adresse, dossier_safe)
     for u in tombes:
         for ext in (".eml", ".html", ".incomplet"):
-            chemin = os.path.join(dossier_cache, u + ext)
+            chemin = chemin_cache_eml(compte, dossier, u)[:-4] + ext
             try:
                 if os.path.exists(chemin):
                     os.remove(chemin)
@@ -8248,7 +8449,7 @@ def uids_en_cache(compte, dossier):
     dossier_cache = os.path.join(DOSSIER_STORAGE, adresse, dossier_safe)
     if not os.path.exists(dossier_cache):
         return set()
-    return {f[:-4] for f in os.listdir(dossier_cache) if f.endswith(".eml")}
+    return {uid_depuis_nom_fichier(f[:-4]) for f in os.listdir(dossier_cache) if f.endswith(".eml")}
 
 def uids_complets_en_cache(compte, dossier):
     """UIDs des mails COMPLETS sur le disque (19/09/2026, principe de COURRIER
@@ -8274,8 +8475,304 @@ def uids_complets_en_cache(compte, dossier):
         return set()
     # Moins les mails supprimés/déplacés par l'utilisateur (voir les "pierres
     # tombales" ci-dessus) : un fichier fantôme ne doit jamais être listé.
-    return ({n[:-4] for n in noms if n.endswith(".eml") and (n[:-4] + ".html") in noms}
+    return ({uid_depuis_nom_fichier(n[:-4]) for n in noms
+             if n.endswith(".eml") and (n[:-4] + ".html") in noms}
             - uids_tombes_cache(compte, dossier))
+
+# ── CONSOLE : registre de ce que fait le moteur (10/10/2026) ───────────────
+# Poste de contrôle demandé par l'utilisateur : chaque service déclare ici, en
+# clair, ce qu'il fait pour chaque compte ; la fenêtre CONSOLE ne fait que
+# lire (instantane_moteur), une fois par seconde. Écritures minuscules sous
+# verrou : aucun effet mesurable sur les services. Un service qui ajoute une
+# activité doit la terminer (moteur_fin) ; une activité qui n'est plus mise à
+# jour depuis DUREE_VIE_ACTIVITE_SEC est considérée comme terminée (thread
+# arrêté net, exception...).
+DUREE_VIE_ACTIVITE_SEC = 180
+_ACTIVITES_MOTEUR = {}     # adresse -> {cle: {"texte", "fait", "total", "debut", "maj"}}
+_EVENEMENTS_MOTEUR = {}    # adresse -> [(horodatage, texte)], le plus récent à la fin
+_ERREURS_MOTEUR = {}       # adresse -> (horodatage, texte)
+_VERROU_MOTEUR = _threading.Lock()
+
+def moteur_activite(adresse, cle, texte, fait=None, total=None):
+    import time as _t
+    with _VERROU_MOTEUR:
+        act = _ACTIVITES_MOTEUR.setdefault(adresse, {})
+        precedente = act.get(cle)
+        act[cle] = {"texte": texte, "fait": fait, "total": total,
+                    "debut": precedente["debut"] if precedente else _t.time(), "maj": _t.time()}
+
+def moteur_fin(adresse, cle):
+    with _VERROU_MOTEUR:
+        (_ACTIVITES_MOTEUR.get(adresse) or {}).pop(cle, None)
+
+def moteur_evenement(adresse, texte):
+    import time as _t
+    with _VERROU_MOTEUR:
+        liste = _EVENEMENTS_MOTEUR.setdefault(adresse, [])
+        liste.append((_t.time(), texte))
+        del liste[:-20]
+
+def moteur_erreur(adresse, texte):
+    """texte=None : plus d'erreur (connexion rétablie)."""
+    import time as _t
+    with _VERROU_MOTEUR:
+        if texte is None:
+            _ERREURS_MOTEUR.pop(adresse, None)
+        elif adresse not in _ERREURS_MOTEUR:
+            _ERREURS_MOTEUR[adresse] = (_t.time(), texte)
+
+def instantane_moteur():
+    import time as _t
+    limite = _t.time() - DUREE_VIE_ACTIVITE_SEC
+    with _VERROU_MOTEUR:
+        return ({a: {c: dict(v) for c, v in acts.items() if v["maj"] >= limite}
+                 for a, acts in _ACTIVITES_MOTEUR.items()},
+                {a: list(e) for a, e in _EVENEMENTS_MOTEUR.items()},
+                dict(_ERREURS_MOTEUR))
+
+# ── Mode « en-têtes d'abord » (09/10/2026, décidé avec l'utilisateur) ─────
+# Deux modes de chargement :
+#   1. « en-têtes d'abord » — création d'un compte (installation comprise),
+#      compte non synchronisé depuis JOURS_INACTIVITE_ENTETES jours, ou plus
+#      de SEUIL_MANQUANTS_ENTETES mails manquants dans un dossier : les
+#      en-têtes de tous les mails sont récupérés d'abord (visibles et comptés
+#      tout de suite), les contenus suivent en arrière-plan (RemplisseurCorps,
+#      plus récents d'abord, priorité au mail cliqué) ;
+#   2. « au fil de l'eau » — tout le reste : un mail n'apparaît que complet sur
+#      le disque (règle du 19/09/2026, uids_complets_en_cache).
+# Un mail du mode 1 vit dans _meta.json avec ses en-têtes et "corps": False,
+# sans .eml, jusqu'à ce que RemplisseurCorps l'ait téléchargé.
+SEUIL_MANQUANTS_ENTETES = 200
+JOURS_INACTIVITE_ENTETES = 10
+
+def uids_entetes_seuls(compte, dossier, meta=None, a_telecharger=False):
+    """Mails du mode « en-têtes d'abord » pas encore complets ("corps": False
+    dans _meta.json). Ils restent visibles jusqu'à ce que le mail soit
+    complet, y compris entre l'arrivée du contenu et la fin de la mise en
+    page (photos) — sinon ils disparaîtraient quelques minutes de la liste.
+    a_telecharger=True : seulement ceux dont le contenu n'est pas encore sur
+    le disque (travail de RemplisseurCorps)."""
+    if meta is None:
+        meta = charger_cache_meta(compte, dossier)
+    candidats = {u for u, info in meta.items()
+                 if isinstance(info, dict) and info.get("corps") is False}
+    if not candidats:
+        return set()
+    candidats -= uids_tombes_cache(compte, dossier)
+    if a_telecharger:
+        candidats -= uids_en_cache(compte, dossier)
+    return candidats
+
+def uids_visibles_en_cache(compte, dossier, meta=None):
+    """Ce que l'utilisateur voit (listes, compteurs, recherche) : les mails
+    complets sur le disque ET ceux du mode « en-têtes d'abord »."""
+    return uids_complets_en_cache(compte, dossier) | uids_entetes_seuls(compte, dossier, meta)
+
+def uids_connus_en_cache(compte, dossier):
+    """Pour décider quoi télécharger : déjà sur le disque, ou confié à
+    RemplisseurCorps. Remplace uids_en_cache dans les comparaisons avec le
+    serveur, sinon chaque relève retéléchargerait d'un bloc tous les mails en
+    attente de contenu."""
+    return uids_en_cache(compte, dossier) | uids_entetes_seuls(compte, dossier)
+
+# Déclencheurs du mode « en-têtes d'abord » (étape 5, 09/10/2026) :
+#   - nouveau compte : aucun mail encore sur le disque (installation du
+#     logiciel ou création d'un compte) ;
+#   - compte non synchronisé depuis JOURS_INACTIVITE_ENTETES jours
+#     (_derniere_synchro.txt, mis à jour à chaque comparaison serveur/cache) ;
+#   - plus de SEUIL_MANQUANTS_ENTETES mails manquants dans un dossier.
+# Les deux premiers ouvrent une fenêtre de DUREE_FENETRE_ENTETES_SEC pendant
+# laquelle tous les dossiers du compte sont traités en mode 1 (un passage de
+# synchronisation parcourt les dossiers les uns après les autres).
+DUREE_FENETRE_ENTETES_SEC = 3600
+_FENETRE_ENTETES = {}          # adresse -> horodatage de fin
+_VERROU_FENETRE_ENTETES = _threading.Lock()
+
+def _chemin_derniere_synchro(compte):
+    return os.path.join(DOSSIER_STORAGE, compte["adresse"].replace("@", "_at_"),
+                        "_derniere_synchro.txt")
+
+def _compte_sans_aucun_mail(compte):
+    base = os.path.join(DOSSIER_STORAGE, compte["adresse"].replace("@", "_at_"))
+    try:
+        for d in os.scandir(base):
+            if d.is_dir():
+                with os.scandir(d.path) as it:
+                    if any(f.name.endswith(".eml") for f in it):
+                        return False
+    except OSError:
+        pass
+    return True
+
+def _nom_dossier_lisible(dossier):
+    """« [Gmail]/Messages envoy&AOk-s » -> « Messages envoyés » (dernier
+    segment, Modified UTF-7 décodé) ; un identifiant Graph reste tel quel."""
+    nom = re.split(r"[./]", dossier)[-1] if len(dossier) < 60 else "dossier Outlook"
+    try:
+        import base64 as _b64
+        return re.sub(r"&([^-]*)-", lambda m: "&" if not m.group(1) else _b64.b64decode(
+            m.group(1).replace(",", "/") + "=" * (-len(m.group(1)) % 4)).decode("utf-16-be"), nom)
+    except Exception:
+        return nom
+
+def mode_entetes_pour_compte(compte):
+    """Vrai si le compte est dans une fenêtre « en-têtes d'abord » (nouveau
+    compte ou longue inactivité). Met à jour la date de dernière synchro."""
+    import time as _t
+    adresse = compte["adresse"]
+    maintenant = _t.time()
+    with _VERROU_FENETRE_ENTETES:
+        fin = _FENETRE_ENTETES.get(adresse)
+        if fin is None:
+            raison = None
+            if _compte_sans_aucun_mail(compte):
+                raison = "nouveau compte"
+            else:
+                try:
+                    derniere = os.path.getmtime(_chemin_derniere_synchro(compte))
+                    if maintenant - derniere > JOURS_INACTIVITE_ENTETES * 86400:
+                        raison = f"pas de synchronisation depuis {int((maintenant - derniere) // 86400)} jours"
+                except OSError:
+                    pass   # première version avec ce repère : pas d'inactivité connue
+            fin = maintenant + DUREE_FENETRE_ENTETES_SEC if raison else 0.0
+            _FENETRE_ENTETES[adresse] = fin
+            if raison:
+                print(f"[ENTETES-D-ABORD] {adresse} : mode « en-têtes d'abord » pour 1 h ({raison})")
+    try:
+        chemin = _chemin_derniere_synchro(compte)
+        os.makedirs(os.path.dirname(chemin), exist_ok=True)
+        with open(chemin, "w", encoding="ascii") as f:
+            f.write(str(int(maintenant)))
+    except OSError:
+        pass
+    return maintenant < fin
+
+def recuperer_entetes_imap(conn, uids):
+    """En-têtes + drapeaux de uids (dossier déjà sélectionné), par paquets de
+    500 : {uid: {de, a, sujet, date, a_pj, lu, epingle, repondu}}."""
+    resultat = {}
+    for i in range(0, len(uids), 500):
+        paquet = uids[i:i + 500]
+        st, d = conn.uid('fetch', ",".join(paquet),
+                         "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE CONTENT-TYPE)])")
+        if st != "OK" or not d:
+            continue
+        for j, part in enumerate(d):
+            if not isinstance(part, tuple):
+                continue
+            prefixe = part[0] if isinstance(part[0], bytes) else str(part[0]).encode()
+            # Selon le serveur, FLAGS arrive avant ou après le bloc d'en-têtes
+            suite = d[j + 1] if j + 1 < len(d) and isinstance(d[j + 1], bytes) else b""
+            m_uid = re.search(rb"UID\s+(\d+)", prefixe + b" " + suite)
+            if not m_uid:
+                continue
+            m_flags = re.search(rb"FLAGS\s*\(([^)]*)\)", prefixe + b" " + suite)
+            flags = m_flags.group(1) if m_flags else b""
+            msg = email.message_from_bytes(part[1] or b"")
+            resultat[m_uid.group(1).decode()] = {
+                "de": decoder_entete(msg.get("From", "")),
+                "a": decoder_entete(msg.get("To", "")),
+                "sujet": decoder_entete(msg.get("Subject", "(sans sujet)")),
+                "date": msg.get("Date", ""),
+                "a_pj": "multipart/mixed" in (msg.get("Content-Type", "") or "").lower(),
+                "lu": b"\\Seen" in flags,
+                "epingle": b"\\Flagged" in flags,
+                "repondu": b"\\Answered" in flags,
+            }
+    return resultat
+
+def basculer_en_entetes(compte, dossier, conn, manquants):
+    """Point de décision unique entre les deux modes, appelé partout où une
+    synchro IMAP compare le serveur et le cache. En mode « en-têtes
+    d'abord » : en-têtes récupérés tout de suite (mails visibles), contenus
+    confiés à RemplisseurCorps. Retourne les mails qui restent à télécharger
+    en entier, tout de suite (mode « au fil de l'eau »)."""
+    manquants = list(manquants)
+    fenetre = mode_entetes_pour_compte(compte)
+    if not manquants or not (fenetre or len(manquants) > SEUIL_MANQUANTS_ENTETES):
+        return manquants
+    try:
+        entetes = recuperer_entetes_imap(conn, manquants)
+    except Exception as e:
+        print(f"[ENTETES-D-ABORD] {compte.get('adresse', '?')} {dossier} : en-têtes "
+              f"indisponibles ({type(e).__name__}: {e}) — téléchargement complet classique")
+        return manquants
+    nb = enregistrer_entetes_seuls(compte, dossier, entetes)
+    if nb:
+        moteur_evenement(compte["adresse"], f"{nb} en-tête(s) récupéré(s) d'un coup — "
+                         f"{_nom_dossier_lisible(dossier)}, contenus en arrière-plan")
+    print(f"[ENTETES-D-ABORD] {compte.get('adresse', '?')} {dossier} : {nb} mail(s) "
+          f"visible(s) tout de suite sur {len(manquants)} manquant(s), contenus en arrière-plan"
+          + ("" if fenetre else f" (plus de {SEUIL_MANQUANTS_ENTETES} manquants)"))
+    return [u for u in manquants if u not in entetes]
+
+def _entetes_depuis_json_graph(m):
+    """En-têtes affichés d'un message Graph, au même format que ceux d'un mail
+    téléchargé en entier (_graph_message_vers_eml + decoder_entete)."""
+    import email.utils as _eu
+    import datetime as _dt
+
+    def _adr(e):
+        e = (e or {}).get("emailAddress") or {}
+        if not e.get("address"):
+            return ""
+        return decoder_entete(_eu.formataddr((e.get("name", ""), e["address"])))
+
+    date = ""
+    brute = m.get("sentDateTime") or m.get("receivedDateTime")
+    if brute:
+        try:
+            date = _eu.formatdate(_dt.datetime.fromisoformat(brute.replace("Z", "+00:00")).timestamp(),
+                                  localtime=True)
+        except Exception:
+            date = brute
+    return {
+        "de": _adr(m.get("from")),
+        "a": ", ".join(x for x in (_adr(d) for d in (m.get("toRecipients") or [])) if x),
+        "sujet": m.get("subject", "") or "(sans objet)",
+        "date": date,
+        "a_pj": bool(m.get("hasAttachments")),
+        "lu": bool(m.get("isRead")),
+        "epingle": ((m.get("flag") or {}).get("flagStatus") == "flagged"),
+    }
+
+def basculer_en_entetes_graph(compte, id_dossier, manquants):
+    """Équivalent Graph de basculer_en_entetes : en-têtes de tout le dossier
+    en quelques requêtes (500 mails chacune), contenus à RemplisseurCorps.
+    Retourne les mails à télécharger en entier tout de suite."""
+    manquants = list(manquants)
+    fenetre = mode_entetes_pour_compte(compte)
+    if not manquants or not (fenetre or len(manquants) > SEUIL_MANQUANTS_ENTETES):
+        return manquants
+    voulus = set(manquants)
+    entetes = {}
+    try:
+        lien = f"/me/mailFolders/{id_dossier}/messages"
+        params = {"$select": "id,subject,from,toRecipients,sentDateTime,receivedDateTime,"
+                             "isRead,hasAttachments,flag",
+                  "$top": "500"}
+        while lien and len(entetes) < len(voulus):
+            reponse = _appel_graph(compte, "GET", lien, params=params)
+            params = None
+            for m in reponse.get("value", []):
+                if m.get("id") in voulus:
+                    entetes[m["id"]] = _entetes_depuis_json_graph(m)
+            suite = reponse.get("@odata.nextLink")
+            lien = (suite[len(URL_GRAPH_BASE):] if suite and suite.startswith(URL_GRAPH_BASE) else suite)
+    except Exception as e:
+        print(f"[ENTETES-D-ABORD] {compte.get('adresse', '?')} : en-têtes Graph indisponibles "
+              f"({type(e).__name__}: {e}) — téléchargement complet classique")
+        if not entetes:
+            return manquants
+    nb = enregistrer_entetes_seuls(compte, id_dossier, entetes)
+    if nb:
+        moteur_evenement(compte["adresse"], f"{nb} en-tête(s) récupéré(s) d'un coup, "
+                         f"contenus en arrière-plan")
+    print(f"[ENTETES-D-ABORD] {compte.get('adresse', '?')} {id_dossier[-12:]} : {nb} mail(s) "
+          f"visible(s) tout de suite sur {len(manquants)} manquant(s), contenus en arrière-plan"
+          + ("" if fenetre else f" (plus de {SEUIL_MANQUANTS_ENTETES} manquants)"))
+    return [u for u in manquants if u not in entetes]
+
 
 class SynchroniseurCache(QThread):
     """Télécharge en arrière-plan tous les mails manquants dans le cache."""
@@ -8376,8 +8873,12 @@ class SynchroniseurCache(QThread):
                             u.decode() for u in data[0].split()
                         ) if data[0] else set()
                         uids_locaux = uids_en_cache(compte, dossier)
-                        manquants = [u for u in uids_serveur if u not in uids_locaux]
+                        entetes_seuls = uids_entetes_seuls(compte, dossier)
+                        manquants = [u for u in uids_serveur
+                                     if u not in uids_locaux and u not in entetes_seuls]
                         orphelins = [u for u in uids_locaux if u not in uids_serveur]
+                        if uids_serveur and entetes_seuls - uids_serveur:
+                            retirer_entetes_seuls(compte, dossier, entetes_seuls - uids_serveur)
                         # Garde-fou (28/07/2026, suite à un bug remonté où les
                         # 2 seuls mails du compte Free disparaissaient de la
                         # liste quelques secondes après affichage) : si le
@@ -8525,6 +9026,9 @@ class SynchroniseurCache(QThread):
                                 except Exception:
                                     pass
                         # Télécharger les manquants
+                        manquants = sorted(manquants, key=lambda u: int(u) if u.isdigit() else 0,
+                                           reverse=True)
+                        manquants = basculer_en_entetes(compte, dossier, conn, manquants)
                         total = len(manquants)
                         for i, uid in enumerate(manquants):
                             if not self._actif:
@@ -8533,6 +9037,9 @@ class SynchroniseurCache(QThread):
                                 f"{adresse} — {dossier.split('.')[-1]} ({i+1}/{total})",
                                 i + 1, total
                             )
+                            moteur_activite(adresse, "synchro",
+                                            f"Téléchargement des nouveaux mails — {_nom_dossier_lisible(dossier)}",
+                                            i + 1, total)
                             try:
                                 st3, d3 = conn.uid('fetch', uid.encode(), "(BODY.PEEK[])")
                                 if st3 == "OK" and d3 and d3[0] and isinstance(d3[0], tuple):
@@ -8552,6 +9059,7 @@ class SynchroniseurCache(QThread):
                 continue
             finally:
                 fermer_connexion_imap(conn)
+                moteur_fin(compte["adresse"], "synchro")
         self.termine.emit()
 
 EXTENSIONS_PJ = {
@@ -9929,7 +10437,8 @@ class RattrapageDatesReponse(QThread):
                 chemin_dossier_cache = os.path.join(dossier_compte, dossier_safe)
                 if not os.path.isdir(chemin_dossier_cache):
                     continue
-                uids = [f[:-4] for f in os.listdir(chemin_dossier_cache) if f.endswith(".eml")]
+                uids = [uid_depuis_nom_fichier(f[:-4]) for f in os.listdir(chemin_dossier_cache)
+                        if f.endswith(".eml")]
                 if not uids:
                     continue
                 self.progres.emit(f"Vérification de {compte['adresse']} — {dossier_safe} ({len(uids)} mails)...")
@@ -9967,7 +10476,7 @@ class RattrapageDatesReponse(QThread):
                 nb_total_repondus += len(uids_repondus)
 
                 for uid_str in uids_repondus:
-                    chemin_eml = os.path.join(chemin_dossier_cache, f"{uid_str}.eml")
+                    chemin_eml = chemin_cache_eml(compte, dossier_safe, uid_str)
                     chemin_reply = chemin_eml.replace(".eml", ".reply")
                     date_existante = ""
                     if os.path.exists(chemin_reply):
@@ -10583,9 +11092,13 @@ class ChargeurMessages(QThread):
         import re, time
         t0 = time.time()
         conn = None
+        _adr_ctl = self.compte.get("adresse", "?")
+        moteur_activite(_adr_ctl, "dossier",
+                        f"Mise à jour du dossier « {_nom_dossier_lisible(self.dossier)} » avec le serveur")
         try:
             conn = connexion_imap(self.compte)
             conn = _authentifier_connexion_imap(conn, self.compte)
+            moteur_erreur(_adr_ctl, None)   # connexion établie
             t1 = time.time()
             conn.select(f'"{self.dossier}"', readonly=True)
             status, data = conn.uid('search', None, "UNDELETED")
@@ -10721,7 +11234,11 @@ class ChargeurMessages(QThread):
                 pass
             uids_locaux = uids_en_cache(self.compte, self.dossier)
             ids_en_cache_brut = [u for u in ids_str if u in uids_locaux]
-            ids_manquants = [u for u in ids_str if u not in uids_locaux]
+            # Les mails en attente de contenu (mode « en-têtes d'abord ») ne
+            # sont pas « manquants » : RemplisseurCorps s'en charge.
+            entetes_seuls = uids_entetes_seuls(self.compte, self.dossier)
+            ids_manquants = [u for u in ids_str if u not in uids_locaux and u not in entetes_seuls]
+            ids_manquants = basculer_en_entetes(self.compte, self.dossier, conn, ids_manquants)
             # Garde-fou (30/07/2026, même philosophie que ChargeurMessagesCache) :
             # un mail dont le .eml est en cache mais pas encore son .html ne doit
             # pas apparaître dans la liste — mais on ne le fait PAS non plus
@@ -10754,8 +11271,8 @@ class ChargeurMessages(QThread):
             # Affichage : uniquement les mails complets sur disque (définition
             # unique, voir uids_complets_en_cache). La décision de
             # téléchargement ci-dessus, elle, reste basée sur les .eml.
-            uids_complets = uids_complets_en_cache(self.compte, self.dossier)
-            ids_en_cache = [u for u in ids_en_cache_brut if u in uids_complets]
+            uids_complets = uids_visibles_en_cache(self.compte, self.dossier)
+            ids_en_cache = [u for u in ids_str if u in uids_complets]
 
             # 1) Tous les flags des mails déjà en cache, en UNE SEULE requête groupée
             flags_par_uid = {}
@@ -11191,8 +11708,10 @@ class ChargeurMessages(QThread):
             self.messages_charges.emit(messages)
         except Exception as e:
             self.erreur.emit(str(e))
+            moteur_erreur(_adr_ctl, f"Mise à jour du dossier impossible ({type(e).__name__})")
         finally:
             fermer_connexion_imap(conn)
+            moteur_fin(_adr_ctl, "dossier")
 
 class ChargeurMessagesCache(QThread):
     """Construit la liste des messages exclusivement depuis le cache local
@@ -11224,11 +11743,11 @@ class ChargeurMessagesCache(QThread):
             # « complet sur disque » — est le garde-fou côté affichage,
             # indépendant de la fiabilité de ces générateurs.
             purger_fantomes_cache(self.compte, self.dossier)
-            uids_locaux = uids_complets_en_cache(self.compte, self.dossier)
+            meta_cache = charger_cache_meta(self.compte, self.dossier)
+            uids_locaux = uids_visibles_en_cache(self.compte, self.dossier, meta_cache)
             if not uids_locaux:
                 self.messages_charges.emit([])
                 return
-            meta_cache = charger_cache_meta(self.compte, self.dossier)
             messages = []
             # En-têtes relus dans les .eml, à mémoriser dans _meta.json
             # (07/10/2026) : les dossiers Outlook (Graph) n'y avaient que
@@ -11548,7 +12067,7 @@ class PreChargeurMassif(QThread):
                 for nom_fichier in os.listdir(chemin_dossier):
                     if not nom_fichier.endswith(".eml"):
                         continue
-                    uid_str = nom_fichier[:-4]
+                    uid_str = uid_depuis_nom_fichier(nom_fichier[:-4])
                     chemin_eml = os.path.join(chemin_dossier, nom_fichier)
                     # Filtrage (10/08/2026, demandé par l'utilisateur : le
                     # total affiché dans la barre de statut — "10912 mails"
@@ -11747,8 +12266,12 @@ class ServiceCompletudeHtml(QThread):
 
     def _inventaire(self):
         """[(compte, dossier_safe, uid_str, chemin_eml)] pour tout .eml sans
-        .html, ou ayant un marqueur .incomplet."""
+        .html, ou ayant un marqueur .incomplet. Les marqueurs lus au passage
+        sont gardés dans self._marqueurs (chemin_eml -> état)."""
         taches = []
+        self._marqueurs = {}
+        self._echecs_photos = {}   # adresse -> nb de mails listés sans certaines photos (abandon)
+        self._arret_photos = {}    # adresse -> heure d'arrêt des essais (la plus tardive)
         for compte in list(self.comptes):
             adresse_safe = compte["adresse"].replace("@", "_at_")
             dossier_compte = os.path.join(DOSSIER_STORAGE, adresse_safe)
@@ -11765,16 +12288,82 @@ class ServiceCompletudeHtml(QThread):
                 for nom in noms:
                     if not nom.endswith(".eml"):
                         continue
-                    uid_str = nom[:-4]
-                    if (uid_str + ".html") in noms:
-                        if (uid_str + ".incomplet") not in noms:
+                    racine_fichier = nom[:-4]
+                    uid_str = uid_depuis_nom_fichier(racine_fichier)
+                    if (racine_fichier + ".html") in noms:
+                        if (racine_fichier + ".incomplet") not in noms:
                             continue   # complet
                         etat_inc = lire_etat_incomplet(os.path.join(chemin_dossier, nom))
                         if etat_inc is not None and etat_inc["echec"]:
+                            self._echecs_photos[compte["adresse"]] = \
+                                self._echecs_photos.get(compte["adresse"], 0) + 1
+                            self._arret_photos[compte["adresse"]] = max(
+                                self._arret_photos.get(compte["adresse"], 0),
+                                etat_inc["depuis"] + DUREE_REESSAI_INCOMPLET_SEC)
                             continue   # 60 min de réessais épuisées : on n'insiste plus
+                        if etat_inc is not None:
+                            self._marqueurs[os.path.join(chemin_dossier, nom)] = etat_inc
                     taches.append((compte, dossier_safe, uid_str,
                                    os.path.join(chemin_dossier, nom)))
         return taches
+
+    def _declarer_console(self, taches, a_traiter, nb_fait):
+        """CONTRÔLE : le vrai travail de mise en page, par compte, en deux
+        catégories qui n'ont rien à voir pour l'utilisateur —
+          - mails pas encore affichables (ou affichés en provisoire) : une vraie
+            progression, faits / total depuis le début de la campagne ;
+          - mails déjà affichés dont des photos manquent : réessais
+            périodiques jusqu'à l'abandon (heure annoncée).
+        Avant, seul le passage en cours était compté (367, puis 235 au
+        lancement suivant...) : impossible de savoir quand ce serait fini."""
+        import time as _t
+        if not hasattr(self, "_faits_console"):
+            self._faits_console = {}
+        nouveaux, reessais, abandon = {}, {}, {}
+        for compte, _d, _u, chemin_eml in taches:
+            adr = compte["adresse"]
+            marqueur = getattr(self, "_marqueurs", {}).get(chemin_eml)
+            if marqueur is None or marqueur.get("provisoire"):
+                nouveaux[adr] = nouveaux.get(adr, 0) + 1
+            else:
+                reessais[adr] = reessais.get(adr, 0) + 1
+                abandon[adr] = max(abandon.get(adr, 0), marqueur["depuis"] + DUREE_REESSAI_INCOMPLET_SEC)
+        en_cours = {}
+        for compte, _d, _u, _c in a_traiter:
+            en_cours[compte["adresse"]] = en_cours.get(compte["adresse"], 0) + 1
+        for compte in list(self.comptes):
+            adr = compte["adresse"]
+            n = nouveaux.get(adr, 0)
+            if n:
+                fait = self._faits_console.get(adr, 0)
+                moteur_activite(adr, "images", "Mise en page des nouveaux mails", fait, fait + n)
+            else:
+                moteur_fin(adr, "images")
+                self._faits_console.pop(adr, None)
+            r = reessais.get(adr, 0)
+            if r:
+                texte = (f"Photos introuvables sur {r} mail(s) déjà affiché(s) — nouvel essai "
+                         f"toutes les {DELAI_REESSAI_INCOMPLET_SEC // 60} min, arrêt des essais à "
+                         f"{_t.strftime('%H:%M', _t.localtime(abandon[adr]))}")
+                if en_cours.get(adr) and a_traiter:
+                    moteur_activite(adr, "photos", texte + " · essai en cours", min(nb_fait.get(adr, 0), en_cours[adr]),
+                                    en_cours[adr])
+                else:
+                    moteur_activite(adr, "photos", texte)
+            else:
+                moteur_fin(adr, "photos")
+            # Photos abandonnées après les 60 min de réessais : information
+            # définitive, avec l'heure EXACTE d'arrêt (10/10/2026, demandé —
+            # « plus aucun essai après 60 min » laissait croire à une attente).
+            e = getattr(self, "_echecs_photos", {}).get(adr, 0)
+            if e:
+                arret = self._arret_photos.get(adr, 0)
+                jour = _t.strftime(" le %d/%m", _t.localtime(arret))
+                moteur_activite(adr, "photos_echec",
+                                f"{e} mail(s) sans certaines photos (introuvables sur Internet) — "
+                                f"essais arrêtés à {_t.strftime('%H:%M', _t.localtime(arret))}{jour}")
+            else:
+                moteur_fin(adr, "photos_echec")
 
     def _traiter(self, tache, maintenant):
         """Retourne "ok" (nouveau mail listable, éventuellement avec défaut),
@@ -11783,6 +12372,7 @@ class ServiceCompletudeHtml(QThread):
         réessayer) ou "erreur"."""
         if not self._actif:
             return tache, "erreur"
+        attendre_fin_priorite()   # un mail cliqué passe avant (RemplisseurCorps)
         compte, dossier_safe, uid_str, chemin_eml = tache
         chemin_html = chemin_cache_html_disque(chemin_eml)
         if chemin_eml not in self._etat:
@@ -11794,7 +12384,11 @@ class ServiceCompletudeHtml(QThread):
                 mtime_eml = os.path.getmtime(chemin_eml)
             except OSError:
                 mtime_eml = maintenant
-            premiere = mtime_eml if maintenant - mtime_eml < DELAI_MAX_COMPLETUDE_SEC else maintenant
+            # Toujours depuis l'arrivée du .eml (10/10/2026) : repartir de
+            # « maintenant » à chaque lancement laissait invisibles, indéfiniment,
+            # les mails dont une photo est injoignable si COURRIER était relancé
+            # avant 5 min (7 Éléments envoyés Outlook invisibles depuis la veille).
+            premiere = mtime_eml
             self._etat[chemin_eml] = {"premiere": premiere, "nb": 0, "prochaine": 0}
         etat = self._etat[chemin_eml]
         deja_liste = os.path.exists(chemin_html)   # cas d'un mail .incomplet
@@ -11823,6 +12417,9 @@ class ServiceCompletudeHtml(QThread):
             # Phase 2 : nouvel échec. Passé les 60 min, le chargement est
             # déclaré ÉCHOUÉ (et signalé comme tel), sans plus insister.
             marqueur = lire_etat_incomplet(chemin_eml)
+            if marqueur is not None and marqueur.get("provisoire"):
+                ecrire_etat_incomplet(chemin_eml, marqueur["urls"], marqueur["depuis"])
+                marqueur["provisoire"] = False
             if (marqueur is not None and not marqueur["echec"]
                     and maintenant - marqueur["depuis"] >= DUREE_REESSAI_INCOMPLET_SEC):
                 ecrire_etat_incomplet(chemin_eml, marqueur["urls"], marqueur["depuis"], echec=True)
@@ -11834,6 +12431,11 @@ class ServiceCompletudeHtml(QThread):
         etat["nb"] += 1
         etat["prochaine"] = maintenant + (DELAI_REESSAI_INCOMPLET_SEC if deja_liste
                                           else PAS_REESSAI_COMPLETUDE_SEC)
+        if deja_liste:
+            try:
+                os.utime(chemin_eml.replace(".eml", ".incomplet"), None)
+            except OSError:
+                pass
         return tache, "attente"
 
     def run(self):
@@ -11853,6 +12455,18 @@ class ServiceCompletudeHtml(QThread):
             a_traiter = []
             for t in taches:
                 etat = self._etat.get(t[3])
+                marqueur = self._marqueurs.get(t[3])
+                if etat is None and marqueur is not None and not marqueur.get("provisoire"):
+                    # Premier passage depuis le lancement pour un mail déjà listé
+                    # avec photos manquantes : reprendre le calendrier là où il
+                    # en était (date du dernier essai = date du marqueur).
+                    try:
+                        dernier_essai = os.path.getmtime(t[3].replace(".eml", ".incomplet"))
+                    except OSError:
+                        dernier_essai = 0
+                    if maintenant - dernier_essai < DELAI_REESSAI_INCOMPLET_SEC:
+                        etat = self._etat[t[3]] = {"premiere": maintenant, "nb": 1,
+                                                   "prochaine": dernier_essai + DELAI_REESSAI_INCOMPLET_SEC}
                 if etat is not None:
                     if etat["prochaine"] > maintenant:
                         continue
@@ -11870,11 +12484,20 @@ class ServiceCompletudeHtml(QThread):
             nb_generes = 0
             dossiers_prets = set()
             changements = {}   # (adresse, dossier_safe) -> [uid] : défaut résolu ou échoué
+            self._declarer_console(taches, a_traiter, {})
+            passe_compte = {}
             if a_traiter:
                 nb_fait = 0
                 with concurrent.futures.ThreadPoolExecutor(max_workers=self.nb_workers) as pool:
                     for tache, statut in pool.map(lambda t: self._traiter(t, maintenant), a_traiter):
                         nb_fait += 1
+                        _adr_c = tache[0]["adresse"]
+                        passe_compte[_adr_c] = passe_compte.get(_adr_c, 0) + 1
+                        _m_c = self._marqueurs.get(tache[3])
+                        if statut in ("ok", "maj") and (_m_c is None or _m_c.get("provisoire")):
+                            self._faits_console[_adr_c] = self._faits_console.get(_adr_c, 0) + 1
+                        if nb_fait % 5 == 0 or nb_fait == len(a_traiter):
+                            self._declarer_console(taches, a_traiter, passe_compte)
                         if statut in ("ok", "maj"):
                             nb_generes += 1
                         if statut == "ok":
@@ -11886,6 +12509,7 @@ class ServiceCompletudeHtml(QThread):
                                               f"Génération des mails : {nb_fait}/{nb_total}")
                         if not self._actif:
                             break
+            self._declarer_console(self._inventaire() if a_traiter else taches, [], {})
             for adresse, dossier_safe in dossiers_prets:
                 self.html_pret.emit(adresse, dossier_safe)
             for (adresse, dossier_safe), uids in changements.items():
@@ -12009,6 +12633,341 @@ class ServiceRetelechargement(QThread):
                 except Exception as e:
                     print(f"[RETELECHARGEMENT] {adresse} {dossier} : {type(e).__name__}: {e}")
             self._dormir(3 if _ECHECS_TELECHARGEMENT else 10)
+
+# ── RemplisseurCorps : contenus des mails du mode « en-têtes d'abord » ─────
+# (09/10/2026, voir SEUIL_MANQUANTS_ENTETES). Un seul thread pour tous les
+# comptes : plus récents d'abord, une connexion à la fois par compte (limite
+# o2switch), et un mail cliqué passe devant tous les autres
+# (demander_corps_prioritaire). Les dossiers concernés sont notés par compte
+# dans _dossiers_en_remplissage.json (nom IMAP réel, ou identifiant Graph) :
+# le travail reprend tout seul au lancement suivant.
+_PRIORITES_CORPS = []          # [(adresse, dossier, uid)], le plus récent en tête
+# Tant qu'un mail cliqué n'est pas affichable, les travaux de fond (contenus
+# et mise en page des autres mails) se mettent en pause entre deux mails,
+# au plus DUREE_PAUSE_PRIORITE_SEC (demandé par l'utilisateur le 09/10/2026 :
+# « ça devrait s'arrêter et ne se concentrer que sur [le mail cliqué] »).
+DUREE_PAUSE_PRIORITE_SEC = 30
+_PAUSE_FOND_JUSQUA = [0.0]
+
+def attendre_fin_priorite():
+    """À appeler par les travaux de fond avant chaque mail."""
+    import time as _t
+    while _t.time() < _PAUSE_FOND_JUSQUA[0]:
+        _t.sleep(0.2)
+_VERROU_PRIORITES_CORPS = _threading.Lock()
+_REVEIL_REMPLISSAGE = _threading.Event()
+TAILLE_LOT_REMPLISSAGE = 25
+
+def _chemin_dossiers_en_remplissage(compte):
+    return os.path.join(DOSSIER_STORAGE, compte["adresse"].replace("@", "_at_"),
+                        "_dossiers_en_remplissage.json")
+
+def _lire_dossiers_en_remplissage(compte):
+    try:
+        with open(_chemin_dossiers_en_remplissage(compte), encoding="utf-8") as f:
+            dossiers = json.load(f)
+        return [d for d in dossiers if isinstance(d, str)]
+    except Exception:
+        return []
+
+def _ecrire_dossiers_en_remplissage(compte, dossiers):
+    chemin = _chemin_dossiers_en_remplissage(compte)
+    try:
+        os.makedirs(os.path.dirname(chemin), exist_ok=True)
+        tmp = f"{chemin}.{os.getpid()}.{_threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sorted(set(dossiers)), f, ensure_ascii=False)
+        os.replace(tmp, chemin)
+    except Exception as e:
+        print(f"[REMPLISSAGE] {compte.get('adresse', '?')} : registre illisible/inscriptible ({e})")
+
+_VERROU_REGISTRE_REMPLISSAGE = _threading.Lock()
+
+def enregistrer_entetes_seuls(compte, dossier, entetes):
+    """Dépose dans _meta.json les en-têtes de mails dont le contenu n'est pas
+    encore téléchargé ("corps": False), puis confie ces contenus à
+    RemplisseurCorps. Ne touche jamais une entrée déjà complète. Retourne le
+    nombre de mails effectivement déposés."""
+    if not entetes:
+        return 0
+    deja_la = uids_en_cache(compte, dossier)
+    with _verrou_cache_meta(chemin_cache_meta(compte, dossier)):
+        meta, fiable = lire_cache_meta(compte, dossier)
+        if not fiable:
+            return 0
+        nb = 0
+        for uid, e in entetes.items():
+            if uid in deja_la:
+                continue
+            actuel = meta.get(uid) or {}
+            meta[uid] = {**e, **{k: v for k, v in actuel.items() if v not in (None, "")},
+                         "corps": False}
+            nb += 1
+        if nb:
+            sauvegarder_cache_meta(compte, dossier, meta)
+    if nb:
+        with _VERROU_REGISTRE_REMPLISSAGE:
+            dossiers = _lire_dossiers_en_remplissage(compte)
+            if dossier not in dossiers:
+                _ecrire_dossiers_en_remplissage(compte, dossiers + [dossier])
+        _REVEIL_REMPLISSAGE.set()
+    return nb
+
+def retirer_entetes_seuls(compte, dossier, uids, silencieux=False):
+    """Mails en attente de contenu qui n'existent plus sur le serveur
+    (supprimés/déplacés ici ou depuis un autre client) : retirés de l'index."""
+    uids = set(uids)
+    if not uids:
+        return
+    with _verrou_cache_meta(chemin_cache_meta(compte, dossier)):
+        meta, fiable = lire_cache_meta(compte, dossier)
+        if not fiable:
+            return
+        retires = [u for u in uids if (meta.get(u) or {}).get("corps") is False]
+        for u in retires:
+            del meta[u]
+        if retires:
+            sauvegarder_cache_meta(compte, dossier, meta)
+            if not silencieux:
+                print(f"[REMPLISSAGE] {compte.get('adresse', '?')} {dossier} : {len(retires)} "
+                      f"mail(s) en attente de contenu absent(s) du serveur, retiré(s)")
+
+def _marquer_corps_recus(compte, dossier, recus):
+    """Contenu téléchargé : le mail redevient un mail ordinaire de l'index."""
+    if not recus:
+        return
+    with _verrou_cache_meta(chemin_cache_meta(compte, dossier)):
+        meta, fiable = lire_cache_meta(compte, dossier)
+        if not fiable:
+            return
+        for u in recus:
+            if u in meta and isinstance(meta[u], dict):
+                meta[u].pop("corps", None)
+        sauvegarder_cache_meta(compte, dossier, meta)
+
+def demander_corps_prioritaire(compte, dossier, uid):
+    """Mail cliqué dont le contenu n'est pas encore là : il passe devant tous
+    les autres. Le téléchargement en cours se termine, puis celui-ci."""
+    import time as _t
+    cle = (compte["adresse"], dossier, _uid_en_texte(uid))
+    with _VERROU_PRIORITES_CORPS:
+        if cle in _PRIORITES_CORPS:
+            _PRIORITES_CORPS.remove(cle)
+        _PRIORITES_CORPS.insert(0, cle)
+        _PAUSE_FOND_JUSQUA[0] = _t.time() + DUREE_PAUSE_PRIORITE_SEC
+    _REVEIL_REMPLISSAGE.set()
+
+def est_entete_seul(compte, dossier, uid):
+    """Contenu pas encore sur le disque (mode « en-têtes d'abord »)."""
+    return _uid_en_texte(uid) in uids_entetes_seuls(compte, dossier, a_telecharger=True)
+
+def attend_affichage(compte, dossier, uid):
+    """Mail du mode « en-têtes d'abord » pas encore affichable : contenu
+    absent, ou présent mais mise en page (.html) pas encore écrite."""
+    uid = _uid_en_texte(uid)
+    if uid not in uids_entetes_seuls(compte, dossier):
+        return False
+    return not os.path.exists(chemin_cache_html_disque(chemin_cache_eml(compte, dossier, uid)))
+
+def _horodatage_entete(info):
+    try:
+        return parsedate_to_datetime(info.get("date", "")).timestamp()
+    except Exception:
+        return 0.0
+
+
+class RemplisseurCorps(QThread):
+    """Télécharge en arrière-plan les contenus des mails du mode « en-têtes
+    d'abord » (voir enregistrer_entetes_seuls). IMAP et Graph."""
+
+    def __init__(self):
+        super().__init__()
+        self._actif = True
+        self._faits = {}       # adresse -> contenus reçus depuis le début de la campagne
+
+    def arreter(self):
+        self._actif = False
+        _REVEIL_REMPLISSAGE.set()
+
+    def _declarer(self, taches):
+        """Console : contenus en attente / reçus, par compte."""
+        restants = {}
+        for _h, adresse, _d, _u in taches:
+            restants[adresse] = restants.get(adresse, 0) + 1
+        for adresse in set(restants) | set(self._faits):
+            r = restants.get(adresse, 0)
+            if r:
+                fait = self._faits.get(adresse, 0)
+                moteur_activite(adresse, "remplissage", "Contenus des mails en arrière-plan",
+                                fait, fait + r)
+            else:
+                if self._faits.get(adresse):
+                    moteur_evenement(adresse, f"Contenus terminés ({self._faits[adresse]} mail(s))")
+                moteur_fin(adresse, "remplissage")
+                self._faits.pop(adresse, None)
+
+    @staticmethod
+    def _compte(adresse):
+        return next((c for c in COMPTES if c.get("adresse") == adresse), None)
+
+    def _prochaine_priorite(self):
+        with _VERROU_PRIORITES_CORPS:
+            return _PRIORITES_CORPS[0] if _PRIORITES_CORPS else None
+
+    def _oublier_priorite(self, cle):
+        with _VERROU_PRIORITES_CORPS:
+            if cle in _PRIORITES_CORPS:
+                _PRIORITES_CORPS.remove(cle)
+            if not _PRIORITES_CORPS:
+                _PAUSE_FOND_JUSQUA[0] = 0.0   # plus rien d'urgent : reprise
+
+    def _inventaire(self):
+        """[(horodatage, adresse, dossier, uid)] de tous les contenus en
+        attente, plus récents d'abord. Nettoie le registre des dossiers finis."""
+        taches = []
+        for compte in list(COMPTES):
+            with _VERROU_REGISTRE_REMPLISSAGE:
+                dossiers = _lire_dossiers_en_remplissage(compte)
+                restants = []
+                for dossier in dossiers:
+                    meta = charger_cache_meta(compte, dossier)
+                    attente = uids_entetes_seuls(compte, dossier, meta, a_telecharger=True)
+                    if attente:
+                        restants.append(dossier)
+                        taches.extend((_horodatage_entete(meta.get(u) or {}),
+                                       compte["adresse"], dossier, u) for u in attente)
+                if restants != dossiers:
+                    _ecrire_dossiers_en_remplissage(compte, restants)
+        taches.sort(reverse=True)
+        return taches
+
+    def _telecharger(self, compte, dossier, uid, conn, provisoire=False):
+        """Un contenu. Retourne "ok", "en_page", "absent" ou "echec".
+        provisoire : mail cliqué, affiché tout de suite (voir
+        generer_html_cache_eml)."""
+        try:
+            raw = lire_cache_eml(compte, dossier, uid)
+            if raw:
+                pass   # déjà téléchargé, seule la mise en page manque
+            elif compte.get("protocole") == "graph":
+                try:
+                    msg_json = _appel_graph(compte, "GET", f"/me/messages/{uid}")
+                except Exception as e:
+                    return "absent" if "Erreur Graph 404" in str(e) else "echec"
+                m = _graph_message_vers_eml(compte, msg_json)
+                _graph_ajouter_pieces_jointes(compte, msg_json, m)
+                raw = m.as_bytes()
+            else:
+                st, d = conn.uid('fetch', uid.encode(), "(BODY.PEEK[])")
+                if st != "OK":
+                    return "echec"
+                if not (d and d[0] and isinstance(d[0], tuple)):
+                    return "absent"
+                raw = d[0][1]
+            if not os.path.exists(chemin_cache_eml(compte, dossier, uid)):
+                ecrire_cache_eml(compte, dossier, uid, raw)
+            # Photos pas encore toutes là : ServiceCompletudeHtml termine la
+            # mise en page ; le mail reste visible grâce à "corps": False.
+            ok = generer_html_cache_eml(compte, dossier, uid, raw, provisoire=provisoire)
+            return "ok" if ok else "en_page"
+        except Exception as e:
+            print(f"[REMPLISSAGE] {compte.get('adresse', '?')} {dossier} UID={uid} : "
+                  f"échec ({type(e).__name__}: {e})")
+            return "echec"
+
+    def _traiter(self, adresse, dossier, uids):
+        """Télécharge uids (même dossier) avec une seule connexion. S'arrête
+        dès qu'un mail cliqué attend (le téléchargement en cours se termine
+        d'abord). Retourne le nombre d'échecs."""
+        compte = self._compte(adresse)
+        if compte is None:
+            return 0
+        conn = None
+        if compte.get("protocole") != "graph":
+            try:
+                conn = connexion_imap(compte)
+                conn = _authentifier_connexion_imap(conn, compte)
+                conn.select(f'"{dossier}"', readonly=True)
+            except Exception as e:
+                print(f"[REMPLISSAGE] {adresse} {dossier} : connexion impossible "
+                      f"({type(e).__name__}: {e}) — nouvelle tentative plus tard")
+                moteur_erreur(adresse, f"Connexion impossible ({type(e).__name__})")
+                fermer_connexion_imap(conn)
+                return len(uids)
+        moteur_erreur(adresse, None)   # connexion établie
+        recus, absents, echecs = [], [], 0
+        try:
+            for uid in uids:
+                if not self._actif:
+                    break
+                prio = self._prochaine_priorite()
+                if prio and prio != (adresse, dossier, uid):
+                    break   # un mail vient d'être cliqué : il passe avant
+                est_prio = prio == (adresse, dossier, uid)
+                resultat = self._telecharger(compte, dossier, uid, conn, provisoire=est_prio)
+                self._oublier_priorite((adresse, dossier, uid))
+                if resultat == "ok":
+                    recus.append(uid)
+                elif resultat == "en_page":
+                    pass
+                elif resultat == "absent":
+                    absents.append(uid)
+                else:
+                    echecs += 1
+        finally:
+            fermer_connexion_imap(conn)
+            _marquer_corps_recus(compte, dossier, recus)
+            retirer_entetes_seuls(compte, dossier, absents)
+        if recus:
+            print(f"[REMPLISSAGE] {adresse} {dossier} : {len(recus)} contenu(s) téléchargé(s)")
+            self._faits[adresse] = self._faits.get(adresse, 0) + len(recus)
+        return echecs
+
+    def run(self):
+        import time as _t
+        taches = []
+        prochain_inventaire = 0.0
+        pause_echec = 0
+        while self._actif:
+            prio = self._prochaine_priorite()
+            if prio:
+                compte = self._compte(prio[0])
+                if compte is None or not attend_affichage(compte, prio[1], prio[2]):
+                    self._oublier_priorite(prio)   # déjà affichable (ou compte supprimé)
+                    continue
+                # Le mail cliqué, puis ses voisins plus récents-d'abord du même
+                # dossier, sur la même connexion.
+                voisins = [x[3] for x in taches if x[1:3] == prio[:2] and x[3] != prio[2]]
+                moteur_activite(prio[0], "prioritaire", "Mail cliqué : téléchargement prioritaire, "
+                                "le reste est en pause")
+                self._traiter(prio[0], prio[1], [prio[2]] + voisins[:TAILLE_LOT_REMPLISSAGE - 1])
+                moteur_fin(prio[0], "prioritaire")
+                prochain_inventaire = 0.0
+                continue
+            if _t.time() >= prochain_inventaire or not taches:
+                _REVEIL_REMPLISSAGE.clear()
+                taches = self._inventaire()
+                self._declarer(taches)
+                prochain_inventaire = _t.time() + 60
+                if not taches:
+                    _REVEIL_REMPLISSAGE.wait(60)
+                    continue
+            _, adresse, dossier, _ = taches[0]
+            lot = [x[3] for x in taches if x[1:3] == (adresse, dossier)][:TAILLE_LOT_REMPLISSAGE]
+            self._declarer(taches)
+            echecs = self._traiter(adresse, dossier, lot)
+            faits = set(lot)
+            taches = [x for x in taches if not (x[1:3] == (adresse, dossier) and x[3] in faits)]
+            self._declarer(taches)
+            if echecs:
+                # Réseau coupé, serveur indisponible... : on laisse respirer,
+                # sans bloquer un éventuel clic (réveil immédiat).
+                pause_echec = min(max(pause_echec * 2, 10), 300)
+                prochain_inventaire = 0.0
+                _REVEIL_REMPLISSAGE.wait(pause_echec)
+                _REVEIL_REMPLISSAGE.clear()
+            else:
+                pause_echec = 0
 
 
 _NOMS_DOSSIER_ENVOYES = {"sent", "sent items", "sent messages", "envoyés", "envoyes",
@@ -12179,7 +13138,7 @@ def chercher_reponse_locale(compte, message_id="", sujet_recu="", expediteur="",
             ts = _ts(date_rep)
             if ts_origine is not None and ts is not None and ts < ts_origine:
                 continue
-            entree = (ts or 0, date_rep, dossier_safe, f[:-4],
+            entree = (ts or 0, date_rep, dossier_safe, uid_depuis_nom_fichier(f[:-4]),
                       _nettoyer_message_id(ent.get("Message-ID", "")))
             liens = (ent.get("In-Reply-To", "") or "") + " " + (ent.get("References", "") or "")
             if mid and mid in liens:
@@ -12231,7 +13190,8 @@ def chercher_date_reponse_locale(compte, sujet_recu, message_id=""):
         chemin_dossier = os.path.join(DOSSIER_STORAGE, adresse_safe, dossier_safe)
         meta = charger_cache_meta(compte, dossier_safe)
         try:
-            uids_eml = [f[:-4] for f in os.listdir(chemin_dossier) if f.endswith(".eml")]
+            uids_eml = [uid_depuis_nom_fichier(f[:-4]) for f in os.listdir(chemin_dossier)
+                        if f.endswith(".eml")]
         except OSError:
             continue
         for uid_str in uids_eml:
@@ -12239,7 +13199,7 @@ def chercher_date_reponse_locale(compte, sujet_recu, message_id=""):
             sujet, date = info.get("sujet", ""), info.get("date", "")
             if not (sujet and date):
                 try:   # mail pas (encore) dans _meta.json : lire ses en-têtes
-                    with open(os.path.join(chemin_dossier, uid_str + ".eml"), "rb") as f:
+                    with open(chemin_cache_eml(compte, dossier_safe, uid_str), "rb") as f:
                         ent = email.message_from_bytes(f.read(16384))
                     sujet = decoder_entete(ent.get("Subject", ""))
                     date = ent.get("Date", "")
@@ -19429,6 +20389,406 @@ Use means anything you do with the software requiring one of your
 licenses."""
 
 
+def mails_photos_introuvables(compte):
+    """[(dossier_safe, uid, état)] des mails du compte listés avec des photos
+    manquantes (marqueur .incomplet non provisoire) — essais en cours ou
+    arrêtés. Lecture seule du disque."""
+    base = os.path.join(DOSSIER_STORAGE, compte["adresse"].replace("@", "_at_"))
+    resultat = []
+    try:
+        dossiers = os.listdir(base)
+    except OSError:
+        return resultat
+    for dossier_safe in dossiers:
+        chemin_dossier = os.path.join(base, dossier_safe)
+        if not os.path.isdir(chemin_dossier):
+            continue
+        try:
+            noms = set(os.listdir(chemin_dossier))
+        except OSError:
+            continue
+        for n in noms:
+            if not n.endswith(".incomplet") or (n[:-10] + ".html") not in noms:
+                continue
+            etat = lire_etat_incomplet(os.path.join(chemin_dossier, n[:-10] + ".eml"))
+            if etat is not None and not etat.get("provisoire"):
+                resultat.append((dossier_safe, uid_depuis_nom_fichier(n[:-10]), etat))
+    return resultat
+
+
+class FenetrePhotosIntrouvables(QWidget):
+    """Liste des mails d'un compte dont des photos sont introuvables
+    (10/10/2026, demandé : la ligne de CONTRÔLE disait combien, pas
+    lesquels). Fenêtre indépendante ; un double-clic ouvre le mail dans
+    COURRIER (ClientMail.aller_au_mail), où l'on peut le garder ou le
+    supprimer — le compteur de CONTRÔLE baisse alors de lui-même."""
+
+    def __init__(self, client_mail, compte):
+        super().__init__(None, Qt.WindowType.Window)
+        from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+        self._cm = client_mail
+        self._compte = compte
+        noms = charger_noms_comptes()
+        nom_compte = noms.get(compte["adresse"]) or compte.get("nom") or compte["adresse"]
+        self.setWindowTitle(f"Photos introuvables — {nom_compte}")
+        self.setStyleSheet(STYLE_GLOBAL + """
+            QTableWidget { background-color: #1e1e1e; color: #dddddd; gridline-color: #3a3a3a;
+                           font-family: Verdana; font-size: 11px; border: none; }
+            QTableWidget::item { padding: 3px 6px; }
+            QTableWidget::item:selected { background-color: #A52A2A; color: white; }
+            QHeaderView::section { background-color: #A52A2A; color: white; font-weight: bold;
+                                   font-family: Verdana; font-size: 11px; padding: 4px; border: none; }
+        """)
+        icone = os.path.join(DOSSIER_APP, "courrier.ico")
+        if os.path.exists(icone):
+            self.setWindowIcon(QIcon(icone))
+        couche = QVBoxLayout(self)
+        couche.setContentsMargins(8, 8, 8, 8)
+        mails = mails_photos_introuvables(compte)
+        # Noms lisibles des dossiers : arborescence mémorisée du compte
+        _d, tuples_map = charger_cache_arbo(compte)
+        noms_dossiers = {}
+        for affiche, brut in (tuples_map or []):
+            noms_dossiers[brut.replace("/", "_").replace("\\", "_").replace('"', '')] = affiche
+        entete = QLabel(
+            f"{len(mails)} mail(s) affiché(s) sans certaines photos : elles ne sont plus "
+            f"disponibles chez l'expéditeur (le reste du mail est intact).\n"
+            f"Double-cliquez sur un mail pour l'ouvrir dans COURRIER — vous pourrez le garder "
+            f"ou le supprimer.")
+        entete.setWordWrap(True)
+        entete.setStyleSheet("color: white; padding-bottom: 6px;")
+        couche.addWidget(entete)
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(("Date", "Dossier", "Expéditeur", "Sujet", "Photos"))
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        en_tete = table.horizontalHeader()
+        for i, mode in enumerate((QHeaderView.ResizeMode.ResizeToContents,
+                                  QHeaderView.ResizeMode.ResizeToContents,
+                                  QHeaderView.ResizeMode.Interactive,
+                                  QHeaderView.ResizeMode.Stretch,
+                                  QHeaderView.ResizeMode.ResizeToContents)):
+            en_tete.setSectionResizeMode(i, mode)
+        table.setColumnWidth(2, 240)
+        lignes = []
+        metas = {}
+        for dossier_safe, uid, etat in mails:
+            if dossier_safe not in metas:
+                metas[dossier_safe] = charger_cache_meta(compte, dossier_safe)
+            info = metas[dossier_safe].get(uid) or {}
+            try:
+                horodatage = parsedate_to_datetime(info.get("date", "")).timestamp()
+            except Exception:
+                horodatage = 0
+            nom_dossier = noms_dossiers.get(dossier_safe) or _nom_dossier_lisible(dossier_safe)
+            lignes.append((horodatage, nom_dossier, info.get("de", "") or "?",
+                           info.get("sujet", "") or "(sans sujet)", len(set(etat.get("urls", []))),
+                           dossier_safe, uid))
+        lignes.sort(reverse=True)
+        table.setRowCount(len(lignes))
+        import time as _t
+        for r, (h, nom_dossier, de, sujet, nb, dossier_safe, uid) in enumerate(lignes):
+            valeurs = (_t.strftime("%d/%m/%Y %H:%M", _t.localtime(h)) if h else "—",
+                       nom_dossier, de, sujet, str(nb))
+            for c, v in enumerate(valeurs):
+                item = QTableWidgetItem(v)
+                item.setData(Qt.ItemDataRole.UserRole, (dossier_safe, uid))
+                table.setItem(r, c, item)
+        table.cellDoubleClicked.connect(self._ouvrir)
+        couche.addWidget(table)
+        self._table = table
+        ligne_bas = QHBoxLayout()
+        ligne_bas.addStretch(1)
+        btn_fermer = QPushButton("  Fermer  ")
+        btn_fermer.setStyleSheet(STYLE_BOUTON)
+        btn_fermer.clicked.connect(self.close)
+        ligne_bas.addWidget(btn_fermer)
+        couche.addLayout(ligne_bas)
+        ecran = (client_mail.screen() or QApplication.primaryScreen()).availableGeometry()
+        largeur = min(1100, ecran.width() - 40)
+        hauteur = min(170 + 26 * max(len(lignes), 3), ecran.height() - 80)
+        self.resize(largeur, hauteur)
+        self.move(ecran.x() + (ecran.width() - largeur) // 2,
+                  ecran.y() + (ecran.height() - hauteur) // 2)
+
+    def _ouvrir(self, ligne, _colonne):
+        item = self._table.item(ligne, 0)
+        if item is None:
+            return
+        dossier_safe, uid = item.data(Qt.ItemDataRole.UserRole)
+        self._cm.aller_au_mail(self._compte, dossier_safe, uid)
+
+
+class FenetreConsole(QWidget):
+    """CONTRÔLE — poste de contrôle de COURRIER (10/10/2026, idée de
+    l'utilisateur : « on ne sait pas ce qu'est en train de faire le
+    logiciel »). Fenêtre indépendante, comme ADRESSES ou MAILING : elle ne
+    bloque jamais COURRIER. Une ligne par compte, en clair : réception (compte
+    à rebours de la prochaine relève, lu directement sur le QTimer du compte),
+    activité en cours avec compteurs, dernier évènement, erreur éventuelle ;
+    plus une ligne « moteur » pour ce qui concerne tout le logiciel. Ne fait
+    que LIRE : instantane_moteur() et l'état des minuteries de ClientMail."""
+
+    COLONNES = ("Compte", "Réception", "En cours", "Progression", "Dernier évènement")
+    # Lignes d'information (rien ne travaille) : pas de barre animée, et le
+    # compte n'est pas compté « au travail » — sauf pendant un essai réel.
+    CLES_INFORMATION = {"photos", "photos_echec"}
+
+    def __init__(self, client_mail):
+        super().__init__(None, Qt.WindowType.Window)
+        from PySide6.QtWidgets import QTableWidget, QHeaderView, QAbstractItemView
+        self._cm = client_mail
+        nom_logiciel = (client_mail.windowTitle() or "COURRIER").strip()
+        self.setWindowTitle(f"CONTRÔLE — poste de contrôle de {nom_logiciel}")
+        self.setStyleSheet(STYLE_GLOBAL + """
+            QTableWidget { background-color: #1e1e1e; color: #dddddd; gridline-color: #3a3a3a;
+                           font-family: Verdana; font-size: 11px; border: none; }
+            QTableWidget::item { padding: 5px 8px; }
+            QHeaderView::section { background-color: #A52A2A; color: white; font-weight: bold;
+                                   font-family: Verdana; font-size: 11px; padding: 4px; border: none; }
+            QProgressBar { background-color: #000000; color: white; border: 1px solid #5a5a5a;
+                           text-align: center; font-family: Verdana; font-size: 10px; height: 16px; }
+            QProgressBar::chunk { background-color: #A52A2A; }
+        """)
+        icone = os.path.join(DOSSIER_APP, "courrier.ico")
+        if os.path.exists(icone):
+            self.setWindowIcon(QIcon(icone))
+        couche = QVBoxLayout(self)
+        couche.setContentsMargins(8, 8, 8, 8)
+        self._titre = QLabel()
+        self._titre.setStyleSheet("font-size: 12px; font-weight: bold; color: white; padding: 2px 0 6px 0;")
+        couche.addWidget(self._titre)
+        self._table = QTableWidget(0, len(self.COLONNES))
+        self._table.setHorizontalHeaderLabels(self.COLONNES)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setWordWrap(True)
+        self._table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        entete = self._table.horizontalHeader()
+        for i, mode in enumerate((QHeaderView.ResizeMode.ResizeToContents,
+                                  QHeaderView.ResizeMode.ResizeToContents,
+                                  QHeaderView.ResizeMode.Stretch,
+                                  QHeaderView.ResizeMode.Fixed,
+                                  QHeaderView.ResizeMode.Stretch)):
+            entete.setSectionResizeMode(i, mode)
+        self._table.setColumnWidth(3, 170)
+        self._table.cellClicked.connect(self._sur_clic_case)
+        couche.addWidget(self._table)
+        self._moteur = QLabel()
+        self._moteur.setWordWrap(True)
+        self._moteur.setStyleSheet("color: #bbbbbb; padding-top: 6px;")
+        ligne_bas = QHBoxLayout()
+        ligne_bas.addWidget(self._moteur, 1)
+        self._btn_fermer = QPushButton("  Fermer  ")
+        self._btn_fermer.setStyleSheet(STYLE_BOUTON)
+        self._btn_fermer.clicked.connect(self.close)
+        ligne_bas.addWidget(self._btn_fermer)
+        couche.addLayout(ligne_bas)
+        self._barres = {}
+        self._lignes = []
+        self.resize(1150, 520)
+        self._taille_ajustee_pour = None
+        self._minuterie = QTimer(self)
+        self._minuterie.timeout.connect(self._rafraichir)
+        self._minuterie.start(1000)
+        self._rafraichir()
+
+    def _ajuster_taille(self):
+        """Hauteur ajustée au nombre de comptes (10/10/2026, demandé) : toutes
+        les lignes visibles sans agrandir la fenêtre à la main, dans la limite
+        de l'écran (au-delà, l'ascenseur prend le relais). Seulement à
+        l'ouverture et quand le nombre de comptes change : une taille choisie
+        ensuite par l'utilisateur n'est pas contrariée à chaque seconde."""
+        table = self._table
+        hauteur_table = (table.horizontalHeader().height() + 2 * table.frameWidth()
+                         + sum(table.rowHeight(r) for r in range(table.rowCount())))
+        if table.horizontalScrollBar().isVisible():
+            hauteur_table += table.horizontalScrollBar().height()
+        marges = self.layout().contentsMargins()
+        hauteur = (marges.top() + marges.bottom() + 2 * self.layout().spacing()
+                   + self._titre.sizeHint().height() + hauteur_table
+                   + max(self._moteur.sizeHint().height(), self._btn_fermer.sizeHint().height()) + 10)
+        # Écran de la fenêtre principale (plusieurs écrans possibles)
+        ecran = (self._cm.screen() or self.screen() or QApplication.primaryScreen()).availableGeometry()
+        largeur = min(max(self.width(), 1150), ecran.width() - 40)
+        # Cadre de la fenêtre (barre de titre, bords) en plus du contenu
+        cadre = max(self.frameGeometry().height() - self.geometry().height(), 32)
+        hauteur = min(hauteur, ecran.height() - cadre - 20)
+        table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.resize(largeur, hauteur)
+        # Centrée sur l'écran (10/10/2026, demandé) : elle s'ouvrait en
+        # partant du milieu et débordait en bas.
+        self.move(ecran.x() + (ecran.width() - largeur) // 2,
+                  ecran.y() + max((ecran.height() - hauteur - cadre) // 2, 0))
+
+    def _sur_clic_case(self, ligne, colonne):
+        """Clic sur « En cours » d'un compte qui a des photos introuvables :
+        liste des mails concernés (FenetrePhotosIntrouvables)."""
+        if colonne != 2 or ligne >= len(self._lignes):
+            return
+        adresse = self._lignes[ligne]
+        activites, _e, _err = instantane_moteur()
+        if not ({"photos", "photos_echec"} & set(activites.get(adresse) or {})):
+            return
+        compte = next((c for c in COMPTES if c["adresse"] == adresse), None)
+        if compte is None:
+            return
+        fenetres = getattr(self, "_fenetres_photos", {})
+        f = fenetres.get(adresse)
+        if f is not None and f.isVisible():
+            f.close()
+        fenetres[adresse] = FenetrePhotosIntrouvables(self._cm, compte)
+        fenetres[adresse].show()
+        self._fenetres_photos = fenetres
+
+    @staticmethod
+    def _nb(n):
+        """3364 -> « 3 364 » (espace fine insécable)."""
+        return f"{int(n or 0):,}".replace(",", " ")
+
+    @staticmethod
+    def _duree(secondes):
+        secondes = max(int(secondes), 0)
+        if secondes >= 3600:
+            return f"{secondes // 3600} h {secondes % 3600 // 60:02d} min"
+        if secondes >= 60:
+            return f"{secondes // 60} min {secondes % 60:02d} s"
+        return f"{secondes} s"
+
+    @staticmethod
+    def _intervalle(minutes):
+        """60 -> « toutes les heures », 480 -> « toutes les 8 h », 90 -> « toutes les 1 h 30 »."""
+        if minutes < 60:
+            return f"toutes les {minutes} min"
+        h, m = divmod(minutes, 60)
+        if h == 1 and not m:
+            return "toutes les heures"
+        return f"toutes les {h} h" + (f" {m:02d}" if m else "")
+
+    def _reception(self, adresse, idle):
+        if adresse in idle:
+            return "Instantanée (connexion permanente)"
+        minutes = charger_intervalle_compte(adresse)
+        minuterie = (getattr(self._cm, "_timers_releve", {}) or {}).get(adresse)
+        reste = minuterie.remainingTime() if minuterie and minuterie.isActive() else -1
+        if minutes <= 0:
+            base = "À la demande"
+            return base + (f" · contrôle dans {self._duree(reste / 1000)}" if reste >= 0 else "")
+        if reste < 0:
+            return self._intervalle(minutes).capitalize()
+        return f"Dans {self._duree(reste / 1000)}  ({self._intervalle(minutes)})"
+
+    def _rafraichir(self):
+        import time as _t
+        from PySide6.QtWidgets import QTableWidgetItem, QProgressBar
+        maintenant = _t.time()
+        activites, evenements, erreurs = instantane_moteur()
+        noms = charger_noms_comptes()
+        try:
+            idle = set(charger_comptes_idle_permanent())
+        except Exception:
+            idle = set()
+        comptes = list(COMPTES)
+        adresses = [c["adresse"] for c in comptes]
+        if adresses != self._lignes:
+            self._table.setRowCount(len(comptes))
+            self._barres = {}
+            for i, adresse in enumerate(adresses):
+                barre = QProgressBar()
+                barre.setTextVisible(True)
+                self._table.setCellWidget(i, 3, barre)
+                self._barres[adresse] = barre
+            self._lignes = adresses
+        nb_actifs = 0
+        for i, compte in enumerate(comptes):
+            adresse = compte["adresse"]
+            nom = noms.get(adresse) or compte.get("nom") or adresse
+            acts = activites.get(adresse) or {}
+            principale = None
+            for cle in ("prioritaire", "reception", "dossier", "synchro_graph", "synchro",
+                        "remplissage", "images", "photos", "releve"):
+                if cle in acts and (cle not in self.CLES_INFORMATION or acts[cle]["total"]):
+                    principale = acts[cle]
+                    break
+            lignes_en_cours = []
+            for cle, a in sorted(acts.items(), key=lambda kv: kv[1]["debut"]):
+                texte = a["texte"]
+                if cle in ("photos", "photos_echec"):
+                    texte += "  ▸ cliquer pour voir lesquels"
+                if a["total"]:
+                    texte += f" : {self._nb(a['fait'])} / {self._nb(a['total'])}"
+                lignes_en_cours.append(texte)
+            if adresse in erreurs:
+                depuis, texte_err = erreurs[adresse]
+                lignes_en_cours.insert(0, f"⚠ {texte_err} — depuis {self._duree(maintenant - depuis)}")
+            if lignes_en_cours and all(c in self.CLES_INFORMATION and not a["total"]
+                                       for c, a in acts.items()) and adresse not in erreurs:
+                lignes_en_cours.insert(0, "Au repos")
+            en_cours = "\n".join(lignes_en_cours) if lignes_en_cours else "Au repos"
+            if any(c not in self.CLES_INFORMATION or a["total"] for c, a in acts.items()):
+                nb_actifs += 1
+            ev = (evenements.get(adresse) or [])[-1:] or None
+            dernier = (f"{_t.strftime('%H:%M:%S', _t.localtime(ev[0][0]))}  {ev[0][1]}" if ev else "—")
+            libelle = adresse if nom == adresse else f"{nom}\n{adresse}"
+            for col, valeur in enumerate((libelle, self._reception(adresse, idle),
+                                          en_cours, None, dernier)):
+                if valeur is None:
+                    continue
+                item = self._table.item(i, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self._table.setItem(i, col, item)
+                if item.text() != valeur:
+                    item.setText(valeur)
+                couleur = "#ff8080" if (col == 2 and adresse in erreurs) else (
+                    "#ffffff" if (col == 2 and acts) else "#dddddd")
+                item.setForeground(QColor(couleur))
+                if col == 0 and not item.font().bold():
+                    police = item.font()
+                    police.setBold(True)
+                    item.setFont(police)
+            barre = self._barres.get(adresse)
+            if barre is not None:
+                if principale and principale["total"]:
+                    barre.setRange(0, principale["total"])
+                    barre.setValue(min(principale["fait"] or 0, principale["total"]))
+                    barre.setFormat(f"{self._nb(principale['fait'])} / {self._nb(principale['total'])}")
+                elif principale:
+                    barre.setRange(0, 0)       # activité sans compteur : barre animée
+                else:
+                    barre.setRange(0, 1)
+                    barre.setValue(0)
+                    barre.setFormat("")
+        self._table.resizeRowsToContents()
+        # Qt ne compte pas la marge intérieure des cases (feuille de style) :
+        # sans ce supplément, la dernière ligne de texte d'une case est coupée.
+        for r in range(self._table.rowCount()):
+            self._table.setRowHeight(r, self._table.rowHeight(r) + 14)
+        if self._taille_ajustee_pour != len(comptes):
+            self._taille_ajustee_pour = len(comptes)
+            QTimer.singleShot(0, self._ajuster_taille)
+        # Ligne « moteur » : ce qui concerne tout le logiciel
+        with _VERROU_ECHECS_TELECHARGEMENT:
+            nb_reessais = len(_ECHECS_TELECHARGEMENT)
+        try:
+            connexions = 16 - _SEMAPHORE_IMAP._value
+        except Exception:
+            connexions = None
+        with _VERROU_PRIORITES_CORPS:
+            nb_prio = len(_PRIORITES_CORPS)
+        morceaux = [f"Connexions IMAP ouvertes : {connexions} / 16" if connexions is not None else None,
+                    f"Retéléchargements en attente : {nb_reessais}",
+                    f"Mail(s) cliqué(s) en priorité : {nb_prio}" if nb_prio else None]
+        self._moteur.setText("MOTEUR  ·  " + "  ·  ".join(m for m in morceaux if m))
+        self._titre.setText(
+            f"{len(comptes)} compte(s) · {nb_actifs} au travail · "
+            f"{_t.strftime('%H:%M:%S')}")
+
+
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -20020,6 +21380,10 @@ class ClientMail(QMainWindow):
             self._retelechargeur = ServiceRetelechargement()
             self._retelechargeur.html_pret.connect(self._on_html_pret)
             self._retelechargeur.start()
+        # Contenus des mails du mode « en-têtes d'abord » (voir RemplisseurCorps)
+        if not (getattr(self, '_remplisseur', None) and self._remplisseur.isRunning()):
+            self._remplisseur = RemplisseurCorps()
+            self._remplisseur.start()
 
     def _on_html_pret(self, adresse, dossier_safe):
         """Des mails d'un dossier viennent de devenir COMPLETS (html + photos)
@@ -20120,7 +21484,14 @@ class ClientMail(QMainWindow):
             }
         """
 
-        # Groupe gauche : outils
+        # Groupe gauche : outils — CONTRÔLE tout à gauche (10/10/2026, demandé)
+        btn_controle = QPushButton("CONTRÔLE")
+        btn_controle.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_controle.setToolTip("Poste de contrôle : ce que fait COURRIER, compte par compte")
+        btn_controle.clicked.connect(self.ouvrir_console)
+        layout_haut.addWidget(btn_controle)
+        layout_haut.addSpacing(3)
+
         btn_supprimer_barre = QPushButton("SUPPRIMER")
         btn_supprimer_barre.setStyleSheet(STYLE_BOUTON_HAUT)
         btn_supprimer_barre.clicked.connect(self.supprimer_message)
@@ -20234,6 +21605,7 @@ class ClientMail(QMainWindow):
         btn_carnet.clicked.connect(self.ouvrir_carnet_adresses)
         layout_haut.addWidget(btn_carnet)
         layout_haut.addSpacing(3)
+
 
         btn_rechercher = QPushButton("RECHERCHER")
         btn_rechercher.setStyleSheet(STYLE_BOUTON_HAUT)
@@ -22882,7 +24254,7 @@ if (typeof module === 'object') {
                         (u.decode() if isinstance(u, bytes) else str(u))
                         for u in data[0].split()
                     }
-                    uids_locaux = set(uids_en_cache(self.compte, "INBOX"))
+                    uids_locaux = set(uids_connus_en_cache(self.compte, "INBOX"))
                     if uids_serveur - uids_locaux:
                         self.nouveaux.emit(self.compte["adresse"])
                 except Exception as e:
@@ -22987,6 +24359,7 @@ if (typeof module === 'object') {
             def run(self):
                 import time as _time_releve
                 _adr = self.compte.get("adresse", "?")
+                moteur_activite(_adr, "releve", "Relève des nouveaux mails en cours…")
                 import email as _email
                 conn = None
                 try:
@@ -23001,10 +24374,21 @@ if (typeof module === 'object') {
                         (u.decode() if isinstance(u, bytes) else str(u))
                         for u in data[0].split()
                     }
-                    uids_locaux = set(uids_en_cache(self.compte, "INBOX"))
+                    uids_locaux = set(uids_connus_en_cache(self.compte, "INBOX"))
                     nouveaux = uids_serveur - uids_locaux
                     print(f"[RELEVE-ARRIERE-PLAN] {_adr} : {len(uids_serveur)} sur le "
                           f"serveur, {len(uids_locaux)} en local, {len(nouveaux)} nouveau(x)")
+                    if nouveaux:
+                        reste = basculer_en_entetes(
+                            self.compte, "INBOX", conn,
+                            sorted(nouveaux, key=lambda u: int(u) if u.isdigit() else 0, reverse=True))
+                        if len(reste) < len(nouveaux):
+                            nb_visibles = len(nouveaux) - len(reste)
+                            nouveaux = set(reste)
+                            if not nouveaux:
+                                self.nouveaux.emit(self.compte["adresse"])
+                                self.verifie.emit(_adr, nb_visibles)
+                                return
                     if not nouveaux:
                         self.verifie.emit(_adr, 0)
                         return
@@ -23127,11 +24511,16 @@ if (typeof module === 'object') {
                     self.verifie.emit(_adr, nb_non_spam)
                 except Exception as e:
                     print(f"[RELEVE-ARRIERE-PLAN] {_adr} : échec ({type(e).__name__}: {e})")
+                    moteur_erreur(_adr, f"Relève impossible ({type(e).__name__})")
                 finally:
                     fermer_connexion_imap(conn)
+                    moteur_fin(_adr, "releve")
 
         t = ReleveArrierePlan(compte)
         t.nouveaux.connect(self._on_nouveaux_releve_arriere_plan)
+        # Console : résultat de chaque relève, et fin d'une éventuelle erreur
+        t.verifie.connect(lambda adr, nb: (moteur_erreur(adr, None), moteur_evenement(
+            adr, f"Relève : {nb} nouveau(x) mail(s)" if nb else "Relève : rien de nouveau")))
         if afficher_puce:
             t.verifie.connect(self._afficher_resultat_releve)
         t.start()
@@ -23382,6 +24771,7 @@ if (typeof module === 'object') {
         (ChargeurNonLus) lit exclusivement le cache local, donc sans ce
         rapatriement le badge (n) restait à son ancienne valeur jusqu'à ce
         qu'on clique sur le compte (ce qui déclenche un vrai relevé)."""
+        moteur_evenement(adresse, "Réception instantanée : le serveur signale un nouveau mail")
         if adresse in self.idle_threads_arriere_plan:
             ancien = self.idle_threads_arriere_plan.pop(adresse)
             self._abandonner_thread_idle(ancien)
@@ -23518,6 +24908,9 @@ if (typeof module === 'object') {
     def _on_nouveau_mail(self):
         """Appelé par le thread IDLE quand un nouveau mail arrive."""
         dossier_idle = self.idle_thread.dossier if self.idle_thread else "INBOX"
+        if self.compte_actif:
+            moteur_evenement(self.compte_actif["adresse"],
+                             "Réception instantanée : le serveur signale un nouveau mail")
         if self._deplacement_en_cours:
             self._demarrer_idle(dossier_idle)
             return
@@ -23551,25 +24944,36 @@ if (typeof module === 'object') {
             def run(self):
                 import email as _email
                 conn = None
+                _adr_ctl = self.compte.get("adresse", "?")
+                moteur_activite(_adr_ctl, "reception", "Réception des nouveaux mails : vérification…")
                 try:
                     conn = connexion_imap(self.compte)
                     conn = _authentifier_connexion_imap(conn, self.compte)
                     conn.select(f'"{self.dossier}"', readonly=True)
                     st, data = conn.uid('search', None, "UNDELETED")
                     if st != "OK":
+                        moteur_fin(_adr_ctl, "reception")
                         self.termine.emit()
                         return
                     uids_serveur = data[0].split()
-                    uids_locaux  = uids_en_cache(self.compte, self.dossier)
+                    uids_locaux  = uids_connus_en_cache(self.compte, self.dossier)
                     nouveaux     = [u for u in uids_serveur
                                     if (u.decode() if isinstance(u, bytes) else str(u))
                                     not in uids_locaux]
+                    # Mode « en-têtes d'abord » si besoin (voir basculer_en_entetes)
+                    _restants = set(basculer_en_entetes(
+                        self.compte, self.dossier, conn,
+                        sorted((u.decode() if isinstance(u, bytes) else str(u) for u in nouveaux),
+                               key=lambda u: int(u) if u.isdigit() else 0, reverse=True)))
+                    nouveaux = [u for u in nouveaux
+                                if (u.decode() if isinstance(u, bytes) else str(u)) in _restants]
                     nb_total = len(nouveaux)
                     if nb_total > 0:
                         self.statut.emit(f"  ⟳ Pré-lecture : 0/{nb_total} nouveaux mails...")
 
                     for i, uid in enumerate(nouveaux, 1):
                         uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
+                        moteur_activite(_adr_ctl, "reception", "Réception des nouveaux mails", i, nb_total)
                         try:
                             st2, d2 = conn.uid('fetch', uid, "(FLAGS BODY.PEEK[])")
                             if st2 == "OK" and d2 and d2[0] and isinstance(d2[0], tuple):
@@ -23635,10 +25039,13 @@ if (typeof module === 'object') {
                     if nb_total > 0:
                         self.statut.emit(
                             f"  ✓ {nb_total} nouveau(x) mail(s) prêt(s)")
-                except Exception:
-                    pass
+                    moteur_evenement(_adr_ctl, f"Réception : {nb_total} nouveau(x) mail(s)"
+                                     if nb_total else "Réception : rien de nouveau")
+                except Exception as e:
+                    moteur_erreur(_adr_ctl, f"Réception impossible ({type(e).__name__})")
                 finally:
                     fermer_connexion_imap(conn)
+                    moteur_fin(_adr_ctl, "reception")
                 self.termine.emit()
 
         self._abandonner_cacheur(getattr(self, '_cacheur', None))
@@ -24201,6 +25608,22 @@ if (typeof module === 'object') {
         layout.addLayout(ligne_btn)
 
         boite.exec()
+
+    def ouvrir_console(self):
+        """Fenêtre CONTRÔLE (une seule à la fois, ramenée au premier plan si
+        déjà ouverte) — voir FenetreConsole."""
+        try:
+            console = getattr(self, "_console", None)
+            if console is not None and console.isVisible():
+                console.raise_()
+                console.activateWindow()
+                return
+            self._console = FenetreConsole(self)
+            self._console.show()
+        except Exception as e:
+            import traceback
+            print(f"[CONTROLE] Exception à l'ouverture : {type(e).__name__}: {e}")
+            print(traceback.format_exc())
 
     def ouvrir_carnet_adresses(self):
         """Voir le commentaire de gerer_comptes : try/except local pour ne
@@ -27066,7 +28489,7 @@ if (typeof module === 'object') {
 
             # Seuls les mails COMPLETS sur le disque sont cherchables (19/09/2026,
             # même définition que les listes et les compteurs).
-            uids_complets_rech = uids_complets_en_cache(self.compte_actif, nom_safe)
+            uids_complets_rech = uids_visibles_en_cache(self.compte_actif, nom_safe, meta)
 
             # Compléter depuis les .eml eux-mêmes (18/09/2026) : _meta.json ne
             # connaît que les mails déjà passés par un chargeur de liste. Un mail
@@ -27075,7 +28498,8 @@ if (typeof module === 'object') {
             # maintenant sur le disque et non plus sur le serveur, doit le
             # trouver quand même.
             try:
-                uids_eml = [f[:-4] for f in os.listdir(chemin_dossier_rech) if f.endswith(".eml")]
+                uids_eml = [uid_depuis_nom_fichier(f[:-4]) for f in os.listdir(chemin_dossier_rech)
+                            if f.endswith(".eml")]
             except OSError:
                 uids_eml = []
             for uid_eml in uids_eml:
@@ -27083,7 +28507,7 @@ if (typeof module === 'object') {
                 if info_meta and (info_meta.get("de") or info_meta.get("sujet")):
                     continue
                 try:
-                    with open(os.path.join(chemin_dossier_rech, f"{uid_eml}.eml"), "rb") as f_eml:
+                    with open(chemin_cache_eml(self.compte_actif, nom_safe, uid_eml), "rb") as f_eml:
                         entetes_rech = email.message_from_bytes(f_eml.read(16384))
                     meta[uid_eml] = {**(info_meta or {}),
                                      "de": decoder_entete(entetes_rech.get("From", "")),
@@ -27457,12 +28881,44 @@ if (typeof module === 'object') {
             fenetre_redaction.raise_()
             fenetre_redaction.activateWindow()
 
+    def _attendre_contenu_puis(self, msg_info, relancer):
+        """Mail du mode « en-têtes d'abord » dont le contenu n'est pas encore
+        là (09/10/2026) : téléchargé en priorité, puis relancer() (Répondre,
+        Transférer...) dès qu'il est arrivé, si ce mail est toujours
+        sélectionné. Retourne True si l'action doit attendre."""
+        import time as _t
+        compte = self.compte_actif
+        if not compte or not msg_info:
+            return False
+        dossier = self._nom_imap(msg_info.get("dossier") or self.dossier_actif)
+        uid = msg_info.get("uid")
+        if not est_entete_seul(compte, dossier, uid):
+            return False
+        demander_corps_prioritaire(compte, dossier, uid)
+        self.label_statut.setText("  Téléchargement du mail en cours, la fenêtre de rédaction va s'ouvrir…")
+        debut = _t.time()
+
+        def _verifier():
+            if self.compte_actif is not compte or self._item_selectionne != uid:
+                return
+            if not est_entete_seul(compte, dossier, uid):
+                self.label_statut.setText("")
+                relancer()
+            elif _t.time() - debut > 60:
+                self.label_statut.setText("  Ce mail n'a pas encore pu être téléchargé — réessayez dans un instant.")
+            else:
+                QTimer.singleShot(500, _verifier)
+        QTimer.singleShot(500, _verifier)
+        return True
+
     def repondre(self):
         item = self.liste_messages.currentItem()
         if not item:
             return
         msg_info = next((m for m in self.messages if m["uid"] == item.data(Qt.ItemDataRole.UserRole)), None)
         if not msg_info:
+            return
+        if self._attendre_contenu_puis(msg_info, self.repondre):
             return
         # Extraire adresse email de l'expéditeur
         de = msg_info["de"]
@@ -27481,6 +28937,8 @@ if (typeof module === 'object') {
             return
         msg_info = next((m for m in self.messages if m["uid"] == item.data(Qt.ItemDataRole.UserRole)), None)
         if not msg_info:
+            return
+        if self._attendre_contenu_puis(msg_info, self.repondre_a_tous):
             return
         de = msg_info["de"]
         match = re.search(r'<(.+?)>', de)
@@ -27607,6 +29065,8 @@ if (typeof module === 'object') {
             return
         msg_info = next((m for m in self.messages if m["uid"] == item.data(Qt.ItemDataRole.UserRole)), None)
         if not msg_info:
+            return
+        if self._attendre_contenu_puis(msg_info, self.transferer):
             return
         sujet = msg_info["sujet"]
         if not sujet.lower().startswith("tr:") and not sujet.lower().startswith("fwd:"):
@@ -28748,6 +30208,7 @@ if (typeof module === 'object') {
         à un échec réseau ponctuel survenu au moment de la réception —
         sans ça, le résultat cassé reste figé indéfiniment dans le cache,
         même une fois le site à nouveau disponible."""
+        from PySide6.QtWidgets import QMessageBox
         item = self.liste_messages.currentItem()
         if not item or item.data(ROLE_SEPARATEUR):
             QMessageBox.information(self, "Recharger", "Aucun mail sélectionné.")
@@ -28816,6 +30277,7 @@ if (typeof module === 'object') {
         page.printToPdf(chemin)
 
     def _impression_pdf_terminee(self, chemin, succes):
+        from PySide6.QtWidgets import QMessageBox
         if succes:
             # Même retour visuel que COPIER : le bouton affiche "✓ Enregistré"
             # pendant 2 s (pas de barre d'état dans la fenêtre principale).
@@ -29086,7 +30548,7 @@ if (typeof module === 'object') {
             # Mail listé avec défaut d'images : bandeau d'avertissement (voir
             # injecter_bandeau_defaut_images ; le .html disque reste intact).
             _etat_inc = lire_etat_incomplet(chemin_eml_courant)
-            if _etat_inc is not None:
+            if _etat_inc is not None and not _etat_inc.get("provisoire"):
                 html_disque = injecter_bandeau_defaut_images(html_disque, _etat_inc)
             # Enrichir avec les métadonnées connues (de, date, sujet depuis _meta.json)
             payload_disque = {
@@ -29143,8 +30605,11 @@ if (typeof module === 'object') {
                   f"UID={uid_str} : mail ouvert avant d'être complet sur le disque "
                   f"({'.eml présent, .html manquant' if raw_cache else '.eml absent'}) — "
                   f"attente automatique, rien n'est généré ni téléchargé à l'ouverture")
-            if not raw_cache:
+            if not raw_cache and not attend_affichage(self.compte_actif, _dossier_imap(), uid):
                 signaler_echec_telechargement(self.compte_actif, _dossier_imap(), uid)
+        if attend_affichage(self.compte_actif, _dossier_imap(), uid):
+            # Mode « en-têtes d'abord » : ce mail passe devant tout le reste
+            demander_corps_prioritaire(self.compte_actif, _dossier_imap(), uid)
         self._afficher_mail_en_preparation(uid)
 
     def _afficher_mail_en_preparation(self, uid):
@@ -29643,6 +31108,91 @@ if (typeof module === 'object') {
                 print("[PJ-DEBUG] double-clic : index hors limites")
         except Exception as e:
             print(f"[PJ-DEBUG] EXCEPTION ouverture externe : {e}")
+
+    def aller_au_mail(self, compte, dossier_safe, uid):
+        """Ouvre dans la fenêtre principale un mail précis, désigné par son
+        dossier de cache et son identifiant (10/10/2026, liste des photos
+        introuvables). Bascule d'abord sur le compte si besoin et attend que
+        ses dossiers soient chargés, puis sélectionne le dossier, recharge la
+        liste et sélectionne le mail — même enchaînement que l'ouverture du
+        mail de réponse (_ouvrir_mail_reponse_depuis_js)."""
+        uid = uid.decode() if isinstance(uid, bytes) else str(uid)
+        self.showNormal() if self.isMinimized() else None
+        self.raise_()
+        self.activateWindow()
+        debut = time.time()
+
+        def _quand_compte_pret():
+            if self.compte_actif is not compte:
+                if time.time() - debut > 15:
+                    self.label_statut.setText("  Impossible d'ouvrir ce compte pour le moment.")
+                    return
+                QTimer.singleShot(200, _quand_compte_pret)
+                return
+            brut = next((b for a, b in (self._map_imap or {}).items()
+                         if b.replace("/", "_").replace("\\", "_").replace('"', '') == dossier_safe), None)
+            if brut is None:
+                if time.time() - debut < 15:
+                    QTimer.singleShot(200, _quand_compte_pret)
+                    return
+                brut = dossier_safe
+            affiche = next((a for a, b in self._map_imap.items() if b == brut), brut)
+            it = QTreeWidgetItemIterator(self.arbre_dossiers)
+            while it.value():
+                if it.value().data(0, Qt.ItemDataRole.UserRole) == affiche:
+                    self.arbre_dossiers.blockSignals(True)
+                    self.arbre_dossiers.setCurrentItem(it.value())
+                    self.arbre_dossiers.scrollToItem(it.value())
+                    self.arbre_dossiers.blockSignals(False)
+                    break
+                it += 1
+            # Ligne du compte désélectionnée (10/10/2026, bug remonté) : restée
+            # sélectionnée, un clic dessus ne déclenchait plus rien — impossible
+            # de revenir à la Boîte de réception sans passer par un autre compte.
+            # Même principe que l'ouverture du mail de réponse.
+            self.liste_comptes.blockSignals(True)
+            self.liste_comptes.clearSelection()
+            self.liste_comptes.setCurrentRow(-1)
+            self.liste_comptes.blockSignals(False)
+            self.dossier_actif = affiche
+            self._maj_label_dossier()
+            self.liste_messages.clear()
+            self._vider_cef()
+            self.label_statut.setText("  Chargement...")
+            self._item_selectionne = None
+            etat = {"trouve": False}
+
+            def _selectionner():
+                if etat["trouve"] or self.dossier_actif != affiche or self.compte_actif is not compte:
+                    return
+                for i in range(self.liste_messages.count()):
+                    cible = self.liste_messages.item(i)
+                    u = cible.data(Qt.ItemDataRole.UserRole) if cible else None
+                    if (u.decode() if isinstance(u, bytes) else u) == uid:
+                        etat["trouve"] = True
+                        self.liste_messages.blockSignals(True)
+                        self.liste_messages.setCurrentRow(i)
+                        self.liste_messages.blockSignals(False)
+                        self.liste_messages.scrollToItem(cible)
+                        self._item_selectionne = u
+                        self._item_a_afficher = cible
+                        QTimer.singleShot(0, self._afficher_message_selectionne_differe)
+                        return
+                self.label_statut.setText("  Ce mail n'est plus dans ce dossier (déplacé ou supprimé).")
+            self._lancer_chargeur_messages(compte, brut, apres_affichage=_selectionner)
+
+        if self.compte_actif is not compte:
+            for i in range(self.liste_comptes.count()):
+                item = self.liste_comptes.item(i)
+                try:
+                    _d, c = item.data(Qt.ItemDataRole.UserRole)
+                except Exception:
+                    continue
+                if c is compte or (c and c.get("adresse") == compte["adresse"]):
+                    compte = c
+                    self.liste_comptes.setCurrentItem(item)
+                    break
+        _quand_compte_pret()
 
     def _ouvrir_mail_reponse_depuis_js(self):
         """Appelée depuis le JS de la bannière "Vous avez répondu à ce
@@ -35689,6 +37239,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
                 self._prechargeur.arreter()
             if getattr(self, '_retelechargeur', None):
                 self._retelechargeur.arreter()
+                if getattr(self, '_remplisseur', None):
+                    self._remplisseur.arreter()
         except Exception:
             pass
         # Arrêter les autres threads
@@ -36095,6 +37647,12 @@ if __name__ == "__main__":
         suivre_cookies_profil_web(PROFIL_WEB_NOMME)
     except Exception as _err_cookies:
         print(f"[VIDEO-WEB] suivi des cookies impossible : {_err_cookies}")
+
+    # Cache Outlook : noms de fichiers sensibles à la casse (une seule fois)
+    try:
+        migrer_noms_fichiers_graph()
+    except Exception as _err_migration:
+        print(f"[MIGRATION-CASSE] échec : {_err_migration}")
 
     fenetre = ClientMail()
     if len(COMPTES) == 1 and COMPTES[0].get("adresse") == ADRESSE_COMPTE_FACTICE:
