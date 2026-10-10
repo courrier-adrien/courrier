@@ -20416,6 +20416,16 @@ def mails_photos_introuvables(compte):
     return resultat
 
 
+def _est_dossier_corbeille(nom):
+    """Corbeille ou indésirables : y supprimer un mail l'efface définitivement."""
+    n = (nom or "").lower()
+    return any(m in n for m in ("trash", "corbeille", "supprim", "deleted")) or dossier_est_spam(nom or "")
+
+def _est_tous_les_messages_gmail(nom):
+    n = (nom or "").lower()
+    return "[gmail]" in n and ("tous les messages" in n or "all mail" in n)
+
+
 class FenetrePhotosIntrouvables(QWidget):
     """Liste des mails d'un compte dont des photos sont introuvables
     (10/10/2026, demandé : la ligne de CONTRÔLE disait combien, pas
@@ -20453,8 +20463,8 @@ class FenetrePhotosIntrouvables(QWidget):
         entete = QLabel(
             f"{len(mails)} mail(s) affiché(s) sans certaines photos : elles ne sont plus "
             f"disponibles chez l'expéditeur (le reste du mail est intact).\n"
-            f"Double-cliquez sur un mail pour l'ouvrir dans COURRIER — vous pourrez le garder "
-            f"ou le supprimer.")
+            f"Double-cliquez sur un mail pour l'ouvrir dans COURRIER — sélection multiple "
+            f"(Maj, Ctrl, Ctrl+A) puis Suppr pour supprimer.")
         entete.setWordWrap(True)
         entete.setStyleSheet("color: white; padding-bottom: 6px;")
         couche.addWidget(entete)
@@ -20463,7 +20473,19 @@ class FenetrePhotosIntrouvables(QWidget):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Sélection multiple (10/10/2026, demandé) : Maj+clic, Ctrl+clic,
+        # Maj+flèches, Maj+Page suivante/précédente, Ctrl+A — comportement
+        # natif de Qt en mode étendu, comme la liste des mails.
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        class _ItemTriable(QTableWidgetItem):
+            """Tri sur une clé cachée (date réelle, nombre) plutôt que sur le
+            texte affiché ("02/04/2025" < "30/03/2025" en texte)."""
+            def __lt__(self, autre):
+                a, b = self.data(Qt.ItemDataRole.UserRole + 1), autre.data(Qt.ItemDataRole.UserRole + 1)
+                if a is not None and b is not None:
+                    return a < b
+                return super().__lt__(autre)
         en_tete = table.horizontalHeader()
         for i, mode in enumerate((QHeaderView.ResizeMode.ResizeToContents,
                                   QHeaderView.ResizeMode.ResizeToContents,
@@ -20492,14 +20514,30 @@ class FenetrePhotosIntrouvables(QWidget):
         for r, (h, nom_dossier, de, sujet, nb, dossier_safe, uid) in enumerate(lignes):
             valeurs = (_t.strftime("%d/%m/%Y %H:%M", _t.localtime(h)) if h else "—",
                        nom_dossier, de, sujet, str(nb))
+            cles_tri = (h, nom_dossier.lower(), de.lower(), sujet.lower(), nb)
             for c, v in enumerate(valeurs):
-                item = QTableWidgetItem(v)
-                item.setData(Qt.ItemDataRole.UserRole, (dossier_safe, uid))
+                item = _ItemTriable(v)
+                item.setData(Qt.ItemDataRole.UserRole, (dossier_safe, uid, nom_dossier))
+                item.setData(Qt.ItemDataRole.UserRole + 1, cles_tri[c])
                 table.setItem(r, c, item)
+        # Tri par colonne (clic sur l'en-tête) : par expéditeur, on sélectionne
+        # d'un bloc tous les mails d'une même newsletter.
+        table.setSortingEnabled(True)
+        table.sortItems(0, Qt.SortOrder.DescendingOrder)
         table.cellDoubleClicked.connect(self._ouvrir)
+        table.itemSelectionChanged.connect(self._maj_bouton_supprimer)
+        from PySide6.QtGui import QKeySequence
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), table).activated.connect(self._supprimer_selection)
         couche.addWidget(table)
         self._table = table
+        self._entete = entete
         ligne_bas = QHBoxLayout()
+        self._btn_supprimer = QPushButton("  Supprimer la sélection  ")
+        self._btn_supprimer.setStyleSheet(STYLE_BOUTON)
+        self._btn_supprimer.setToolTip("Touche Suppr : même effet. Sélection multiple : Maj, Ctrl, Ctrl+A")
+        self._btn_supprimer.clicked.connect(self._supprimer_selection)
+        self._btn_supprimer.setEnabled(False)
+        ligne_bas.addWidget(self._btn_supprimer)
         ligne_bas.addStretch(1)
         btn_fermer = QPushButton("  Fermer  ")
         btn_fermer.setStyleSheet(STYLE_BOUTON)
@@ -20517,8 +20555,65 @@ class FenetrePhotosIntrouvables(QWidget):
         item = self._table.item(ligne, 0)
         if item is None:
             return
-        dossier_safe, uid = item.data(Qt.ItemDataRole.UserRole)
+        dossier_safe, uid, _nom = item.data(Qt.ItemDataRole.UserRole)
         self._cm.aller_au_mail(self._compte, dossier_safe, uid)
+
+    def _lignes_selectionnees(self):
+        return sorted({i.row() for i in self._table.selectedItems()})
+
+    def _maj_bouton_supprimer(self):
+        n = len(self._lignes_selectionnees())
+        self._btn_supprimer.setEnabled(n > 0)
+        self._btn_supprimer.setText(f"  Supprimer la sélection ({n})  " if n else "  Supprimer la sélection  ")
+
+    def _supprimer_selection(self):
+        """Suppression des mails sélectionnés, après confirmation (10/10/2026,
+        demandé). Même mécanisme que la suppression dans la liste des mails
+        (ClientMail.supprimer_mails_hors_liste) : vers la Corbeille du
+        serveur, ou effacement définitif pour ce qui y est déjà."""
+        from PySide6.QtWidgets import QMessageBox
+        lignes = self._lignes_selectionnees()
+        if not lignes:
+            return
+        choix = [self._table.item(r, 0).data(Qt.ItemDataRole.UserRole) for r in lignes]
+        definitifs = [c for c in choix if _est_dossier_corbeille(c[2]) or _est_dossier_corbeille(c[0])]
+        gmail_tous = [c for c in choix if _est_tous_les_messages_gmail(c[2]) or _est_tous_les_messages_gmail(c[0])]
+        n = len(choix)
+        texte = f"Supprimer {n} mail(s) ?"
+        details = []
+        if n - len(definitifs):
+            details.append(f"• {n - len(definitifs)} mail(s) iront dans la Corbeille.")
+        if definitifs:
+            details.append(f"• {len(definitifs)} mail(s) sont déjà dans la Corbeille ou les "
+                           f"indésirables : ils seront EFFACÉS DÉFINITIVEMENT.")
+        if gmail_tous:
+            details.append(f"• Gmail : {len(gmail_tous)} mail(s) de « Tous les messages » "
+                           f"disparaîtront aussi de la Boîte de réception et des Envoyés "
+                           f"(chez Gmail, c'est le même mail).")
+        boite = QMessageBox(self)
+        boite.setWindowTitle("Supprimer")
+        boite.setIcon(QMessageBox.Icon.Warning if definitifs else QMessageBox.Icon.Question)
+        boite.setText(texte)
+        boite.setInformativeText("\n".join(details))
+        boite.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        boite.setDefaultButton(QMessageBox.StandardButton.No)
+        boite.button(QMessageBox.StandardButton.Yes).setText("Supprimer")
+        boite.button(QMessageBox.StandardButton.No).setText("Annuler")
+        if boite.exec() != QMessageBox.StandardButton.Yes:
+            return
+        groupes = {}
+        for dossier_safe, uid, _nom in choix:
+            groupes.setdefault(dossier_safe, []).append(uid)
+        self._cm.supprimer_mails_hors_liste(self._compte, groupes)
+        for r in reversed(lignes):
+            self._table.removeRow(r)
+        restants = self._table.rowCount()
+        self._entete.setText(
+            f"{restants} mail(s) affiché(s) sans certaines photos : elles ne sont plus "
+            f"disponibles chez l'expéditeur (le reste du mail est intact).\n"
+            f"Double-cliquez sur un mail pour l'ouvrir dans COURRIER — sélection multiple "
+            f"(Maj, Ctrl, Ctrl+A) puis Suppr pour supprimer.")
+        self._maj_bouton_supprimer()
 
 
 class FenetreConsole(QWidget):
@@ -29828,6 +29923,87 @@ if (typeof module === 'object') {
             self._file_attente_suppression.setdefault(compte_suppression.get("adresse"), []).append(suppresseur)
             self.label_statut.setText(
                 f"{len(uids)} mail(s) en file d'attente — suppression déjà en cours pour ce compte…")
+        else:
+            self._suppresseurs_en_cours.append(suppresseur)
+            suppresseur.start()
+
+    def supprimer_mails_hors_liste(self, compte, groupes):
+        """Supprime des mails désignés par {dossier de cache: [identifiants]},
+        sans passer par la liste affichée (10/10/2026, fenêtre « Photos
+        introuvables »). Même enchaînement que _supprimer_items : pierres
+        tombales, cache local effacé tout de suite (le compteur de CONTRÔLE
+        baisse aussitôt), puis SupprimeurMessages / SupprimeurMessagesGraph
+        en arrière-plan, une suppression à la fois par compte."""
+        _d, tuples_map = charger_cache_arbo(compte)
+        brut_par_safe = {b.replace("/", "_").replace("\\", "_").replace('"', ''): b
+                         for _a, b in (tuples_map or [])}
+        for dossier_safe, uids in groupes.items():
+            dossier_imap = brut_par_safe.get(dossier_safe, dossier_safe)
+            dans_corbeille = _est_dossier_corbeille(dossier_imap)
+            marquer_tombes_cache(compte, dossier_imap, uids)
+            dates_reponse, message_ids = {}, {}
+            for uid in uids:
+                self._invalider_cache_html(uid)
+                chemin = chemin_cache_eml(compte, dossier_imap, uid)
+                try:
+                    with open(chemin, "rb") as f:
+                        mid = email.message_from_bytes(f.read(4096)).get("Message-ID", "").strip()
+                    if mid:
+                        message_ids[uid] = mid
+                except OSError:
+                    pass
+                try:
+                    with open(chemin.replace(".eml", ".reply"), encoding="utf-8") as f:
+                        dr = f.read().strip()
+                    if dr:
+                        dates_reponse[uid] = dr
+                except OSError:
+                    pass
+                try:
+                    if os.path.exists(chemin):
+                        os.remove(chemin)
+                    supprimer_cache_html_disque(chemin)   # .html + marqueur .incomplet
+                except OSError:
+                    pass
+            print(f"[SUPPR-HORS-LISTE] {compte.get('adresse', '?')} {dossier_imap} : "
+                  f"{len(uids)} mail(s) supprimé(s) depuis « Photos introuvables »"
+                  + (" (définitif)" if dans_corbeille else ""))
+            moteur_evenement(compte["adresse"], f"{len(uids)} mail(s) supprimé(s) depuis "
+                             f"« Photos introuvables »")
+            if compte.get("protocole") == "graph":
+                suppresseur = SupprimeurMessagesGraph(compte, list(uids), dans_corbeille)
+            else:
+                suppresseur = SupprimeurMessages(compte, dossier_imap, list(uids), dans_corbeille,
+                                                 dates_reponse=dates_reponse, message_ids=message_ids)
+            self._lancer_suppresseur_en_file(compte, suppresseur, dossier_imap)
+        # Le dossier affiché fait partie des dossiers touchés : liste rafraîchie
+        if self.compte_actif and self.compte_actif.get("adresse") == compte.get("adresse") \
+                and self.dossier_actif and self._nom_imap(self.dossier_actif) in \
+                {brut_par_safe.get(d, d) for d in groupes}:
+            self._lancer_chargeur_messages(self.compte_actif, self.dossier_actif,
+                                           confirmation_silencieuse=True)
+
+    def _lancer_suppresseur_en_file(self, compte, suppresseur, dossier_imap):
+        """Une seule suppression à la fois par compte (même règle et même file
+        que _supprimer_items, voir le garde-fou du 10/09/2026)."""
+        def on_termine(ok, t=suppresseur):
+            if t in self._suppresseurs_en_cours:
+                self._suppresseurs_en_cours.remove(t)
+            file_attente = getattr(self, '_file_attente_suppression', {}).get(compte.get("adresse"))
+            if file_attente:
+                suivant = file_attente.pop(0)
+                self._suppresseurs_en_cours.append(suivant)
+                suivant.start()
+            if not ok and self.compte_actif and self.compte_actif.get("adresse") == compte.get("adresse") \
+                    and self._nom_imap(self.dossier_actif) == dossier_imap:
+                self._lancer_chargeur_messages(self.compte_actif, self.dossier_actif)
+        suppresseur.termine.connect(on_termine)
+        suppresseur.progression.connect(self._on_progression_suppression)
+        if not hasattr(self, '_file_attente_suppression'):
+            self._file_attente_suppression = {}
+        if any(getattr(s, 'compte', {}).get("adresse") == compte.get("adresse")
+               for s in self._suppresseurs_en_cours):
+            self._file_attente_suppression.setdefault(compte.get("adresse"), []).append(suppresseur)
         else:
             self._suppresseurs_en_cours.append(suppresseur)
             suppresseur.start()
