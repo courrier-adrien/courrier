@@ -3224,54 +3224,418 @@ _verrou_rss_global = {"en_cours": False}
 # vérification, au plus une fois par période choisie dans la fenêtre RSS
 # (0 = à chaque vérification). Réglages mémorisés sur le flux lui-même
 # ("programme", "programme_periode" en minutes, "programme_dernier").
-PERIODES_PROGRAMME_RSS = [
-    ("À chaque vérification", 0),
-    ("Toutes les 30 minutes", 30),
-    ("Toutes les heures", 60),
-    ("Toutes les 6 heures", 360),
-    ("Une fois par jour", 1440),
-]
 
-def lancer_programme_flux(flux, forcer=False):
-    """Lance le programme de mise à jour du flux s'il y en a un et que sa
-    période est écoulée (ou si forcer=True). Attend sa fin (5 min maximum)
-    pour que la vérification lise le fichier tout juste réécrit. Ne lève
-    jamais d'exception : un programme en échec n'empêche pas de lire le
-    flux tel qu'il est."""
-    import subprocess, shutil, time as _time_prog
-    programme = (flux.get("programme") or "").strip().strip('"')
-    if not programme:
-        return
-    periode_s = int(flux.get("programme_periode", 0) or 0) * 60
-    maintenant = _time_prog.time()
-    if not forcer and maintenant - float(flux.get("programme_dernier", 0) or 0) < periode_s:
-        return
-    flux["programme_dernier"] = maintenant
-    if not os.path.isfile(programme):
-        print(f"[RSS] Programme introuvable pour {flux.get('nom','?')} : {programme}")
-        return
-    extension = os.path.splitext(programme)[1].lower()
-    if extension in (".py", ".pyw"):
-        # Jamais sys.executable : dans l'exe, c'est COURRIER lui-même.
-        interprete = next((shutil.which(n) for n in ("pythonw", "pyw", "python", "py") if shutil.which(n)), None)
-        if not interprete:
-            print(f"[RSS] Python introuvable, impossible de lancer {programme}")
-            return
-        commande = [interprete, programme]
-    elif extension in (".bat", ".cmd"):
-        commande = ["cmd", "/c", programme]
-    else:
-        commande = [programme]
+# ── Recherche de flux à partir d'une adresse de site (10/10/2026) ─────────
+_UA_RECHERCHE_FLUX = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
+_CHEMINS_FLUX_HABITUELS = ("/feed", "/feed/", "/rss", "/rss/", "/rss.xml", "/feed.xml",
+                           "/atom.xml", "/index.xml", "/?feed=rss2", "/feeds/posts/default")
+
+def _telecharger_pour_flux(url, timeout=15, limite=3_000_000):
+    """(adresse finale après redirections, octets) — lève une exception en cas d'échec."""
+    import urllib.request
+    requete = urllib.request.Request(url, headers={
+        "User-Agent": _UA_RECHERCHE_FLUX,
+        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.9, */*;q=0.8"})
+    with urllib.request.urlopen(requete, timeout=timeout, context=CONTEXTE_SSL) as r:
+        return r.geturl(), r.read(limite)
+
+def _titre_si_flux(contenu):
+    """Titre du flux si contenu est un flux RSS/Atom lisible, sinon None."""
+    import xml.etree.ElementTree as ET
+    debut = contenu[:2000].lstrip().lower()
+    if not (b"<rss" in debut or b"<feed" in debut or b"<rdf:rdf" in debut or debut.startswith(b"<?xml")):
+        return None
     try:
-        res = subprocess.run(
-            commande, cwd=os.path.dirname(programme), capture_output=True, timeout=300,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if res.returncode != 0:
-            print(f"[RSS] {programme} a échoué (code {res.returncode}) : "
-                  f"{res.stderr.decode('utf-8', 'replace').strip()[-500:]}")
-    except Exception as e:
-        print(f"[RSS] Échec du lancement de {programme} : {e}")
+        racine = ET.fromstring(contenu)
+    except Exception:
+        return None
+    nom = racine.tag.split("}")[-1].lower()
+    if nom == "rss":
+        canal = racine.find("channel")
+        return ((canal.findtext("title") if canal is not None else "") or "").strip() or "(flux sans titre)"
+    if nom == "feed":
+        titre = racine.find("{http://www.w3.org/2005/Atom}title")
+        return ((titre.text if titre is not None else "") or "").strip() or "(flux sans titre)"
+    if nom == "rdf":
+        for enfant in racine:
+            if enfant.tag.split("}")[-1].lower() == "channel":
+                for e in enfant:
+                    if e.tag.split("}")[-1].lower() == "title":
+                        return (e.text or "").strip() or "(flux sans titre)"
+        return "(flux sans titre)"
+    return None
+
+def chercher_flux_depuis_url(adresse):
+    """[(titre, url_du_flux, nb_articles)] des flux RSS/Atom d'un site — adresse donnée
+    telle quelle si c'est déjà un flux, sinon flux annoncés par la page
+    (<link rel="alternate" ...>), sinon adresses habituelles. Chaque flux
+    est vérifié (téléchargé et lisible). Fonction bloquante : à appeler
+    depuis un fil de fond (ChercheurFluxRSS)."""
+    import re as _re
+    from html import unescape
+    from urllib.parse import urljoin, urlsplit
+    adresse = adresse.strip()
+    if not _re.match(r"^https?://", adresse, _re.IGNORECASE):
+        adresse = "https://" + adresse.lstrip("/")
+    trouves, vus = [], set()
+
+    def _nb_articles(contenu):
+        # Flux valide mais vide (ex. moto-net.com/rss.xml le 10/10/2026)
+        return len(_re.findall(rb"<item[\s>]|<entry[\s>]", contenu, _re.IGNORECASE))
+
+    def _verifier(url, timeout=15):
+        try:
+            finale, contenu = _telecharger_pour_flux(url, timeout=timeout)
+        except Exception:
+            return False
+        titre = _titre_si_flux(contenu)
+        if titre and finale not in vus and url not in vus:
+            vus.update({finale, url})
+            trouves.append((unescape(titre), url, _nb_articles(contenu)))
+            return True
+        return False
+
+    finale, page = _telecharger_pour_flux(adresse)   # erreur réseau : remontée à l'appelant
+    titre = _titre_si_flux(page)
+    if titre:
+        return [(unescape(titre), adresse, _nb_articles(page))]
+    html = page.decode("utf-8", errors="replace")
+    for balise in _re.findall(r"<link\b[^>]*>", html, _re.IGNORECASE):
+        attr = dict((k.lower(), unescape(v1 or v2)) for k, v1, v2 in
+                    _re.findall(r'([a-zA-Z-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', balise))
+        if "alternate" in attr.get("rel", "").lower() and _re.search(
+                r"(rss|atom)\+xml|application/xml|text/xml", attr.get("type", ""), _re.IGNORECASE) \
+                and attr.get("href"):
+            _verifier(urljoin(finale, attr["href"]))
+    if not trouves:
+        racine = "{0.scheme}://{0.netloc}".format(urlsplit(finale))
+        for chemin in _CHEMINS_FLUX_HABITUELS:
+            if _verifier(racine + chemin, timeout=8) and len(trouves) >= 3:
+                break
+    return trouves
+
+
+class ChercheurFluxRSS(QThread):
+    """Recherche de flux en arrière-plan (voir chercher_flux_depuis_url)."""
+    resultat = Signal(list, str)   # [(titre, url)], message d'erreur ("" si aucune)
+
+    def __init__(self, adresse):
+        super().__init__()
+        self.adresse = adresse
+
+    def run(self):
+        try:
+            self.resultat.emit(chercher_flux_depuis_url(self.adresse), "")
+        except Exception as e:
+            self.resultat.emit([], f"{type(e).__name__}: {e}")
+
+
+# ── Flux « page surveillée » : un flux créé par COURRIER pour un site qui
+#    n'en propose pas (10/10/2026, demandé) ──────────────────────────────────
+# La page (ex. « Actualités ») est relue au plus une fois par
+# INTERVALLE_MIN_PAGE_SURVEILLEE_SEC ; chaque nouveau lien de la liste
+# d'articles détectée devient un article (titre, résumé et image pris dans
+# l'aperçu que l'article fournit lui-même — balises og:), daté du jour où il
+# est apparu s'il n'annonce pas sa date. Règles de bon voisinage : jamais de
+# page protégée, robots.txt respecté, pas de recopie de l'article entier.
+INTERVALLE_MIN_PAGE_SURVEILLEE_SEC = 3600
+NB_MAX_APERCUS_PAR_VISITE = 10
+_EXTENSIONS_NON_ARTICLE = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".zip",
+                           ".doc", ".docx", ".xls", ".xlsx", ".mp3", ".mp4", ".ics", ".xml", ".css", ".js")
+
+def robots_autorise(url):
+    """Le site autorise-t-il les robots à lire cette page (robots.txt) ?
+    Absent ou illisible : autorisé (convention habituelle)."""
+    from urllib.robotparser import RobotFileParser
+    from urllib.parse import urlsplit
+    morceaux = urlsplit(url)
+    try:
+        _finale, contenu = _telecharger_pour_flux(f"{morceaux.scheme}://{morceaux.netloc}/robots.txt",
+                                                  timeout=8, limite=500_000)
+    except Exception:
+        return True
+    analyseur = RobotFileParser()
+    analyseur.parse(contenu.decode("utf-8", errors="replace").splitlines())
+    return analyseur.can_fetch("COURRIER", url)
+
+def _domaine_principal(netloc):
+    hote = netloc.lower().split(":")[0]
+    morceaux = hote.split(".")
+    return ".".join(morceaux[-2:]) if len(morceaux) >= 2 else hote
+
+def _texte_html(fragment):
+    import re as _re
+    from html import unescape
+    fragment = _re.sub(r"<!--.*?-->", " ", fragment or "", flags=_re.DOTALL)
+    return " ".join(unescape(_re.sub(r"<[^>]+>", " ", fragment)).split())
+
+def _attributs_html(balise):
+    import re as _re
+    from html import unescape
+    return {k.lower(): unescape(v1 if v1 is not None and v1 != "" else (v2 or v3 or ""))
+            for k, v1, v2, v3 in _re.findall(
+                r'([a-zA-Z_:-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s"\'>]+))', balise)}
+
+def _html_sans_habillage(html):
+    """Page sans scripts, menus, en-tête, pied de page ni formulaires."""
+    import re as _re
+    for balise in ("script", "style", "noscript", "nav", "header", "footer", "aside", "form", "svg"):
+        html = _re.sub(rf"<{balise}\b.*?</{balise}\s*>", " ", html, flags=_re.IGNORECASE | _re.DOTALL)
+    return html
+
+def liens_articles_page(html, url_page):
+    """[(url, texte, image)] de tous les liens « candidats » de la page, dans
+    l'ordre d'apparition — menus, en-tête, pied de page et formulaires
+    retirés, liens vers d'autres sites ou vers des fichiers écartés."""
+    import re as _re
+    from urllib.parse import urljoin, urlsplit
+    html = _html_sans_habillage(html)
+    domaine = _domaine_principal(urlsplit(url_page).netloc)
+    page_sans_ancre = url_page.split("#")[0].rstrip("/")
+    liens, vus = [], {}
+    for m in _re.finditer(r"<a\b([^>]*)>(.*?)</a\s*>", html, _re.IGNORECASE | _re.DOTALL):
+        attrs = _attributs_html(m.group(1))
+        href = (attrs.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        absolu = urljoin(url_page, href).split("#")[0]
+        morceaux = urlsplit(absolu)
+        if morceaux.scheme not in ("http", "https") or _domaine_principal(morceaux.netloc) != domaine:
+            continue
+        if absolu.rstrip("/") == page_sans_ancre or morceaux.path.lower().endswith(_EXTENSIONS_NON_ARTICLE):
+            continue
+        interieur = m.group(2)
+        texte = _texte_html(interieur) or attrs.get("title", "").strip()
+        m_img = _re.search(r"<img\b([^>]*)>", interieur, _re.IGNORECASE)
+        image = ""
+        if m_img:
+            a_img = _attributs_html(m_img.group(1))
+            texte = texte or a_img.get("alt", "").strip()
+            src = a_img.get("data-src") or a_img.get("src") or ""
+            image = urljoin(url_page, src) if src and not src.startswith("data:") else ""
+        if absolu in vus:   # même article lié plusieurs fois (image + titre) : on fusionne
+            i = vus[absolu]
+            u, tx, im = liens[i]
+            liens[i] = (u, tx if len(tx) >= len(texte) else texte, im or image)
+            continue
+        vus[absolu] = len(liens)
+        liens.append((absolu, texte, image))
+    return liens
+
+def _cle_motif(url):
+    """Forme d'un lien, en ignorant ce qui change d'un article à l'autre
+    (10/10/2026, corrigé sur motogp.com : un dossier par article,
+    « /fr/news/2026/10/10/titre/1174849 ») : les deux premières rubriques
+    sont gardées telles quelles (« fr », « news », « actualite »), le reste
+    devient « # » (nombre, date) ou « * » (titre…), le dernier élément
+    toujours. -> (("fr", "news", "#", "#", "#", "*", "#"), False)."""
+    import re as _re
+    from urllib.parse import urlsplit
+    morceaux = urlsplit(url)
+    segments = [s for s in morceaux.path.split("/") if s]
+    forme = []
+    for i, s in enumerate(segments):
+        numerique = bool(_re.fullmatch(r"[\d._-]+", s))
+        if i < 2 and i < len(segments) - 1 and not numerique:
+            forme.append(s.lower())
+        else:
+            forme.append("#" if numerique else "*")
+    return (tuple(forme), bool(morceaux.query))
+
+def listes_articles_candidates(html, url_page, nb_max=5):
+    """[(motif, liens)] des groupes de liens qui ressemblent à une liste
+    d'articles, du plus probable au moins probable (10/10/2026 : une page
+    d'accueil en mélange souvent plusieurs — vidéos, actualités… —, c'est
+    alors à l'utilisateur de choisir)."""
+    groupes = {}
+    for lien in liens_articles_page(html, url_page):
+        groupes.setdefault(_cle_motif(lien[0]), []).append(lien)
+    notes = []
+    for cle, liens in groupes.items():
+        titres = [l for l in liens if len(l[1]) >= 15]
+        if len(titres) < 3 or not cle[0]:
+            continue
+        score = len(titres) * min(sum(len(l[1]) for l in titres) / len(titres), 80) * (len(titres) / len(liens))
+        notes.append((score, {"forme": list(cle[0]), "parametres": cle[1]}, liens))
+    notes.sort(key=lambda n: n[0], reverse=True)
+    return [(motif, liens) for _s, motif, liens in notes[:nb_max]]
+
+def libelle_liste_articles(motif, liens):
+    """« Rubrique news — 191 articles — ex. « MotoGP : … » »."""
+    rubrique = " / ".join(p for p in motif.get("forme", []) if p not in ("#", "*")) or "racine du site"
+    exemple = next((l[1] for l in liens if len(l[1]) >= 15), liens[0][1] if liens else "")
+    return f"Rubrique « {rubrique} » — {len(liens)} article(s) — ex. « {exemple[:60]} »"
+
+def detecter_liste_articles(html, url_page):
+    """Le groupe de liens qui ressemble le plus à une liste d'articles :
+    même forme de lien (voir _cle_motif), au moins 3, et de vrais titres
+    (texte long) plutôt que des entrées de menu. Retourne (motif, liens) ou
+    (None, [])."""
+    groupes = {}
+    for lien in liens_articles_page(html, url_page):
+        groupes.setdefault(_cle_motif(lien[0]), []).append(lien)
+    meilleur, meilleur_score = None, 0.0
+    for cle, liens in groupes.items():
+        titres = [l for l in liens if len(l[1]) >= 15]
+        if len(titres) < 3 or not cle[0]:
+            continue
+        score = len(titres) * min(sum(len(l[1]) for l in titres) / len(titres), 80) * (len(titres) / len(liens))
+        if score > meilleur_score:
+            meilleur, meilleur_score = cle, score
+    if meilleur is None:
+        return None, []
+    return {"forme": list(meilleur[0]), "parametres": meilleur[1]}, groupes[meilleur]
+
+def titre_page(html):
+    import re as _re
+    for motif in (r'<meta[^>]+property=["\']og:site_name["\'][^>]*>', r"<title[^>]*>(.*?)</title>"):
+        m = _re.search(motif, html, _re.IGNORECASE | _re.DOTALL)
+        if m:
+            if m.groups():
+                return _texte_html(m.group(1))
+            return (_attributs_html(m.group(0)).get("content") or "").strip()
+    return ""
+
+def apercu_article(url):
+    """Aperçu qu'un article fournit lui-même (balises og: / description) :
+    {titre, resume, image, date_brute}. Vide en cas d'échec."""
+    import re as _re
+    from email.utils import format_datetime
+    import datetime as _dt
+    try:
+        _finale, contenu = _telecharger_pour_flux(url, timeout=10, limite=1_500_000)
+    except Exception:
+        return {}
+    html = contenu.decode("utf-8", errors="replace")
+    metas = {}
+    for balise in _re.findall(r"<meta\b[^>]*>", html, _re.IGNORECASE):
+        a = _attributs_html(balise)
+        cle = (a.get("property") or a.get("name") or "").lower()
+        if cle and a.get("content") and cle not in metas:
+            metas[cle] = a["content"].strip()
+    date = metas.get("article:published_time") or metas.get("date") or ""
+    if date:
+        try:
+            date = format_datetime(_dt.datetime.fromisoformat(date.replace("Z", "+00:00")))
+        except Exception:
+            date = ""
+    return {"titre": metas.get("og:title") or metas.get("twitter:title") or "",
+            "resume": metas.get("og:description") or metas.get("description") or "",
+            "image": metas.get("og:image") or metas.get("twitter:image") or "",
+            "date_brute": date}
+
+def articles_page_surveillee(flux, deja_vus):
+    """Même résultat que parser_flux_rss pour un flux « page surveillée » :
+    les liens de la page qui ont la forme mémorisée (flux["motif"]),
+    enrichis de leur aperçu pour les nouveaux (au plus
+    NB_MAX_APERCUS_PAR_VISITE par visite)."""
+    from email.utils import formatdate
+    url = flux.get("url", "")
+    motif = flux.get("motif") or {}
+    if not robots_autorise(url):
+        print(f"[RSS] {flux.get('nom') or url} : le site refuse désormais les robots (robots.txt) — page non lue")
+        return {"site_lien": url, "site_description": "", "articles": []}
+    _finale, contenu = _telecharger_pour_flux(url)
+    html = contenu.decode("utf-8", errors="replace")
+    if "forme" not in motif:
+        # Flux créé avant la correction du 10/10/2026 : forme recalculée, et
+        # nouveau départ (tout ce qui est sur la page marqué « déjà vu »),
+        # pour ne pas livrer d'un coup des articles anciens.
+        nouveau, _l = detecter_liste_articles(html, url)
+        if nouveau:
+            flux["motif"] = motif = nouveau
+            flux.pop("items_vus", None)
+            print(f"[RSS] {flux.get('nom') or url} : forme des articles recalculée ({nouveau})")
+    cle_voulue = (tuple(motif.get("forme") or ()), motif.get("parametres"))
+    liens = [l for l in liens_articles_page(html, url) if _cle_motif(l[0]) == cle_voulue]
+    articles, nb_apercus = [], 0
+    for lien, texte, image in liens[:50]:
+        article = {"guid": lien, "titre": texte or lien, "lien": lien, "resume": "",
+                   "date_brute": formatdate(localtime=True), "image": image, "auteur": ""}
+        if lien not in deja_vus and nb_apercus < NB_MAX_APERCUS_PAR_VISITE and "items_vus" in flux:
+            nb_apercus += 1
+            apercu = apercu_article(lien)
+            article["titre"] = apercu.get("titre") or article["titre"]
+            article["resume"] = apercu.get("resume") or ""
+            article["image"] = apercu.get("image") or article["image"]
+            article["date_brute"] = apercu.get("date_brute") or article["date_brute"]
+        articles.append(article)
+    return {"site_lien": url, "site_description": "", "articles": articles}
+
+
+def message_erreur_site(erreur):
+    """Erreur réseau traduite en clair pour l'utilisateur (10/10/2026)."""
+    e = str(erreur)
+    if "403" in e or "401" in e:
+        return "le site refuse la lecture automatique de ses pages (accès interdit)"
+    if "404" in e or "410" in e:
+        return "cette page n'existe pas (ou plus) — vérifiez l'adresse"
+    if "CERTIFICATE_VERIFY_FAILED" in e or "SSL" in e:
+        return "le certificat de sécurité du site est invalide : COURRIER refuse de s'y connecter, comme un navigateur"
+    if "getaddrinfo" in e or "Name or service" in e or "11001" in e:
+        return "adresse introuvable — vérifiez l'orthographe du site"
+    if "timed out" in e or "timeout" in e.lower():
+        return "le site ne répond pas (délai dépassé) — réessayez plus tard"
+    if "429" in e:
+        return "le site limite le nombre de visites — réessayez plus tard"
+    return f"site injoignable ({e[:100]})"
+
+
+class AnalyseurPageRSS(QThread):
+    """Analyse d'une page pour y créer un flux (voir detecter_liste_articles)."""
+    resultat = Signal(dict)   # {"statut": ok|robots|aucun|erreur, ...}
+
+    def __init__(self, adresse):
+        super().__init__()
+        self.adresse = adresse
+
+    def run(self):
+        import re as _re
+        adresse = self.adresse.strip()
+        if not _re.match(r"^https?://", adresse, _re.IGNORECASE):
+            adresse = "https://" + adresse.lstrip("/")
+        try:
+            if not robots_autorise(adresse):
+                self.resultat.emit({"statut": "robots", "url": adresse})
+                return
+            finale, contenu = _telecharger_pour_flux(adresse)
+            html = contenu.decode("utf-8", errors="replace")
+            motif, liens = detecter_liste_articles(html, finale)
+            if motif is None:
+                # Page d'accueil sans liste d'articles : on essaie sa rubrique
+                # d'actualités (lien « News », « Actualités », « Blog »…).
+                from urllib.parse import urlsplit as _us
+                for lien, _texte, _img in liens_articles_page(html, finale):
+                    dernier = [s for s in _us(lien).path.lower().split("/") if s][-1:] or [""]
+                    if dernier[0] in ("news", "actualites", "actualite", "actus", "actu", "blog",
+                                      "infos", "articles", "presse", "communiques") \
+                            and robots_autorise(lien):
+                        try:
+                            f2, c2 = _telecharger_pour_flux(lien)
+                        except Exception:
+                            continue
+                        html2 = c2.decode("utf-8", errors="replace")
+                        m2, l2 = detecter_liste_articles(html2, f2)
+                        if m2:
+                            finale, html, motif, liens = f2, html2, m2, l2
+                            break
+            if motif is None:
+                # Contenu réel (hors menus) quasi vide : page construite par
+                # JavaScript après chargement (ex. fim-moto.com/en/news).
+                self.resultat.emit({"statut": "aucun", "url": finale,
+                                    "peu_de_texte": len(_texte_html(_html_sans_habillage(html))) < 1500})
+                return
+            candidates = [{"motif": m, "titres": [l[1] for l in ls], "libelle": libelle_liste_articles(m, ls)}
+                          for m, ls in listes_articles_candidates(html, finale)] or \
+                         [{"motif": motif, "titres": [l[1] for l in liens],
+                           "libelle": libelle_liste_articles(motif, liens)}]
+            self.resultat.emit({"statut": "ok", "url": finale, "motif": candidates[0]["motif"],
+                                "titres": candidates[0]["titres"], "candidates": candidates,
+                                "nom": titre_page(html)})
+        except Exception as e:
+            self.resultat.emit({"statut": "erreur", "url": adresse, "erreur": f"{type(e).__name__}: {e}"})
+
 
 class VerificateurRSS(QThread):
     """Vérifie tous les flux RSS/Atom abonnés en une passe et dépose chaque
@@ -3313,7 +3677,21 @@ class VerificateurRSS(QThread):
         compte = next((c for c in COMPTES if c.get("adresse") == compte_adresse), None)
         if not compte:
             return False
-        lancer_programme_flux(flux, forcer=self.forcer_programmes)
+        if flux.get("type") == "page":
+            # Flux créé par COURRIER (voir articles_page_surveillee) : au plus
+            # une visite par heure, même si la vérification RSS est plus
+            # fréquente — sauf « Vérifier maintenant ».
+            import time as _t_page
+            if not self.forcer_programmes and _t_page.time() - float(
+                    flux.get("page_derniere_visite", 0) or 0) < INTERVALLE_MIN_PAGE_SURVEILLEE_SEC:
+                return False
+            flux["page_derniere_visite"] = _t_page.time()
+            try:
+                resultat_parse = articles_page_surveillee(flux, set(flux.get("items_vus", [])))
+            except Exception as e:
+                print(f"[RSS] Échec de la lecture de la page {url} : {e}")
+                return False
+            return self._traiter_articles(compte, flux, resultat_parse)
 
         # Requêtes conditionnelles ETag/Last-Modified (19/08/2026, demandé
         # par l'utilisateur après avoir vérifié comment Blogtrottr procède
@@ -3349,7 +3727,12 @@ class VerificateurRSS(QThread):
             print(f"[RSS] Échec du téléchargement de {url} : {e}")
             return False
 
-        resultat_parse = parser_flux_rss(contenu)
+        return self._traiter_articles(compte, flux, parser_flux_rss(contenu))
+
+    def _traiter_articles(self, compte, flux, resultat_parse):
+        """Suite commune aux vrais flux et aux pages surveillées : repérage
+        des nouveaux articles et dépôt dans la boîte du compte."""
+        url = flux.get("url", "")
         articles = resultat_parse["articles"]
         if not articles:
             return False
@@ -3584,7 +3967,6 @@ class RecuperateurAnciensArticles(VerificateurRSS):
             return
         if flux.get("programme"):
             self.progression.emit("Lancement du programme de mise à jour du flux...", 0, 0)
-        lancer_programme_flux(flux, forcer=True)
 
         import urllib.request
         url = flux.get("url", "")
@@ -15068,6 +15450,7 @@ class DialogueAbonnementsRSS(QDialog):
         ligne_titre_comptes.setContentsMargins(0, 0, 0, 0)
         lbl_comptes = QLabel("Comptes :")
         lbl_comptes.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_comptes = lbl_comptes   # « Comptes : X flux », voir _charger_comptes
         ligne_titre_comptes.addWidget(lbl_comptes)
         ligne_titre_comptes.addStretch(1)
         conteneur_titre_comptes = QWidget()
@@ -15165,6 +15548,39 @@ class DialogueAbonnementsRSS(QDialog):
         # tous les champs liés à une URL regroupés au même endroit).
         layout.addWidget(QLabel("Ajouter un flux au compte sélectionné à gauche :"))
 
+        # Recherche de flux à partir d'une URL (10/10/2026, demandé) : on colle
+        # l'adresse d'un site, COURRIER trouve ses flux et remplit Nom + URL.
+        ligne_recherche = QHBoxLayout()
+        ligne_recherche.addWidget(QLabel("Recherche de flux à partir d'une URL :"))
+        self.champ_recherche_flux = QLineEdit()
+        self.champ_recherche_flux.setPlaceholderText("adresse d'un site — ex. www.motomag.com ou une chaîne YouTube")
+        # Entrée dans ce champ = Rechercher, et seulement ça : sans ce filtre,
+        # le bouton par défaut de la fenêtre (Ajouter) partait aussi.
+        class _EntreeRecherche(QObject):
+            def __init__(s, rappel, parent):
+                super().__init__(parent)
+                s._rappel = rappel
+            def eventFilter(s, objet, evenement):
+                if evenement.type() == QEvent.Type.KeyPress and evenement.key() in (
+                        Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    s._rappel()
+                    return True
+                return False
+        self._filtre_entree_recherche = _EntreeRecherche(self._rechercher_flux, self.champ_recherche_flux)
+        self.champ_recherche_flux.installEventFilter(self._filtre_entree_recherche)
+        ligne_recherche.addWidget(self.champ_recherche_flux, 1)
+        self.btn_rechercher_flux = QPushButton("  Rechercher  ")
+        self.btn_rechercher_flux.setStyleSheet(STYLE_BOUTON)
+        self.btn_rechercher_flux.clicked.connect(self._rechercher_flux)
+        ligne_recherche.addWidget(self.btn_rechercher_flux)
+        # Proposé seulement quand la recherche ne trouve aucun flux
+        self.btn_creer_flux_page = QPushButton("  Créer un flux pour cette page  ")
+        self.btn_creer_flux_page.setStyleSheet(STYLE_BOUTON)
+        self.btn_creer_flux_page.clicked.connect(self._analyser_page_pour_flux)
+        self.btn_creer_flux_page.hide()
+        ligne_recherche.addWidget(self.btn_creer_flux_page)
+        layout.addLayout(ligne_recherche)
+
         ligne_nom = QHBoxLayout()
         ligne_nom.addWidget(QLabel("Nom du flux :"))
         self.champ_nom = QLineEdit()
@@ -15202,31 +15618,6 @@ class DialogueAbonnementsRSS(QDialog):
         ligne_url_selection.addWidget(self.champ_url_selection, 1)
         ligne_url_selection.addWidget(btn_copier_url)
         layout.addLayout(ligne_url_selection)
-
-        # Programme de mise à jour du flux sélectionné (28/09/2026, voir
-        # lancer_programme_flux) : enregistré dès qu'il est choisi/modifié.
-        ligne_programme = QHBoxLayout()
-        ligne_programme.addWidget(QLabel("Programme à lancer avant :"))
-        self.champ_programme = QLineEdit()
-        self.champ_programme.setPlaceholderText(
-            "facultatif — script qui fabrique le flux (ex. à partir d'une page web)"
-        )
-        self.champ_programme.editingFinished.connect(self._enregistrer_programme_flux)
-        ligne_programme.addWidget(self.champ_programme, 1)
-        self.btn_parcourir_programme = QPushButton("  Parcourir…  ")
-        self.btn_parcourir_programme.setStyleSheet(STYLE_BOUTON)
-        self.btn_parcourir_programme.clicked.connect(self._parcourir_programme_flux)
-        ligne_programme.addWidget(self.btn_parcourir_programme)
-        self.combo_periode_programme = QComboBox()
-        self.combo_periode_programme.setStyleSheet("""
-            QComboBox { background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; padding: 4px 6px; }
-            QComboBox QAbstractItemView { background-color: #1e1e1e; color: white; selection-background-color: #A52A2A; }
-        """)
-        for libelle, minutes in PERIODES_PROGRAMME_RSS:
-            self.combo_periode_programme.addItem(libelle, minutes)
-        self.combo_periode_programme.currentIndexChanged.connect(lambda *_: self._enregistrer_programme_flux())
-        ligne_programme.addWidget(self.combo_periode_programme)
-        layout.addLayout(ligne_programme)
 
         self.lbl_statut = QLabel("")
         self.lbl_statut.setStyleSheet("font-family: Verdana; font-size: 11px;")
@@ -15280,9 +15671,6 @@ class DialogueAbonnementsRSS(QDialog):
         self.btn_monter.setEnabled(est_un_flux and mode_manuel)
         self.btn_descendre.setEnabled(est_un_flux and mode_manuel)
         self.champ_url_selection.setEnabled(est_un_flux)
-        self.champ_programme.setEnabled(est_un_flux)
-        self.btn_parcourir_programme.setEnabled(est_un_flux)
-        self.combo_periode_programme.setEnabled(est_un_flux)
 
     def _sur_selection_flux(self):
         """Remplit le champ URL avec l'adresse du flux tout juste
@@ -15297,51 +15685,7 @@ class DialogueAbonnementsRSS(QDialog):
         else:
             flux = None
             self.champ_url_selection.clear()
-        # Remplissage sans déclencher l'enregistrement automatique.
-        self.combo_periode_programme.blockSignals(True)
-        self.champ_programme.setText((flux or {}).get("programme", ""))
-        idx = self.combo_periode_programme.findData(int((flux or {}).get("programme_periode", 0) or 0))
-        self.combo_periode_programme.setCurrentIndex(max(idx, 0))
-        self.combo_periode_programme.blockSignals(False)
         self._maj_etat_boutons()
-
-    def _parcourir_programme_flux(self):
-        from PySide6.QtWidgets import QFileDialog
-        depart = self.champ_programme.text().strip() or DOSSIER_APP
-        chemin, _ = QFileDialog.getOpenFileName(
-            self, "Programme qui fabrique le flux", depart,
-            "Programmes (*.py *.pyw *.bat *.cmd *.exe);;Tous les fichiers (*)"
-        )
-        if chemin:
-            self.champ_programme.setText(os.path.normpath(chemin))
-            self._enregistrer_programme_flux()
-
-    def _enregistrer_programme_flux(self):
-        item = self.liste_flux.currentItem()
-        id_flux = item.data(Qt.ItemDataRole.UserRole) if item else None
-        if not id_flux:
-            return
-        donnees = charger_abonnements_rss()
-        flux = next((f for f in donnees.get("flux", []) if f.get("id") == id_flux), None)
-        if not flux:
-            return
-        programme = self.champ_programme.text().strip().strip('"')
-        periode = self.combo_periode_programme.currentData() or 0
-        if programme == flux.get("programme", "") and periode == int(flux.get("programme_periode", 0) or 0):
-            return
-        if programme:
-            flux["programme"] = programme
-            flux["programme_periode"] = periode
-            flux.pop("programme_dernier", None)  # nouveau réglage : lancé dès la prochaine vérification
-        else:
-            for cle in ("programme", "programme_periode", "programme_dernier"):
-                flux.pop(cle, None)
-        sauvegarder_abonnements_rss(donnees)
-        self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
-        self.lbl_statut.setText(
-            f"Programme enregistré ({self.combo_periode_programme.currentText().lower()})."
-            if programme else "Programme retiré pour ce flux."
-        )
 
     def _copier_url_flux(self):
         texte = self.champ_url_selection.text().strip()
@@ -15397,15 +15741,20 @@ class DialogueAbonnementsRSS(QDialog):
         flux_liste = donnees.get("flux", [])
         noms = charger_noms_comptes()
         item_a_selectionner = None
+        total_flux = 0
         for c in COMPTES:
             adresse = c.get("adresse", "")
             nom_affiche = noms.get(adresse) or (c.get("nom") or adresse).split(" - ")[0]
             nb = sum(1 for f in flux_liste if f.get("compte") == adresse)
-            item = QListWidgetItem(f"  {nom_affiche}  ({nb})")
+            total_flux += nb
+            # « MOTO (114 flux) » plutôt que « MOTO (114) » (10/10/2026, demandé)
+            item = QListWidgetItem(f"  {nom_affiche}  ({nb} flux)")
             item.setData(Qt.ItemDataRole.UserRole, adresse)
             self.liste_comptes.addItem(item)
             if adresse == selectionner_compte:
                 item_a_selectionner = item
+        if getattr(self, "lbl_comptes", None) is not None:
+            self.lbl_comptes.setText(f"Comptes : {total_flux} flux")
         # Hauteur adaptée au nombre réel de comptes (18/08/2026, demandé —
         # laissait un grand vide sous le dernier compte quand il y en avait
         # peu par rapport à la hauteur généreuse de la fenêtre). Repris
@@ -15456,6 +15805,150 @@ class DialogueAbonnementsRSS(QDialog):
         if item_a_selectionner:
             self.liste_flux.setCurrentItem(item_a_selectionner)
         self._maj_etat_boutons()
+
+    def _rechercher_flux(self):
+        adresse = self.champ_recherche_flux.text().strip()
+        if not adresse:
+            self.lbl_statut.setStyleSheet("color: #e08080; font-size: 11px;")
+            self.lbl_statut.setText("Entrez l'adresse d'un site à explorer.")
+            return
+        if getattr(self, "_chercheur_flux", None) is not None and self._chercheur_flux.isRunning():
+            return
+        self.btn_rechercher_flux.setEnabled(False)
+        self.btn_creer_flux_page.hide()
+        self.lbl_statut.setStyleSheet("color: #dddddd; font-size: 11px;")
+        self.lbl_statut.setText(f"Recherche des flux de {adresse}…")
+        self._chercheur_flux = ChercheurFluxRSS(adresse)
+        self._chercheur_flux.resultat.connect(self._sur_flux_trouves)
+        self._chercheur_flux.start()
+
+    def _sur_flux_trouves(self, trouves, erreur):
+        self.btn_rechercher_flux.setEnabled(True)
+        if erreur:
+            self.lbl_statut.setStyleSheet("color: #e08080; font-size: 11px;")
+            self.lbl_statut.setText(f"Impossible de lire ce site : {message_erreur_site(erreur)}.")
+            return
+        if not trouves:
+            self.lbl_statut.setStyleSheet("color: #e08080; font-size: 11px;")
+            self.lbl_statut.setText("Aucun flux RSS ou Atom trouvé sur ce site — COURRIER peut en "
+                                    "créer un pour cette page (bouton à droite).")
+            self.btn_creer_flux_page.show()
+            return
+        deja = {f.get("url") for f in charger_abonnements_rss().get("flux", [])}
+        if all(nb == 0 for _t, _u, nb in trouves):
+            self.lbl_statut.setStyleSheet("color: #e08080; font-size: 11px;")
+            self.lbl_statut.setText(
+                ("Le flux de ce site existe mais ne contient aucun article" if len(trouves) == 1
+                 else "Les flux de ce site existent mais ne contiennent aucun article")
+                + " — COURRIER peut créer un flux à partir de la page (bouton à droite).")
+            self.btn_creer_flux_page.show()
+            return
+        trouves = [x for x in trouves if x[2] > 0]
+
+        def _choisir(titre, url):
+            self.champ_nom.setText(titre)
+            self.champ_url.setText(url)
+            self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
+            if url in deja:
+                self.lbl_statut.setText(f"« {titre} » : ce flux est déjà dans votre liste.")
+            else:
+                self.lbl_statut.setText(f"Flux trouvé : « {titre} » — vérifiez le nom, puis cliquez sur Ajouter.")
+        if len(trouves) == 1:
+            _choisir(*trouves[0][:2])
+            return
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for titre, url, _nb in trouves:
+            libelle = f"{titre}   —   {url}" + ("   (déjà abonné)" if url in deja else "")
+            menu.addAction(libelle).triggered.connect(lambda _=False, t=titre, u=url: _choisir(t, u))
+        self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
+        self.lbl_statut.setText(f"{len(trouves)} flux trouvés — choisissez-en un dans la liste.")
+        menu.exec(self.btn_rechercher_flux.mapToGlobal(self.btn_rechercher_flux.rect().bottomLeft()))
+
+    def _analyser_page_pour_flux(self):
+        if not self._compte_selectionne():
+            self.lbl_statut.setStyleSheet("color: #e08080; font-size: 11px;")
+            self.lbl_statut.setText("Sélectionnez d'abord un compte à gauche.")
+            return
+        adresse = self.champ_recherche_flux.text().strip()
+        if not adresse or (getattr(self, "_analyseur_page", None) is not None and self._analyseur_page.isRunning()):
+            return
+        self.btn_creer_flux_page.setEnabled(False)
+        self.lbl_statut.setStyleSheet("color: #dddddd; font-size: 11px;")
+        self.lbl_statut.setText("Analyse de la page : recherche d'une liste d'articles…")
+        self._analyseur_page = AnalyseurPageRSS(adresse)
+        self._analyseur_page.resultat.connect(self._sur_page_analysee)
+        self._analyseur_page.start()
+
+    def _sur_page_analysee(self, r):
+        from PySide6.QtWidgets import QMessageBox
+        self.btn_creer_flux_page.setEnabled(True)
+        rouge = "color: #e08080; font-size: 11px;"
+        if r["statut"] == "robots":
+            self.lbl_statut.setStyleSheet(rouge)
+            self.lbl_statut.setText("Ce site demande aux robots de ne pas lire cette page (robots.txt) : "
+                                    "COURRIER respecte ce choix et ne crée pas de flux.")
+            return
+        if r["statut"] == "erreur":
+            self.lbl_statut.setStyleSheet(rouge)
+            self.lbl_statut.setText(f"Impossible de lire cette page : {message_erreur_site(r['erreur'])}.")
+            return
+        if r["statut"] == "aucun":
+            self.lbl_statut.setStyleSheet(rouge)
+            self.lbl_statut.setText(
+                "Aucune liste d'articles repérée sur cette page"
+                + (" — elle semble construite par JavaScript, ce que COURRIER ne sait pas encore lire."
+                   if r.get("peu_de_texte") else
+                   " — essayez l'adresse de la page « Actualités » ou « Blog » du site."))
+            return
+        candidates = r.get("candidates") or []
+        if len(candidates) > 1:
+            from PySide6.QtWidgets import QInputDialog
+            libelles = [c["libelle"] for c in candidates]
+            choix, ok = QInputDialog.getItem(
+                self, "Créer un flux",
+                "Plusieurs listes d'articles repérées sur cette page — laquelle suivre ?",
+                libelles, 0, False)
+            if not ok:
+                return
+            choisie = candidates[libelles.index(choix)]
+            r = {**r, "motif": choisie["motif"], "titres": choisie["titres"]}
+        titres = r["titres"]
+        apercu = "\n".join(f"  • {t[:90]}" for t in titres[:8])
+        if len(titres) > 8:
+            apercu += f"\n  … et {len(titres) - 8} autre(s)"
+        nom = self.champ_nom.text().strip() or r.get("nom") or r["url"]
+        boite = QMessageBox(self)
+        boite.setWindowTitle("Créer un flux")
+        boite.setIcon(QMessageBox.Icon.Question)
+        boite.setText(f"{len(titres)} article(s) repéré(s) sur cette page :")
+        boite.setInformativeText(
+            apercu + f"\n\nCréer le flux « {nom} » ? COURRIER relira cette page au plus une fois par "
+            f"heure et vous enverra chaque nouvel article (titre, résumé, image et lien vers le site).")
+        boite.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        boite.button(QMessageBox.StandardButton.Yes).setText("Créer le flux")
+        boite.button(QMessageBox.StandardButton.No).setText("Annuler")
+        if boite.exec() != QMessageBox.StandardButton.Yes:
+            return
+        compte = self._compte_selectionne()
+        donnees = charger_abonnements_rss()
+        if any(f.get("url") == r["url"] for f in donnees.get("flux", [])):
+            self.lbl_statut.setStyleSheet(rouge)
+            self.lbl_statut.setText("Un flux existe déjà pour cette page.")
+            return
+        donnees.setdefault("flux", []).append({
+            "id": uuid.uuid4().hex, "url": r["url"], "nom": nom, "compte": compte,
+            "type": "page", "motif": r["motif"],
+        })
+        sauvegarder_abonnements_rss(donnees)
+        self.champ_recherche_flux.clear()
+        self.champ_nom.clear()
+        self.btn_creer_flux_page.hide()
+        self._charger_comptes(selectionner_compte=compte)
+        self._rafraichir_flux_compte()
+        self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
+        self.lbl_statut.setText(f"Flux « {nom} » créé — seuls les articles publiés à partir de "
+                                f"maintenant seront livrés.")
 
     def _ajouter_flux(self):
         compte = self._compte_selectionne()
@@ -20389,6 +20882,22 @@ Use means anything you do with the software requiring one of your
 licenses."""
 
 
+def compter_mails_et_dossiers(compte):
+    """(nombre de mails visibles, nombre de dossiers) d'un compte (10/10/2026,
+    colonne « Mails / dossiers » de CONTRÔLE). Dossiers = arborescence réelle
+    du compte (les vieux dossiers de cache d'anciennes versions sont ignorés) ;
+    mails = ce que l'utilisateur voit (complets + en-têtes seuls)."""
+    _d, tuples_map = charger_cache_arbo(compte)
+    if not tuples_map:
+        return None
+    nb_mails = 0
+    for _affiche, brut in tuples_map:
+        try:
+            nb_mails += len(uids_visibles_en_cache(compte, brut))
+        except Exception:
+            pass
+    return nb_mails, len(tuples_map)
+
 def mails_photos_introuvables(compte):
     """[(dossier_safe, uid, état)] des mails du compte listés avec des photos
     manquantes (marqueur .incomplet non provisoire) — essais en cours ou
@@ -20626,7 +21135,8 @@ class FenetreConsole(QWidget):
     plus une ligne « moteur » pour ce qui concerne tout le logiciel. Ne fait
     que LIRE : instantane_moteur() et l'état des minuteries de ClientMail."""
 
-    COLONNES = ("Compte", "Réception", "En cours", "Progression", "Dernier évènement")
+    COLONNES = ("Compte", "Réception", "En cours", "Progression", "Dernier évènement", "Mails / dossiers")
+    INTERVALLE_COMPTAGE_SEC = 30
     # Lignes d'information (rien ne travaille) : pas de barre animée, et le
     # compte n'est pas compté « au travail » — sauf pendant un essai réel.
     CLES_INFORMATION = {"photos", "photos_echec"}
@@ -20667,7 +21177,8 @@ class FenetreConsole(QWidget):
                                   QHeaderView.ResizeMode.ResizeToContents,
                                   QHeaderView.ResizeMode.Stretch,
                                   QHeaderView.ResizeMode.Fixed,
-                                  QHeaderView.ResizeMode.Stretch)):
+                                  QHeaderView.ResizeMode.Stretch,
+                                  QHeaderView.ResizeMode.ResizeToContents)):
             entete.setSectionResizeMode(i, mode)
         self._table.setColumnWidth(3, 170)
         self._table.cellClicked.connect(self._sur_clic_case)
@@ -20684,12 +21195,45 @@ class FenetreConsole(QWidget):
         couche.addLayout(ligne_bas)
         self._barres = {}
         self._lignes = []
-        self.resize(1150, 520)
+        self.resize(1350, 520)
         self._taille_ajustee_pour = None
+        # Mails / dossiers : comptés dans un fil à part (des dizaines de
+        # milliers de fichiers), toutes les INTERVALLE_COMPTAGE_SEC secondes.
+        self._comptages = {}
+        self._comptage_en_cours = False
+        self._minuterie_comptage = QTimer(self)
+        self._minuterie_comptage.timeout.connect(self._lancer_comptage)
+        self._minuterie_comptage.start(self.INTERVALLE_COMPTAGE_SEC * 1000)
+        QTimer.singleShot(0, self._lancer_comptage)
         self._minuterie = QTimer(self)
         self._minuterie.timeout.connect(self._rafraichir)
         self._minuterie.start(1000)
         self._rafraichir()
+
+    def _lancer_comptage(self):
+        if self._comptage_en_cours or not self.isVisible() and self._comptages:
+            return
+        self._comptage_en_cours = True
+        comptes = list(COMPTES)
+
+        def _travail():
+            resultats = {}
+            for c in comptes:
+                try:
+                    resultats[c["adresse"]] = compter_mails_et_dossiers(c)
+                except Exception:
+                    resultats[c["adresse"]] = None
+            self._comptages = resultats
+            self._comptage_en_cours = False
+        _threading.Thread(target=_travail, name="ComptageMailsDossiers", daemon=True).start()
+
+    def _mails_dossiers(self, adresse):
+        r = self._comptages.get(adresse)
+        if r is None:
+            return "…" if adresse not in self._comptages else "—"
+        nb_mails, nb_dossiers = r
+        return (f"{self._nb(nb_mails)} mail{'s' if nb_mails > 1 else ''} dans "
+                f"{self._nb(nb_dossiers)} dossier{'s' if nb_dossiers > 1 else ''}")
 
     def _ajuster_taille(self):
         """Hauteur ajustée au nombre de comptes (10/10/2026, demandé) : toutes
@@ -20708,7 +21252,7 @@ class FenetreConsole(QWidget):
                    + max(self._moteur.sizeHint().height(), self._btn_fermer.sizeHint().height()) + 10)
         # Écran de la fenêtre principale (plusieurs écrans possibles)
         ecran = (self._cm.screen() or self.screen() or QApplication.primaryScreen()).availableGeometry()
-        largeur = min(max(self.width(), 1150), ecran.width() - 40)
+        largeur = min(max(self.width(), 1350), ecran.width() - 40)
         # Cadre de la fenêtre (barre de titre, bords) en plus du contenu
         cadre = max(self.frameGeometry().height() - self.geometry().height(), 32)
         hauteur = min(hauteur, ecran.height() - cadre - 20)
@@ -20830,7 +21374,7 @@ class FenetreConsole(QWidget):
             dernier = (f"{_t.strftime('%H:%M:%S', _t.localtime(ev[0][0]))}  {ev[0][1]}" if ev else "—")
             libelle = adresse if nom == adresse else f"{nom}\n{adresse}"
             for col, valeur in enumerate((libelle, self._reception(adresse, idle),
-                                          en_cours, None, dernier)):
+                                          en_cours, None, dernier, self._mails_dossiers(adresse))):
                 if valeur is None:
                     continue
                 item = self._table.item(i, col)
