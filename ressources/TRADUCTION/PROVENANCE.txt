@@ -1,0 +1,21 @@
+Traduction intégrée à COURRIER : fichiers de Mozilla, sous Mozilla Public License 2.0
+(texte complet : LICENCE_MPL-2.0.txt). Ces fichiers ne sont pas modifiés.
+
+Moteur : bergamot-translator 0.4.9 (projet Bergamot / Mozilla), paquet npm
+  @browsermt/bergamot-translator, licence MPL-2.0.
+  Code source : https://github.com/browsermt/bergamot-translator
+  moteur/bergamot-translator-worker.js, moteur/bergamot-translator-worker.wasm,
+  moteur/translator-worker.js
+
+Modèles de traduction : Firefox Translations (Mozilla), version 2.0, ceux que
+Firefox télécharge (Remote Settings). « The model files are distributed under
+the MPL 2.0 license » (https://github.com/mozilla/translations).
+  modeles/enfr/lex.bin = lex.50.50.enfr.s2t.bin (version 2.0, sha256 2585ed98d3af0bc949865aedeb390493d591f56870814376e73e4144c41ed059)
+  modeles/enfr/model.bin = model.enfr.intgemm.alphas.bin (version 2.0, sha256 6322e296d4fecfe395a8d5723da4ec37ecbe6d7613bb1dfcf4b28e2a47498b68)
+  modeles/enfr/vocab.spm = vocab.enfr.spm (version 2.0, sha256 783abf3abe075afdf8d85d233994bef2c3a064e935ab1bed946820aff6ac002a)
+  modeles/fren/lex.bin = lex.50.50.fren.s2t.bin (version 2.0, sha256 87c6752ea908f5f0347c10ac0cf7d80d9c2f4f20c81c90168f3e8230b56d4440)
+  modeles/fren/model.bin = model.fren.intgemm.alphas.bin (version 2.0, sha256 15f997bc0d13808b0b0fbd0786e684a3c8a52adcd8071844b76123fdacbf2b90)
+  modeles/fren/vocab.spm = vocab.fren.spm (version 2.0, sha256 783abf3abe075afdf8d85d233994bef2c3a064e935ab1bed946820aff6ac002a)
+
+Les fichiers enveloppe.js et traducteur.html du dossier moteur sont écrits par
+COURRIER lui-même (code de COURRIER, pas de Mozilla).

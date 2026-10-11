@@ -171,11 +171,20 @@ class PontEditeur(QObject):
     pyBridge.debug_focus_etat(...) — les noms ne changent pas côté page
     HTML, seul le préfixe 'pyBridge.' est ajouté."""
 
-    def __init__(self, recevoir_html=None, debug_focus=None, rendu_visuel_termine=None, parent=None):
+    def __init__(self, recevoir_html=None, debug_focus=None, rendu_visuel_termine=None,
+                 segments_traduction=None, parent=None):
         super().__init__(parent)
         self._recevoir_html = recevoir_html
         self._debug_focus = debug_focus
         self._rendu_visuel_termine = rendu_visuel_termine
+        self._segments_traduction = segments_traduction
+
+    @Slot(int, str)
+    def segmentsTraduction(self, jeton, passages_json):
+        """Bouton Traduire de la rédaction (11/10/2026) : passages du texte
+        rédigé (citation exclue) à traduire."""
+        if self._segments_traduction:
+            self._segments_traduction(jeton, passages_json)
 
     @Slot(str)
     def recevoir_html_courant(self, html):
@@ -260,6 +269,12 @@ class PontLecture(QObject):
     @_reserve_page_mail
     def ouvrirMailReponse(self):
         self._cm._ouvrir_mail_reponse_depuis_js()
+
+    @Slot(int, str)
+    @_reserve_page_mail
+    def traduireMail(self, jeton, passages_json):
+        """Bouton TRADUIRE du bandeau (11/10/2026)."""
+        self._cm._traduire_mail_depuis_js(jeton, passages_json)
 
     @Slot()
     @_reserve_page_mail
@@ -17980,6 +17995,445 @@ class EnvoyeurMail(QThread):
         except Exception as e:
             return None
 
+# ---------------------------------------------------------------------------
+# Traduction intégrée (11/10/2026) — lecture et rédaction, sur l'ordinateur
+# ---------------------------------------------------------------------------
+# Moteur et modèles de Firefox Translations (Mozilla, projet Bergamot), sous
+# Mozilla Public License 2.0 : licence "fichier par fichier", qui permet de
+# les livrer avec COURRIER sans rien imposer à son propre code (texte de la
+# licence et provenance des fichiers : dossier TRADUCTION). Les fichiers de
+# Mozilla ne sont pas modifiés ; enveloppe.js et traducteur.html, écrits par
+# COURRIER, les font tourner dans une page QtWebEngine invisible.
+# Rien ne part sur Internet : la traduction se fait entièrement en local.
+DOSSIER_TRADUCTION = os.path.join(DOSSIER_APP, "TRADUCTION")
+DOSSIER_MOTEUR_TRADUCTION = os.path.join(DOSSIER_TRADUCTION, "moteur")
+DOSSIER_MODELES_TRADUCTION = os.path.join(DOSSIER_TRADUCTION, "modeles")
+FICHIERS_MOTEUR_TRADUCTION = ("bergamot-translator-worker.js", "bergamot-translator-worker.wasm",
+                              "translator-worker.js")
+FICHIERS_MODELE_TRADUCTION = ("model.bin", "lex.bin", "vocab.spm")
+# code → (nom, "de …" pour "Traduit de l'anglais", "en …" pour "Traduit en anglais")
+LANGUES_TRADUCTION = {
+    "fr": ("français", "du français", "en français"),
+    "en": ("anglais", "de l'anglais", "en anglais"),
+}
+DELAI_MAX_TRADUCTION_MS = 120000
+
+# Chromium refuse fetch() sur file:// mais accepte XMLHttpRequest : le moteur
+# de Mozilla reçoit donc un fetch() de remplacement pour son .wasm local, puis
+# est chargé tel quel.
+ENVELOPPE_TRADUCTION_JS = r"""// Écrit par COURRIER (pas un fichier de Mozilla).
+self.fetch = function (url) {
+    return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", String(url));
+        xhr.responseType = "arraybuffer";
+        xhr.onload = function () {
+            resolve(new Response(xhr.response, {status: 200, headers: {"Content-Type": "application/wasm"}}));
+        };
+        xhr.onerror = function () { reject(new Error("lecture impossible : " + url)); };
+        xhr.send();
+    });
+};
+importScripts("translator-worker.js");
+"""
+
+# Page invisible qui héberge le moteur : reçoit les demandes de Python
+# (traduire({...})) et répond par le pont QWebChannel "pont".
+PAGE_TRADUCTION_HTML = r"""<!DOCTYPE html>
+<!-- Écrit par COURRIER (pas un fichier de Mozilla). -->
+<html><head><meta charset="utf-8">
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head><body><script>
+var pont = null, travailleur = null, compteur = 0, attente = {}, moteurPret = null, modeles = {};
+function lire(chemin) {
+    return new Promise(function (ok, ko) {
+        var x = new XMLHttpRequest();
+        x.open("GET", chemin);
+        x.responseType = "arraybuffer";
+        x.onload = function () { if (x.response && x.response.byteLength) ok(x.response); else ko(new Error("fichier vide : " + chemin)); };
+        x.onerror = function () { ko(new Error("fichier introuvable : " + chemin)); };
+        x.send();
+    });
+}
+function appel(nom) {
+    var args = [].slice.call(arguments, 1);
+    return new Promise(function (ok, ko) {
+        compteur++;
+        attente[compteur] = {ok: ok, ko: ko};
+        travailleur.postMessage({id: compteur, name: nom, args: args});
+    });
+}
+function demarrerMoteur() {
+    if (!moteurPret) {
+        travailleur = new Worker("enveloppe.js");
+        travailleur.onmessage = function (e) {
+            var a = attente[e.data.id];
+            delete attente[e.data.id];
+            if (!a) return;
+            if (e.data.error) a.ko(new Error(e.data.error.message)); else a.ok(e.data.result);
+        };
+        travailleur.onerror = function (e) {
+            var message = "moteur de traduction : " + (e.message || "erreur de chargement");
+            Object.keys(attente).forEach(function (k) { attente[k].ko(new Error(message)); delete attente[k]; });
+            moteurPret = null;
+        };
+        moteurPret = appel("initialize", {cacheSize: 0});
+    }
+    return moteurPret;
+}
+function chargerModele(de, vers) {
+    var cle = de + vers;
+    if (!modeles[cle]) {
+        var d = "../modeles/" + cle + "/";
+        modeles[cle] = Promise.all([lire(d + "model.bin"), lire(d + "lex.bin"), lire(d + "vocab.spm")])
+            .then(function (b) {
+                return appel("loadTranslationModel", {from: de, to: vers},
+                             {model: b[0], shortlist: b[1], vocabs: [b[2], b[2]]});
+            });
+        modeles[cle].catch(function () { delete modeles[cle]; });
+    }
+    return modeles[cle];
+}
+async function traduire(d) {
+    try {
+        await demarrerMoteur();
+        await chargerModele(d.de, d.vers);
+        var r = await appel("translate", {models: [{from: d.de, to: d.vers}],
+                                          texts: d.textes.map(function (t) { return {text: t, html: true}; })});
+        pont.resultat(d.id, JSON.stringify({traductions: r.map(function (x) { return x.target.text; })}));
+    } catch (e) {
+        pont.resultat(d.id, JSON.stringify({erreur: String(e && e.message || e)}));
+    }
+}
+new QWebChannel(qt.webChannelTransport, function (canal) {
+    pont = canal.objects.pont;
+    pont.pret();
+});
+</script></body></html>
+"""
+
+_MOTS_FRANCAIS = frozenset(
+    "le la les de des du et est un une pour que qui dans vous nous je pas sur avec au aux ce cette "
+    "il elle ne se sont été être avoir bonjour merci votre vos mon ma mes ton ta tes son sa ses "
+    "mais ou donc car très bien".split())
+_MOTS_ANGLAIS = frozenset(
+    "the and is to of for you that this with are we your be have it not will from at by our an "
+    "thank thanks hello please hi dear my me was were has had can would should could".split())
+
+
+def detecter_langue_fr_en(texte):
+    """Français ou anglais ? Simple comptage de mots très courants : les
+    modèles installés ne couvrent que ces deux langues."""
+    mots = re.findall(r"[a-zàâäçéèêëîïôöûùüÿœæ']+", (texte or "").lower())
+    francais = sum(m in _MOTS_FRANCAIS for m in mots)
+    anglais = sum(m in _MOTS_ANGLAIS for m in mots)
+    return "fr" if francais >= anglais else "en"
+
+
+def texte_depuis_html(fragments):
+    return html.unescape(re.sub(r"<[^>]+>", " ", " ".join(fragments)))
+
+
+def traduction_installee(de, vers):
+    """"" si le moteur et le modèle de..vers sont présents, sinon le message à afficher."""
+    if not all(os.path.isfile(os.path.join(DOSSIER_MOTEUR_TRADUCTION, f)) for f in FICHIERS_MOTEUR_TRADUCTION):
+        return f"Traduction non installée (dossier {DOSSIER_TRADUCTION} incomplet)."
+    dossier = os.path.join(DOSSIER_MODELES_TRADUCTION, de + vers)
+    if not all(os.path.isfile(os.path.join(dossier, f)) for f in FICHIERS_MODELE_TRADUCTION):
+        return (f"Pas de modèle de traduction {LANGUES_TRADUCTION.get(de, (de,))[0]} → "
+                f"{LANGUES_TRADUCTION.get(vers, (vers,))[0]} installé.")
+    return ""
+
+
+def _ecrire_si_different(chemin, contenu):
+    try:
+        with open(chemin, "r", encoding="utf-8") as f:
+            if f.read() == contenu:
+                return
+    except OSError:
+        pass
+    with open(chemin, "w", encoding="utf-8") as f:
+        f.write(contenu)
+
+
+class PontTraducteur(QObject):
+    """Pont QWebChannel de la page invisible du moteur de traduction."""
+
+    def __init__(self, moteur):
+        super().__init__(moteur)
+        self._moteur = moteur
+
+    @Slot()
+    def pret(self):
+        self._moteur._sur_page_prete()
+
+    @Slot(int, str)
+    def resultat(self, ident, donnees):
+        self._moteur._sur_resultat(ident, donnees)
+
+
+class MoteurTraduction(QObject):
+    """Page QtWebEngine invisible qui fait tourner Bergamot. Démarrée à la
+    première traduction puis gardée (le moteur et les modèles restent en
+    mémoire : les traductions suivantes sont immédiates).
+
+    Profil de navigation PROPRE, sans l'intercepteur de sécurité des pages de
+    mail (installer_protections_web) : ce dernier interdit, à juste titre,
+    tout XHR/worker sur file:// — le moteur en a besoin pour lire ses propres
+    fichiers. Cette page ne charge que le dossier TRADUCTION et ne reçoit que
+    des fragments de texte, jamais de page de mail ni de site web."""
+
+    def __init__(self):
+        super().__init__()
+        self._page = None
+        self._pret = False
+        self._en_attente = []      # demandes reçues avant que la page soit prête
+        self._rappels = {}         # ident → rappel(traductions | None, message d'erreur)
+        self._compteur = 0
+
+    def _demarrer(self):
+        from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
+        _ecrire_si_different(os.path.join(DOSSIER_MOTEUR_TRADUCTION, "enveloppe.js"), ENVELOPPE_TRADUCTION_JS)
+        _ecrire_si_different(os.path.join(DOSSIER_MOTEUR_TRADUCTION, "traducteur.html"), PAGE_TRADUCTION_HTML)
+        self._profil = QWebEngineProfile(self)  # sans nom : en mémoire seulement
+        self._page = QWebEnginePage(self._profil, self)
+        self._page.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        self._pont = PontTraducteur(self)
+        self._canal = QWebChannel(self)
+        self._canal.registerObject("pont", self._pont)
+        self._page.setWebChannel(self._canal)
+        self._page.loadFinished.connect(self._sur_chargement)
+        self._page.load(QUrl.fromLocalFile(os.path.join(DOSSIER_MOTEUR_TRADUCTION, "traducteur.html")))
+        print("[TRADUCTION] démarrage du moteur")
+
+    def _sur_chargement(self, ok):
+        if not ok:
+            self._echouer_tout("La page du moteur de traduction n'a pas pu être chargée.")
+
+    def _sur_page_prete(self):
+        self._pret = True
+        for demande in self._en_attente:
+            self._page.runJavaScript(f"traduire({demande});")
+        self._en_attente = []
+
+    def traduire(self, textes, de, vers, rappel):
+        """Traduit une liste de fragments HTML ; rappel(liste traduite, "")
+        ou rappel(None, message d'erreur), toujours appelé une seule fois."""
+        erreur = traduction_installee(de, vers)
+        if erreur:
+            rappel(None, erreur)
+            return
+        if not textes:
+            rappel([], "")
+            return
+        self._compteur += 1
+        ident = self._compteur
+        self._rappels[ident] = rappel
+        demande = json.dumps({"id": ident, "de": de, "vers": vers, "textes": list(textes)})
+        if self._pret:
+            self._page.runJavaScript(f"traduire({demande});")
+        else:
+            self._en_attente.append(demande)
+            if self._page is None:
+                self._demarrer()
+        QTimer.singleShot(DELAI_MAX_TRADUCTION_MS, lambda: self._expirer(ident))
+
+    def _sur_resultat(self, ident, donnees):
+        rappel = self._rappels.pop(ident, None)
+        if rappel is None:
+            return
+        try:
+            reponse = json.loads(donnees)
+        except Exception:
+            reponse = {"erreur": "réponse illisible du moteur"}
+        if reponse.get("erreur"):
+            print(f"[TRADUCTION] erreur : {reponse['erreur']}")
+            rappel(None, f"Traduction impossible : {reponse['erreur']}")
+        else:
+            rappel(reponse.get("traductions") or [], "")
+
+    def _expirer(self, ident):
+        rappel = self._rappels.pop(ident, None)
+        if rappel is not None:
+            rappel(None, "La traduction n'a pas abouti (délai dépassé).")
+
+    def _echouer_tout(self, message):
+        rappels, self._rappels = self._rappels, {}
+        self._en_attente = []
+        self._page = None
+        self._pret = False
+        for rappel in rappels.values():
+            rappel(None, message)
+
+
+_moteur_traduction = None
+
+
+def moteur_traduction():
+    global _moteur_traduction
+    if _moteur_traduction is None:
+        _moteur_traduction = MoteurTraduction()
+    return _moteur_traduction
+
+
+# Côté pages (lecture et rédaction) : découpe le texte en "passages" —
+# suites de nœuds texte/en ligne entre deux limites de bloc (paragraphe,
+# cellule, <br>...) — comme Firefox, plutôt que de traduire tout le HTML
+# d'un coup : styles, scripts, images et mise en page ne sont jamais
+# touchés. Chaque passage est envoyé en HTML (gras, liens... conservés) et
+# remplacé sur place ; l'original est gardé pour pouvoir y revenir.
+JS_TRADUCTION_DOM = r"""
+  var _trJeton = 0, _trPassages = [], _trFaits = [];
+  var _TR_LIMITES = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|BODY|BR|BUTTON|CANVAS|CENTER|DD|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|IFRAME|IMG|INPUT|LI|MAIN|NAV|NOSCRIPT|OBJECT|OL|P|PRE|SCRIPT|SECTION|SELECT|STYLE|SVG|TABLE|TBODY|TD|TEXTAREA|TFOOT|TH|THEAD|TR|UL|VIDEO|AUDIO)$/;
+  var _TR_SANS_TEXTE = /^(BUTTON|CANVAS|IFRAME|IMG|INPUT|NOSCRIPT|OBJECT|PRE|SCRIPT|SELECT|STYLE|SVG|TEXTAREA|VIDEO|AUDIO)$/;
+  var _TR_SELECTEUR_LIMITES = 'address,article,aside,blockquote,br,button,canvas,center,dd,div,dl,dt,fieldset,figcaption,figure,footer,form,h1,h2,h3,h4,h5,h6,header,hr,iframe,img,input,li,main,nav,noscript,object,ol,p,pre,script,section,select,style,svg,table,tbody,td,textarea,tfoot,th,thead,tr,ul,video,audio';
+  function _trEstExclu(el) {
+      if (el.getAttribute && el.getAttribute('contenteditable') === 'false') return true;
+      return typeof _estElementCourrier === 'function' && _estElementCourrier(el);
+  }
+  function _trEnLigne(n) {
+      if (n.nodeType === 3) return true;
+      if (n.nodeType !== 1 || _TR_LIMITES.test(n.tagName) || _trEstExclu(n)) return false;
+      return !n.querySelector(_TR_SELECTEUR_LIMITES);
+  }
+  // Découpe `racine` en passages ; `arret` (facultatif) : nœud à partir
+  // duquel on ne traduit plus (citation d'un mail répondu).
+  function trCollecter(jeton, racine, arret) {
+      _trJeton = jeton;
+      _trPassages = [];
+      var fini = false;
+      function parcourir(el) {
+          var suite = [];
+          function clore() {
+              var texte = suite.map(function (n) { return n.textContent; }).join('');
+              if (/[A-Za-zÀ-ÿ]/.test(texte)) {
+                  var d = document.createElement('div');
+                  suite.forEach(function (n) { d.appendChild(n.cloneNode(true)); });
+                  var m = d.innerHTML.match(/^(\s*)([\s\S]*?)(\s*)$/);
+                  _trPassages.push({noeuds: suite, avant: m[1], html: m[2], apres: m[3]});
+              }
+              suite = [];
+          }
+          for (var n = el.firstChild; n && !fini; n = n.nextSibling) {
+              if (arret && (n === arret || (arret.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING && !n.contains(arret)))) {
+                  fini = true;
+                  break;
+              }
+              if (arret && n.nodeType === 1 && n.contains(arret)) {
+                  clore();
+                  parcourir(n);
+                  continue;
+              }
+              if (_trEnLigne(n)) { suite.push(n); continue; }
+              clore();
+              if (n.nodeType === 1 && !_TR_SANS_TEXTE.test(n.tagName) && !_trEstExclu(n)) parcourir(n);
+          }
+          clore();
+      }
+      parcourir(racine);
+      return _trPassages.map(function (p) { return p.html; });
+  }
+  // Remplace chaque passage par sa traduction ; renvoie false si la page a
+  // changé entre-temps (jeton différent).
+  function trAppliquer(jeton, traductions) {
+      if (jeton !== _trJeton || !_trPassages.length) return false;
+      _trFaits = [];
+      _trPassages.forEach(function (p, i) {
+          var t = traductions[i];
+          var premier = p.noeuds[0];
+          if (t == null || !premier || !premier.parentNode) return;
+          var modele = document.createElement('template');
+          modele.innerHTML = p.avant + t + p.apres;
+          var nouveaux = Array.prototype.slice.call(modele.content.childNodes);
+          var parent = premier.parentNode;
+          nouveaux.forEach(function (n) { parent.insertBefore(n, premier); });
+          p.noeuds.forEach(function (n) { if (n.parentNode) n.parentNode.removeChild(n); });
+          _trFaits.push({originaux: p.noeuds, nouveaux: nouveaux});
+      });
+      _trPassages = [];
+      return true;
+  }
+  // Remet les passages d'origine (mêmes nœuds : rien d'autre dans la page
+  // n'est recréé, les boutons et écouteurs restent intacts).
+  function trRestaurer() {
+      _trFaits.forEach(function (f) {
+          var repere = f.nouveaux[0];
+          if (!repere || !repere.parentNode) return;
+          var parent = repere.parentNode;
+          f.originaux.forEach(function (n) { parent.insertBefore(n, repere); });
+          f.nouveaux.forEach(function (n) { if (n.parentNode) n.parentNode.removeChild(n); });
+      });
+      var avait = _trFaits.length > 0;
+      _trFaits = [];
+      return avait;
+  }
+"""
+
+# Panneau de lecture : bouton TRADUIRE du bandeau (bascule traduction/original).
+JS_TRADUCTION_LECTURE = r"""
+  _actionsCourrier.traduire = function (el) {
+      var corps = document.getElementById('__corps_mail__');
+      if (!corps || el.dataset.enCours) return;
+      if (trRestaurer()) {
+          el.innerText = 'TRADUIRE';
+          el.title = 'Traduire ce mail (français ↔ anglais), sur cet ordinateur';
+          return;
+      }
+      var jeton = _trJeton + 1;
+      var passages = trCollecter(jeton, corps, null);
+      if (!passages.length) return;
+      el.dataset.enCours = '1';
+      el.innerText = 'TRADUCTION…';
+      if (pyBridge) pyBridge.traduireMail(jeton, JSON.stringify(passages));
+  };
+  window.trResultatMail = function (jeton, traductions, libelle, erreur) {
+      var el = document.getElementById('__btn_traduire__');
+      if (!el) return;
+      delete el.dataset.enCours;
+      if (erreur) {
+          el.innerText = 'TRADUIRE';
+          el.title = erreur;
+          alert(erreur);
+          return;
+      }
+      if (trAppliquer(jeton, traductions)) {
+          el.innerText = 'ORIGINAL';
+          el.title = libelle + ' — cliquer pour revenir au texte d\'origine';
+      } else {
+          el.innerText = 'TRADUIRE';
+      }
+  };
+"""
+
+# Fenêtre de rédaction : seul le texte rédigé est traduit, pas la citation.
+JS_TRADUCTION_REDACTION = r"""
+  var _trSauvegarde = null;
+  function _trDebutCitation(zone) {
+      var divs = zone.querySelectorAll('div[style]');
+      for (var i = 0; i < divs.length; i++) {
+          var st = divs[i].getAttribute('style').replace(/\s/g, '').toLowerCase();
+          if (st.indexOf('border-top:1pxsolid#999') !== -1) return divs[i];
+      }
+      return null;
+  }
+  function trCollecterRedaction(jeton) {
+      var zone = document.getElementById('zone-edition');
+      var passages = trCollecter(jeton, zone, _trDebutCitation(zone));
+      if (pyBridge) pyBridge.segmentsTraduction(jeton, JSON.stringify(passages));
+  }
+  function trAppliquerRedaction(jeton, traductions) {
+      var zone = document.getElementById('zone-edition');
+      var avant = zone.innerHTML;
+      if (trAppliquer(jeton, traductions)) _trSauvegarde = avant;
+  }
+  function trRevenirRedaction() {
+      if (_trSauvegarde === null) return;
+      document.getElementById('zone-edition').innerHTML = _trSauvegarde;
+      _trSauvegarde = null;
+  }
+"""
+
+
 class FenetreRedaction(QDialog):
     reponse_envoyee = Signal(object, str, str)  # uid du mail original, date RFC2822, dossier_imap
 
@@ -18373,6 +18827,13 @@ class FenetreRedaction(QDialog):
         btn_emoji.clicked.connect(self._ouvrir_boite_emoticones)
         barre_forme.addWidget(btn_emoji)
 
+        btn_traduire = QPushButton(" Traduire ")
+        btn_traduire.setStyleSheet(STYLE_BOUTON)
+        btn_traduire.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        btn_traduire.setToolTip("Traduire le texte rédigé (français ↔ anglais), sur cet ordinateur")
+        btn_traduire.clicked.connect(lambda: self._menu_traduction(btn_traduire))
+        barre_forme.addWidget(btn_traduire)
+
         barre_forme.addStretch(1)
         layout.addLayout(barre_forme)
 
@@ -18618,6 +19079,8 @@ class FenetreRedaction(QDialog):
 <div id="zone-edition" contenteditable="true">{corps}</div>
 <script nonce="{JETON_CSP}">
   var pyBridge = null;
+{JS_TRADUCTION_DOM}
+{JS_TRADUCTION_REDACTION}
   new QWebChannel(qt.webChannelTransport, function(channel) {{
       pyBridge = channel.objects.pyBridge;
       if (document.readyState === 'complete') {{ _mesurerRenduVisuelEditeur(); }}
@@ -18726,6 +19189,66 @@ class FenetreRedaction(QDialog):
                 f"document.execCommand('{commande}', false, null);"
             )
         self.webview.page().runJavaScript(js)
+
+    def _statut_traduction(self, texte, couleur="#e0a050"):
+        self.lbl_statut_envoi.setStyleSheet(f"color: {couleur}; font-family: Verdana; font-size: 11px;")
+        self.lbl_statut_envoi.setText(texte)
+        self.lbl_statut_envoi.setToolTip(texte)
+
+    def _menu_traduction(self, bouton):
+        """Bouton Traduire : sens choisi par l'utilisateur (français →
+        anglais ou l'inverse), ou retour au texte d'origine."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act_fr_en = menu.addAction("Français → anglais")
+        act_en_fr = menu.addAction("Anglais → français")
+        menu.addSeparator()
+        act_origine = menu.addAction("Revenir au texte d'origine (annule aussi les modifications faites depuis)")
+        act_origine.setEnabled(getattr(self, "_traduction_faite", False))
+        choix = menu.exec(bouton.mapToGlobal(bouton.rect().bottomLeft()))
+        if choix is act_origine:
+            self.webview.page().runJavaScript("trRevenirRedaction();")
+            self._traduction_faite = False
+            self._statut_traduction("Texte d'origine rétabli.", "#80c080")
+        elif choix in (act_fr_en, act_en_fr):
+            self._lancer_traduction_redaction(*(("fr", "en") if choix is act_fr_en else ("en", "fr")))
+
+    def _lancer_traduction_redaction(self, de, vers):
+        if not self._chargement_termine:
+            return
+        self._jeton_traduction = getattr(self, "_jeton_traduction", 0) + 1
+        self._sens_traduction = (de, vers)
+        self._statut_traduction("Traduction en cours…")
+        self.webview.page().runJavaScript(f"trCollecterRedaction({self._jeton_traduction});")
+
+    def _sur_segments_traduction(self, jeton, passages_json):
+        """Passages du texte rédigé (citation exclue), renvoyés par la page."""
+        if jeton != getattr(self, "_jeton_traduction", None):
+            return
+        try:
+            passages = json.loads(passages_json)
+        except Exception:
+            passages = []
+        if not passages:
+            self._statut_traduction("Rien à traduire.", "#80c080")
+            return
+        de, vers = self._sens_traduction
+
+        def rappel(traductions, erreur):
+            try:
+                if erreur:
+                    self._statut_traduction(erreur, "#e08080")
+                    return
+                if jeton != self._jeton_traduction:
+                    return  # nouvelle demande entre-temps
+                self.webview.page().runJavaScript(
+                    f"trAppliquerRedaction({int(jeton)}, {json.dumps(traductions)});")
+                self._traduction_faite = True
+                self._statut_traduction(f"Texte traduit {LANGUES_TRADUCTION[vers][2]}.", "#80c080")
+            except RuntimeError:
+                pass  # fenêtre fermée entre-temps
+
+        moteur_traduction().traduire(passages, de, vers, rappel)
 
     def _ouvrir_carnet_pour(self, champ, libelle):
         """Carnet d'adresses en mode choix pour le champ À/Cc/Cci cliqué
@@ -18906,6 +19429,7 @@ class FenetreRedaction(QDialog):
             recevoir_html=self._recevoir_html_courant,
             debug_focus=self._debug_focus_etat,
             rendu_visuel_termine=self._sur_rendu_visuel_termine,
+            segments_traduction=self._sur_segments_traduction,
         )
         self._channel = QWebChannel()
         self._channel.registerObject("pyBridge", self._pont)
@@ -22318,6 +22842,62 @@ class ClientMail(QMainWindow):
             btn.clicked.connect(slot)
             layout_haut.addWidget(btn)
             layout_haut.addSpacing(3)
+
+        # Barre adaptée à la largeur (10/10/2026, affichage Windows 125 % :
+        # les boutons ne tenaient plus et Qt coupait leur texte, ex.
+        # "UPPRIME", "SS to Ema"). Quand la barre manque de place, police et
+        # marges des boutons sont réduites d'un cran, jusqu'à ce que tout
+        # tienne. À 100 % (assez de place), le style d'origine (11px, marge
+        # 7px) est conservé tel quel.
+        from PySide6.QtGui import QFontMetrics
+        _NIVEAUX_BARRE_HAUT = [(11, 7), (10, 6), (10, 4), (9, 4), (9, 3), (8, 3), (8, 2)]
+
+        def _style_barre_haut(taille, marge):
+            return f"""
+            QPushButton {{
+                background-color: #A52A2A; color: white; border: none;
+                border-bottom: 3px solid #6b1a1a; border-right: 2px solid #6b1a1a;
+                padding: 5px {marge}px; font-family: Verdana; font-size: {taille}px; font-weight: bold;
+            }}
+            QPushButton:pressed {{
+                border-bottom: 1px solid #6b1a1a; border-right: 1px solid #6b1a1a;
+                padding-top: 7px; padding-left: {marge + 2}px;
+            }}
+        """
+
+        def _ajuster_barre_haut():
+            boutons = [b for b in frame_haut.findChildren(QPushButton)
+                       if not b.isHidden()]
+            marges = layout_haut.contentsMargins()
+            espaces = sum(layout_haut.itemAt(i).sizeHint().width()
+                          for i in range(layout_haut.count())
+                          if layout_haut.itemAt(i).spacerItem() is not None)
+            dispo = frame_haut.width() - marges.left() - marges.right() - espaces
+            choix = _NIVEAUX_BARRE_HAUT[-1]
+            for taille, marge in _NIVEAUX_BARRE_HAUT:
+                police = QFont("Verdana")
+                police.setPixelSize(taille)
+                police.setBold(True)
+                fm = QFontMetrics(police)
+                total = sum(fm.horizontalAdvance(b.text()) + 2 * marge + 6
+                            for b in boutons)
+                if total <= dispo:
+                    choix = (taille, marge)
+                    break
+            if getattr(frame_haut, "_niveau_barre", None) != choix:
+                frame_haut._niveau_barre = choix
+                style = _style_barre_haut(*choix)
+                for b in frame_haut.findChildren(QPushButton):
+                    b.setStyleSheet(style)
+
+        class _SurveillantBarreHaut(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+                    _ajuster_barre_haut()
+                return False
+
+        self._surveillant_barre_haut = _SurveillantBarreHaut(frame_haut)
+        frame_haut.installEventFilter(self._surveillant_barre_haut)
 
         layout_principal.addWidget(frame_haut)
         self.frame_haut = frame_haut
@@ -35347,6 +35927,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
     <button data-courrier-action="copier" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">COPIER</button>
     <button data-courrier-action="recharger" title="Force le retéléchargement complet de ce mail (texte + images distantes) — utile si une image reste cassée suite à un échec réseau ponctuel" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">RECHARGER</button>
     <button id="__btn_pdf__" data-courrier-action="pdf" title="Imprimer ce mail dans un fichier PDF" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">PDF</button>
+    <button id="__btn_traduire__" data-courrier-action="traduire" title="Traduire ce mail (français ↔ anglais), sur cet ordinateur" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">TRADUIRE</button>
   </div>
 </div>
 """
@@ -35517,6 +36098,30 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 
         self.corps_html_courant = corps
         self._afficher_dans_cef(corps)
+    def _traduire_mail_depuis_js(self, jeton, passages_json):
+        """Bouton TRADUIRE du bandeau : langue détectée (français ou
+        anglais), traduction vers l'autre, résultat renvoyé à la page."""
+        try:
+            passages = json.loads(passages_json)
+        except Exception:
+            return
+        de = detecter_langue_fr_en(texte_depuis_html(passages))
+        vers = "en" if de == "fr" else "fr"
+        libelle = f"Traduit {LANGUES_TRADUCTION[de][1]} {LANGUES_TRADUCTION[vers][2]}"
+        page = self.webview.page()
+
+        def rappel(traductions, erreur):
+            try:
+                if self.webview.page() is not page:
+                    return
+                page.runJavaScript(
+                    f"window.trResultatMail && trResultatMail({int(jeton)}, {json.dumps(traductions or [])}, "
+                    f"{json.dumps(libelle)}, {json.dumps(erreur or '')});")
+            except RuntimeError:
+                pass  # fenêtre fermée entre-temps
+
+        moteur_traduction().traduire(passages, de, vers, rappel)
+
     def _afficher_dans_cef(self, html):
         import tempfile, re, time
         if getattr(self, '_video_web', False):
@@ -35752,6 +36357,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
       pyBridge.ouvrirAdresseCliquee(el.dataset.adresse || '', el.dataset.nom || '');
     }
   });
+__JS_TRADUCTION__
 </script>
 """
         # Icône "image" déjà utilisée ailleurs dans l'appli (pièces jointes
@@ -35766,6 +36372,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         else:
             _icone_img_html = '<span style="font-size:18px;color:#A52A2A;">&#11015;</span>'  # repli texte si le PNG est absent
         script_pont = script_pont.replace("__ICONE_IMG_HTML__", _icone_img_html).replace("__JETON_CSP__", JETON_CSP)
+        script_pont = script_pont.replace("__JS_TRADUCTION__", JS_TRADUCTION_DOM + JS_TRADUCTION_LECTURE)
         html_force = re.sub(r'(<meta charset="utf-8">)', r'\1' + script_pont.replace('\\', '\\\\'), html_force, count=1)
         # Politique de sécurité (voir CSP_PAGES_MAIL) : posée avant tout le
         # reste du document, pour qu'aucun script du mail placé tôt dans son
@@ -38230,6 +38837,60 @@ if __name__ == "__main__":
         sys.exit(0)
 
     app = QApplication(sys.argv)
+
+    # Affichage Windows à 125 % (10/10/2026, demandé — W10 recommande 125 %,
+    # COURRIER a été développé à 100 %). Qt 6 agrandit déjà tout de 25 %
+    # automatiquement ; le seul risque est qu'une fenêtre devienne plus
+    # grande que l'écran (ex. COMPTES, 900 de haut minimum, alors qu'un
+    # écran 1920x1080 à 125 % n'offre qu'environ 1536x824). Ce filtre,
+    # posé sur toute l'application, vérifie chaque fenêtre au moment où elle
+    # s'ouvre : taille minimale et taille ramenées à 95 % x 90 % de la zone
+    # utile de l'écran au maximum, puis fenêtre replacée dans l'écran si
+    # elle en déborde. Sans effet à 100 % (toutes les fenêtres tiennent).
+    class _AjusteurTailleEcran(QObject):
+        def eventFilter(self, obj, event):
+            if event.type() != QEvent.Type.Show:
+                return False
+            try:
+                if not isinstance(obj, QWidget) or not obj.isWindow():
+                    return False
+                if obj.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip,
+                                        Qt.WindowType.SplashScreen):
+                    return False
+                if obj.isMaximized() or obj.isFullScreen():
+                    return False
+                if obj.minimumSize() == obj.maximumSize():
+                    return False  # taille fixe volontaire (petites boîtes)
+                ecran = obj.screen() or QApplication.primaryScreen()
+                if ecran is None:
+                    return False
+                dispo = ecran.availableGeometry()
+                maxi_l = int(dispo.width() * 0.95)
+                maxi_h = int(dispo.height() * 0.90)
+                if obj.minimumWidth() > maxi_l:
+                    obj.setMinimumWidth(maxi_l)
+                if obj.minimumHeight() > maxi_h:
+                    obj.setMinimumHeight(maxi_h)
+                if obj.width() > maxi_l or obj.height() > maxi_h:
+                    obj.resize(min(obj.width(), maxi_l), min(obj.height(), maxi_h))
+                # Replacer dans l'écran si la fenêtre (barre de titre
+                # comprise) déborde en haut, en bas, à gauche ou à droite.
+                cadre = obj.frameGeometry()
+                x, y = cadre.x(), cadre.y()
+                if cadre.right() > dispo.right():
+                    x = dispo.right() - cadre.width() + 1
+                if cadre.bottom() > dispo.bottom():
+                    y = dispo.bottom() - cadre.height() + 1
+                x = max(x, dispo.left())
+                y = max(y, dispo.top())
+                if (x, y) != (cadre.x(), cadre.y()):
+                    obj.move(x, y)
+            except Exception as _err_ajusteur:
+                print(f"[ECRAN-125] Ajustement impossible : {_err_ajusteur}")
+            return False
+
+    _ajusteur_taille_ecran = _AjusteurTailleEcran(app)
+    app.installEventFilter(_ajusteur_taille_ecran)
 
     # Boutons standard de Qt en français (07/10/2026, remonté par
     # l'utilisateur : "Yes"/"No"/"Cancel" dans les confirmations) :
