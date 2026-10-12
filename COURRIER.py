@@ -303,6 +303,13 @@ class PontLecture(QObject):
         """Bouton PDF intégré au bandeau du mail (à côté de RECHARGER)."""
         self._cm._imprimer_mail_pdf(sujet)
 
+    @Slot()
+    def traduirePageWeb(self):
+        """Bouton TRADUIRE injecté sur une page web (12/10/2026). N'importe
+        quel site peut appeler ce pont : le seul effet possible est d'ouvrir
+        la fenêtre de choix, où rien ne part sans le clic de l'utilisateur."""
+        QTimer.singleShot(0, self._cm._traduire_page_web)
+
     @Slot(int)
     def lireVideoWeb(self, index):
         """Bouton "Lire la vidéo" injecté sur une page externe dont la
@@ -18336,6 +18343,7 @@ JS_TRADUCTION_DOM = r"""
   var _TR_SELECTEUR_LIMITES = 'address,article,aside,blockquote,br,button,canvas,center,dd,div,dl,dt,fieldset,figcaption,figure,footer,form,h1,h2,h3,h4,h5,h6,header,hr,iframe,img,input,li,main,nav,noscript,object,ol,p,pre,script,section,select,style,svg,table,tbody,td,textarea,tfoot,th,thead,tr,ul,video,audio';
   function _trEstExclu(el) {
       if (el.getAttribute && el.getAttribute('contenteditable') === 'false') return true;
+      if (el.id && el.id.indexOf('__courrier') === 0) return true;
       return typeof _estElementCourrier === 'function' && _estElementCourrier(el);
   }
   function _trEnLigne(n) {
@@ -18500,6 +18508,75 @@ JS_TRADUCTION_LECTURE = r"""
           el.innerText = 'TRADUIRE';
       }
   };
+"""
+
+# Navigateur intégré (12/10/2026) : bouton TRADUIRE flottant en haut à droite
+# (sous PLEIN ÉCRAN de la barre d'adresse, et sous le bouton vidéo s'il y en a un)
+# des pages web, injecté dans le monde principal de la page (comme le bouton
+# vidéo) pour pouvoir appeler __courrierPont. La traduction elle-même tourne
+# dans le monde isolé (ApplicationWorld) : le site ne voit ni ne modifie ses
+# fonctions. __courrierTradWeb(texte, pourcentage, bilan) met le bouton à jour.
+JS_BOUTON_TRADUCTION_WEB = r"""
+(function () {
+    if (document.getElementById('__courrier_trad_web__') || !document.body) return;
+    var boite = document.createElement('div');
+    boite.id = '__courrier_trad_web__';
+    boite.setAttribute('contenteditable', 'false');
+    boite.style.cssText = 'position:fixed;top:10px;right:10px;z-index:2147483647;display:flex;'
+        + 'align-items:center;gap:8px;max-width:70vw;';
+    var bilan = document.createElement('span');
+    bilan.style.cssText = 'font:11px Verdana,sans-serif;color:#222;background:rgba(245,222,179,0.95);'
+        + 'padding:4px 8px;border-radius:4px;box-shadow:0 2px 6px rgba(0,0,0,0.3);display:none;';
+    var b = document.createElement('div');
+    b.textContent = 'TRADUIRE';
+    b.title = 'Traduire cette page (sur cet ordinateur ou avec Claude) — Courrier Adrien';
+    b.style.cssText = 'background:#A52A2A;color:white;font:bold 12px Verdana,sans-serif;padding:6px 12px;'
+        + 'border:1px solid #6b1a1a;border-radius:4px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.5);'
+        + 'user-select:none;white-space:nowrap;';
+    b.addEventListener('click', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        if (window.__courrierPont && window.__courrierPont.traduirePageWeb) window.__courrierPont.traduirePageWeb();
+    });
+    boite.appendChild(bilan);
+    boite.appendChild(b);
+    document.body.appendChild(boite);
+    // Même coin que le bouton vidéo (_injecter_bouton_video_web) : se range
+    // dessous, y compris quand celui-ci apparaît après coup (détection vidéo
+    // en arrière-plan) ou disparaît.
+    function placer() {
+        var video = document.getElementById('__courrier_video_web__');
+        var bas = video ? video.getBoundingClientRect().bottom : 0;
+        boite.style.top = (bas > 0 ? Math.round(bas) + 6 : 10) + 'px';
+    }
+    placer();
+    new MutationObserver(placer).observe(document.body, {childList: true});
+    window.__courrierTradWeb = function (texte, pourcentage, texteBilan) {
+        b.textContent = texte;
+        if (pourcentage === null || pourcentage === undefined) {
+            b.style.background = '#A52A2A'; b.style.color = 'white';
+        } else {
+            b.style.background = 'linear-gradient(to right, #DAA520 ' + pourcentage + '%, #F5DEB3 ' + pourcentage + '%)';
+            b.style.color = 'black';
+        }
+        if (texteBilan !== null && texteBilan !== undefined) {
+            bilan.textContent = texteBilan;
+            bilan.style.display = texteBilan ? '' : 'none';
+        }
+    };
+})();
+"""
+
+# Monde isolé de la page : contenu principal (article) s'il existe, sinon
+# toute la page, découpé en passages par trCollecter.
+JS_COLLECTE_TRADUCTION_WEB = r"""
+(function (jeton) {
+    var zone = 'page', racine = document.body, longueur = 0;
+    document.querySelectorAll('article, main, [role=main]').forEach(function (c) {
+        var n = (c.innerText || '').length;
+        if (n > longueur) { longueur = n; if (n > 500) { racine = c; zone = 'article'; } }
+    });
+    return JSON.stringify({zone: zone, passages: trCollecter(jeton, racine, null)});
+})(__JETON__)
 """
 
 # Fenêtre de rédaction : seul le texte rédigé est traduit, pas la citation.
@@ -19471,10 +19548,11 @@ class DialogueTraductionLecture(QDialog):
     traduction payante ne doit jamais partir sans que son prix ait été vu.
     Le dernier moteur choisi est gardé (config_claude.json, "choix_lecture")."""
 
-    def __init__(self, passages, de, vers, parent=None):
+    def __init__(self, passages, de, vers, parent=None, page_web=False, precision=""):
         super().__init__(parent)
         from PySide6.QtWidgets import QRadioButton, QButtonGroup
-        self.setWindowTitle("Traduire ce mail")
+        self._page_web = page_web
+        self.setWindowTitle("Traduire cette page" if page_web else "Traduire ce mail")
         self.setMinimumWidth(560)
         self.setStyleSheet("""
             QDialog { background-color: #2a2a2a; }
@@ -19494,7 +19572,8 @@ class DialogueTraductionLecture(QDialog):
         mots = len(re.findall(r"\w+", texte_depuis_html(passages)))
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
-        entete = QLabel(f"Mail détecté en {LANGUES_TRADUCTION[de][0]} — environ {mots:,} mots.".replace(",", " "))
+        entete = QLabel(f"{'Page détectée' if page_web else 'Mail détecté'} en {LANGUES_TRADUCTION[de][0]} — "
+                        f"environ {mots:,} mots{precision}.".replace(",", " "))
         entete.setObjectName("info")
         layout.addWidget(entete)
 
@@ -19547,8 +19626,9 @@ class DialogueTraductionLecture(QDialog):
             self.combo_langue.setCurrentText(self._cible_locale)
             self.lbl_cout.setText("Gratuit.")
         else:
-            texte = (f"Coût estimé pour ce mail : {texte_centimes(estimer_cout_claude(self._passages))} "
-                     f"({tarif_claude_400_mots()}, mise en forme comprise). Le texte du mail est envoyé "
+            objet = "cette page" if self._page_web else "ce mail"
+            texte = (f"Coût estimé pour {objet} : {texte_centimes(estimer_cout_claude(self._passages))} "
+                     f"({tarif_claude_400_mots()}, mise en forme comprise). Le texte de {objet} est envoyé "
                      f"à Anthropic (États-Unis).")
             if not claude_configure():
                 texte += " Il faudra d'abord saisir votre clé (bouton « Réglages-prix de Claude… », guidé)."
@@ -23554,6 +23634,7 @@ class ClientMail(QMainWindow):
         # signature dans un corps vide.
         self._detecter_page_bloquee_akamai()
         self._detecter_video_web()
+        self._injecter_bouton_traduction_web()
         t_debut = getattr(self, '_t_debut_rendu_webview', None)
         if t_debut is not None:
             import time
@@ -37354,6 +37435,119 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 
         self.corps_html_courant = corps
         self._afficher_dans_cef(corps)
+    # --- Traduction des pages web du navigateur intégré (12/10/2026) -------
+    def _injecter_bouton_traduction_web(self):
+        url = self.webview.url().toString()
+        if not url.startswith(("http://", "https://")):
+            return
+        self._trad_web = {"url": url, "traduit": False, "en_cours": False, "jeton": 0}
+        try:
+            self.webview.page().runJavaScript(JS_BOUTON_TRADUCTION_WEB)
+        except Exception:
+            pass
+
+    def _bouton_traduction_web(self, page, texte, pourcentage=None, bilan=None):
+        try:
+            page.runJavaScript(f"window.__courrierTradWeb && __courrierTradWeb({json.dumps(texte)}, "
+                               f"{json.dumps(pourcentage)}, {json.dumps(bilan)});")
+        except RuntimeError:
+            pass
+
+    def _traduire_page_web(self):
+        """Clic sur TRADUIRE d'une page web : passages lus dans le monde
+        isolé, fenêtre de choix (coût affiché), traduction, remplacement sur
+        place ; second clic : retour à l'original."""
+        from PySide6.QtWebEngineCore import QWebEngineScript
+        url = self.webview.url().toString()
+        if not url.startswith(("http://", "https://")):
+            return
+        etat = getattr(self, "_trad_web", None)
+        if not etat or etat["url"] != url:  # page changée sans rechargement (site dynamique)
+            etat = self._trad_web = {"url": url, "traduit": False, "en_cours": False, "jeton": 0}
+        if etat["en_cours"]:
+            return
+        page = self.webview.page()
+        monde = QWebEngineScript.ScriptWorldId.ApplicationWorld
+        if etat["traduit"]:
+            page.runJavaScript("typeof trRestaurer === 'function' && trRestaurer();", monde)
+            etat["traduit"] = False
+            self._bouton_traduction_web(page, "TRADUIRE", None, "")
+            return
+        etat["en_cours"] = True
+        etat["jeton"] += 1
+        jeton = etat["jeton"]
+        # Fonctions de traduction (re)définies à chaque collecte, sans eval
+        # (interdit par la politique de sécurité de nombreux sites) : sans
+        # risque, la page n'étant pas traduite à ce moment-là.
+        js = JS_TRADUCTION_DOM + JS_COLLECTE_TRADUCTION_WEB.replace("__JETON__", str(jeton))
+        page.runJavaScript(js, monde, lambda resultat: self._sur_passages_page_web(page, url, jeton, resultat))
+
+    def _sur_passages_page_web(self, page, url, jeton, resultat):
+        from PySide6.QtWebEngineCore import QWebEngineScript
+        etat = self._trad_web
+
+        def actuel():
+            try:
+                return (page is self.webview.page() and self.webview.url().toString() == url
+                        and etat is self._trad_web and etat["jeton"] == jeton)
+            except RuntimeError:
+                return False
+
+        def abandon(message=""):
+            etat["en_cours"] = False
+            if actuel():
+                self._bouton_traduction_web(page, "TRADUIRE", None, message)
+
+        if not actuel():
+            etat["en_cours"] = False
+            return
+        try:
+            donnees = json.loads(resultat or "{}")
+        except Exception:
+            donnees = {}
+        passages = donnees.get("passages") or []
+        if not passages:
+            abandon("Rien à traduire sur cette page.")
+            return
+        de = detecter_langue_fr_en(texte_depuis_html(passages))
+        vers = "en" if de == "fr" else "fr"
+        precision = " (article principal)" if donnees.get("zone") == "article" else " (toute la page)"
+        dialogue = DialogueTraductionLecture(passages, de, vers, self, page_web=True, precision=precision)
+        if dialogue.exec() != QDialog.DialogCode.Accepted:
+            abandon()
+            return
+        langue_claude = None
+        if dialogue.choix["moteur"] == "claude":
+            if not preparer_claude(self):
+                abandon()
+                return
+            langue_claude = dialogue.choix["langue"]
+        monde = QWebEngineScript.ScriptWorldId.ApplicationWorld
+        self._bouton_traduction_web(page, "TRADUCTION 0 %", 0, "")
+
+        def progression(pourcentage):
+            if actuel():
+                self._bouton_traduction_web(page, f"TRADUCTION {int(pourcentage)} %", int(pourcentage))
+
+        def appliquer(traductions, erreur, bilan):
+            etat["en_cours"] = False
+            if not actuel():
+                return
+            if erreur:
+                self._bouton_traduction_web(page, "TRADUIRE", None, erreur)
+                return
+            page.runJavaScript(f"trAppliquer({int(jeton)}, {json.dumps(traductions)});", monde)
+            etat["traduit"] = True
+            self._bouton_traduction_web(page, "ORIGINAL", None, bilan)
+
+        if langue_claude:
+            lancer_appel_claude(CONSIGNE_TRADUCTION_CLAUDE.format(langue=langue_claude), passages, progression,
+                                lambda f, e, b: appliquer(f, e, f"Traduit en {langue_claude} par {b}"))
+        else:
+            libelle = (f"Traduit {LANGUES_TRADUCTION[de][1]} {LANGUES_TRADUCTION[vers][2]} "
+                       f"(sur cet ordinateur)")
+            moteur_traduction().traduire(passages, de, vers, lambda t, e: appliquer(t, e, libelle), progression)
+
     def _traduire_mail_depuis_js(self, jeton, passages_json):
         """Bouton TRADUIRE du bandeau : langue détectée (français ou
         anglais), traduction vers l'autre, résultat renvoyé à la page."""
