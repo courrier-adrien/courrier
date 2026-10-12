@@ -18000,10 +18000,10 @@ class EnvoyeurMail(QThread):
 # ---------------------------------------------------------------------------
 # Moteur et modèles de Firefox Translations (Mozilla, projet Bergamot), sous
 # Mozilla Public License 2.0 : licence "fichier par fichier", qui permet de
-# les livrer avec COURRIER sans rien imposer à son propre code (texte de la
+# les livrer avec Courrier Adrien sans rien imposer à son propre code (texte de la
 # licence et provenance des fichiers : dossier TRADUCTION). Les fichiers de
 # Mozilla ne sont pas modifiés ; enveloppe.js et traducteur.html, écrits par
-# COURRIER, les font tourner dans une page QtWebEngine invisible.
+# Courrier Adrien, les font tourner dans une page QtWebEngine invisible.
 # Rien ne part sur Internet : la traduction se fait entièrement en local.
 DOSSIER_TRADUCTION = os.path.join(DOSSIER_APP, "TRADUCTION")
 DOSSIER_MOTEUR_TRADUCTION = os.path.join(DOSSIER_TRADUCTION, "moteur")
@@ -18021,7 +18021,7 @@ DELAI_MAX_TRADUCTION_MS = 120000
 # Chromium refuse fetch() sur file:// mais accepte XMLHttpRequest : le moteur
 # de Mozilla reçoit donc un fetch() de remplacement pour son .wasm local, puis
 # est chargé tel quel.
-ENVELOPPE_TRADUCTION_JS = r"""// Écrit par COURRIER (pas un fichier de Mozilla).
+ENVELOPPE_TRADUCTION_JS = r"""// Écrit par Courrier Adrien (pas un fichier de Mozilla).
 self.fetch = function (url) {
     return new Promise(function (resolve, reject) {
         var xhr = new XMLHttpRequest();
@@ -18040,7 +18040,7 @@ importScripts("translator-worker.js");
 # Page invisible qui héberge le moteur : reçoit les demandes de Python
 # (traduire({...})) et répond par le pont QWebChannel "pont".
 PAGE_TRADUCTION_HTML = r"""<!DOCTYPE html>
-<!-- Écrit par COURRIER (pas un fichier de Mozilla). -->
+<!-- Écrit par Courrier Adrien (pas un fichier de Mozilla). -->
 <html><head><meta charset="utf-8">
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head><body><script>
@@ -18156,6 +18156,24 @@ def _ecrire_si_different(chemin, contenu):
         f.write(contenu)
 
 
+TAILLE_LOT_TRADUCTION = 1500  # caractères de HTML par lot (progression visible)
+
+
+def _decouper_en_lots(textes):
+    """Regroupe les fragments en lots d'environ TAILLE_LOT_TRADUCTION
+    caractères (un fragment n'est jamais coupé)."""
+    lots, lot, taille = [], [], 0
+    for t in textes:
+        if lot and taille + len(t) > TAILLE_LOT_TRADUCTION:
+            lots.append(lot)
+            lot, taille = [], 0
+        lot.append(t)
+        taille += len(t)
+    if lot:
+        lots.append(lot)
+    return lots
+
+
 class PontTraducteur(QObject):
     """Pont QWebChannel de la page invisible du moteur de traduction."""
 
@@ -18216,16 +18234,45 @@ class MoteurTraduction(QObject):
             self._page.runJavaScript(f"traduire({demande});")
         self._en_attente = []
 
-    def traduire(self, textes, de, vers, rappel):
+    def traduire(self, textes, de, vers, rappel, progression=None):
         """Traduit une liste de fragments HTML ; rappel(liste traduite, "")
-        ou rappel(None, message d'erreur), toujours appelé une seule fois."""
+        ou rappel(None, message d'erreur), toujours appelé une seule fois.
+
+        Progression (12/10/2026) : le moteur traduit d'un bloc, sans
+        avancement intermédiaire ; les fragments lui sont donc envoyés par
+        lots successifs, et progression(pourcentage) est appelé après
+        chacun (0 au départ, le temps que le moteur et le modèle chargent)."""
         erreur = traduction_installee(de, vers)
         if erreur:
             rappel(None, erreur)
             return
+        textes = list(textes)
         if not textes:
             rappel([], "")
             return
+        lots = _decouper_en_lots(textes)
+        total = sum(len(t) for t in textes) or 1
+        resultats = []
+
+        def lot_suivant(i):
+            if i == len(lots):
+                rappel(resultats, "")
+                return
+            if progression:
+                progression(sum(len(t) for t in textes[:len(resultats)]) * 100 // total)
+
+            def recu(traductions, erreur_lot):
+                if erreur_lot:
+                    rappel(None, erreur_lot)
+                    return
+                resultats.extend(traductions)
+                lot_suivant(i + 1)
+
+            self._traduire_lot(lots[i], de, vers, recu)
+
+        lot_suivant(0)
+
+    def _traduire_lot(self, textes, de, vers, rappel):
         self._compteur += 1
         ident = self._compteur
         self._rappels[ident] = rappel
@@ -18370,11 +18417,59 @@ JS_TRADUCTION_DOM = r"""
 """
 
 # Panneau de lecture : bouton TRADUIRE du bandeau (bascule traduction/original).
+# Pendant la traduction, le bouton se remplit de gauche à droite du jaune
+# des mails non lus (#DAA520) sur le blé de la sélection (#F5DEB3), comme
+# la progression des téléchargements dans les onglets de NAVIGATEUR.
 JS_TRADUCTION_LECTURE = r"""
+  function _trStyleProgression(el, pourcentage) {
+      // Couleurs d'origine du bouton (style en ligne du bandeau) gardées pour
+      // les remettre ensuite : vider "background" les effaçait aussi.
+      if (el.dataset.fondOrigine === undefined) {
+          el.dataset.fondOrigine = el.style.background;
+          el.dataset.couleurOrigine = el.style.color;
+      }
+      el.style.background = 'linear-gradient(to right, #DAA520 ' + pourcentage + '%, #F5DEB3 ' + pourcentage + '%)';
+      el.style.color = 'black';
+      el.innerText = 'TRADUCTION ' + pourcentage + ' %';
+  }
+  // Bilan de la traduction (moteur, coût, consommé, restant) en petit à
+  // côté du bouton, retiré au retour à l'original.
+  function _trAfficherBilan(el, texte) {
+      var bilan = document.getElementById('__trad_bilan__');
+      if (!bilan) {
+          bilan = document.createElement('span');
+          bilan.id = '__trad_bilan__';
+          bilan.style.cssText = 'font-family:Verdana;font-size:10px;color:#555;margin-right:16px;';
+          el.parentNode.insertBefore(bilan, el.nextSibling);
+      }
+      bilan.textContent = texte;
+  }
+  function _trRetirerBilan() {
+      var bilan = document.getElementById('__trad_bilan__');
+      if (bilan) bilan.parentNode.removeChild(bilan);
+  }
+  function _trStyleNormal(el) {
+      el.style.background = el.dataset.fondOrigine || '';
+      el.style.color = el.dataset.couleurOrigine || '';
+  }
+  // Menu de choix fermé sans rien choisir : le bouton revient à l'état normal.
+  window.trAnnulerMail = function () {
+      var el = document.getElementById('__btn_traduire__');
+      _trPassages = [];
+      if (!el) return;
+      delete el.dataset.enCours;
+      _trStyleNormal(el);
+      el.innerText = 'TRADUIRE';
+  };
+  window.trProgressionMail = function (pourcentage) {
+      var el = document.getElementById('__btn_traduire__');
+      if (el && el.dataset.enCours) _trStyleProgression(el, pourcentage);
+  };
   _actionsCourrier.traduire = function (el) {
       var corps = document.getElementById('__corps_mail__');
       if (!corps || el.dataset.enCours) return;
       if (trRestaurer()) {
+          _trRetirerBilan();
           el.innerText = 'TRADUIRE';
           el.title = 'Traduire ce mail (français ↔ anglais), sur cet ordinateur';
           return;
@@ -18383,13 +18478,14 @@ JS_TRADUCTION_LECTURE = r"""
       var passages = trCollecter(jeton, corps, null);
       if (!passages.length) return;
       el.dataset.enCours = '1';
-      el.innerText = 'TRADUCTION…';
+      _trStyleProgression(el, 0);
       if (pyBridge) pyBridge.traduireMail(jeton, JSON.stringify(passages));
   };
   window.trResultatMail = function (jeton, traductions, libelle, erreur) {
       var el = document.getElementById('__btn_traduire__');
       if (!el) return;
       delete el.dataset.enCours;
+      _trStyleNormal(el);
       if (erreur) {
           el.innerText = 'TRADUIRE';
           el.title = erreur;
@@ -18399,6 +18495,7 @@ JS_TRADUCTION_LECTURE = r"""
       if (trAppliquer(jeton, traductions)) {
           el.innerText = 'ORIGINAL';
           el.title = libelle + ' — cliquer pour revenir au texte d\'origine';
+          _trAfficherBilan(el, libelle);
       } else {
           el.innerText = 'TRADUIRE';
       }
@@ -18432,6 +18529,1047 @@ JS_TRADUCTION_REDACTION = r"""
       _trSauvegarde = null;
   }
 """
+
+
+# ---------------------------------------------------------------------------
+# Vérification orthographique pendant la frappe (11/10/2026)
+# ---------------------------------------------------------------------------
+# Correcteur Hunspell intégré à Chromium/QtWebEngine : soulignement rouge
+# des mots inconnus dans la fenêtre de rédaction (et les champs de saisie
+# des sites web) ; les suggestions apparaissent d'elles-mêmes en tête du
+# menu du clic droit (menu standard de QtWebEngine). Dictionnaires dans le dossier
+# DICTIONNAIRES, au format .bdic de Chromium : français Dicollecte 7.7
+# "toutes variantes" (MPL 2.0) et anglais SCOWL (licences permissives) —
+# licences et provenance dans ce même dossier. Les deux langues sont
+# actives ensemble : un mot est accepté s'il existe dans l'une ou l'autre.
+DOSSIER_DICTIONNAIRES = os.path.join(DOSSIER_APP, "DICTIONNAIRES")
+LANGUES_ORTHOGRAPHE = ["fr-FR", "en-US"]
+
+
+# Menu du clic droit des pages web en français (12/10/2026) : Qt ne fournit
+# pas de traduction française de QtWebEngine (absente de Qt 6.11), mais les
+# entrées du menu standard sont les actions de la page, renommables.
+TEXTES_ACTIONS_WEB = {
+    "Undo": "Annuler", "Redo": "Rétablir", "Cut": "Couper", "Copy": "Copier",
+    "Paste": "Coller", "PasteAndMatchStyle": "Coller sans la mise en forme",
+    "SelectAll": "Tout sélectionner", "Unselect": "Désélectionner",
+    "Back": "Précédent", "Forward": "Suivant", "Stop": "Arrêter", "Reload": "Actualiser",
+    "ReloadAndBypassCache": "Actualiser sans le cache", "SavePage": "Enregistrer la page",
+    "ViewSource": "Afficher le code source", "InspectElement": "Inspecter",
+    "OpenLinkInThisWindow": "Ouvrir le lien", "OpenLinkInNewWindow": "Ouvrir le lien dans une nouvelle fenêtre",
+    "OpenLinkInNewTab": "Ouvrir le lien dans un nouvel onglet",
+    "OpenLinkInNewBackgroundTab": "Ouvrir le lien en arrière-plan",
+    "CopyLinkToClipboard": "Copier l'adresse du lien", "DownloadLinkToDisk": "Enregistrer la cible du lien",
+    "CopyImageToClipboard": "Copier l'image", "CopyImageUrlToClipboard": "Copier l'adresse de l'image",
+    "DownloadImageToDisk": "Enregistrer l'image", "CopyMediaUrlToClipboard": "Copier l'adresse du média",
+    "DownloadMediaToDisk": "Enregistrer le média", "ToggleMediaControls": "Afficher les commandes",
+    "ToggleMediaLoop": "Lecture en boucle", "ToggleMediaPlayPause": "Lecture / pause",
+    "ToggleMediaMute": "Couper le son", "ExitFullScreen": "Quitter le plein écran",
+    "ToggleBold": "Gras", "ToggleItalic": "Italique", "ToggleUnderline": "Souligné",
+    "ToggleStrikethrough": "Barré", "AlignLeft": "Aligner à gauche", "AlignCenter": "Centrer",
+    "AlignRight": "Aligner à droite", "AlignJustified": "Justifier", "Indent": "Augmenter le retrait",
+    "Outdent": "Diminuer le retrait", "InsertOrderedList": "Liste numérotée",
+    "InsertUnorderedList": "Liste à puces", "ChangeTextDirectionLTR": "Écrire de gauche à droite",
+    "ChangeTextDirectionRTL": "Écrire de droite à gauche",
+}
+
+
+def franciser_menu_web(page):
+    """Renomme en français les actions du menu standard du clic droit."""
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    for nom, texte in TEXTES_ACTIONS_WEB.items():
+        action_web = getattr(QWebEnginePage.WebAction, nom, None)
+        if action_web is not None:
+            try:
+                page.action(action_web).setText(texte)
+            except Exception:
+                pass
+
+
+def activer_orthographe(profil):
+    """À appeler sur chaque profil QtWebEngine où l'on écrit. Le dossier
+    des dictionnaires doit avoir été indiqué AVANT le démarrage de
+    QtWebEngine (QTWEBENGINE_DICTIONARIES_PATH, voir __main__)."""
+    langues = [l for l in LANGUES_ORTHOGRAPHE
+               if os.path.isfile(os.path.join(DOSSIER_DICTIONNAIRES, l + ".bdic"))]
+    if not langues:
+        print(f"[ORTHOGRAPHE] aucun dictionnaire dans {DOSSIER_DICTIONNAIRES}")
+        return
+    profil.setSpellCheckLanguages(langues)
+    profil.setSpellCheckEnabled(True)
+
+
+# ---------------------------------------------------------------------------
+# Claude (Anthropic), en option (12/10/2026) — traduction et correction
+# ---------------------------------------------------------------------------
+# Service en ligne et payant, utilisé uniquement si l'utilisateur a saisi SA
+# propre clé d'API (créée sur platform.claude.com, crédit prépayé) : jamais
+# de clé fournie avec Courrier Adrien. La clé est chiffrée avec la protection
+# des données de Windows (DPAPI : déchiffrable seulement par la même session
+# Windows). Rien n'est envoyé sans une action explicite (bouton Corriger,
+# choix "avec Claude" dans les menus de traduction) ; la fenêtre de réglages
+# prévient que le texte part chez Anthropic. Bibliothèque officielle
+# "anthropic" (licence MIT).
+FICHIER_CONFIG_CLAUDE = os.path.join(DOSSIER_APP, "config_claude.json")
+# (identifiant, libellé, prix $ par million de jetons en entrée, en sortie)
+MODELES_CLAUDE = [
+    ("claude-opus-5-5", "Claude Opus 5.5 — le plus capable", 4.0, 20.0),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5 — moitié moins cher", 2.0, 10.0),
+    ("claude-haiku-5-5", "Claude Haiku 5.5 — le moins cher, moins fin", 0.10, 0.50),
+]
+# Anthropic facture en dollars : les montants affichés sont convertis en
+# euros à ce taux approximatif (à ajuster si le cours change nettement).
+TAUX_DOLLAR_EURO = 0.90
+# Longueur de 400 mots français (≈ 6 caractères par mot, espace compris),
+# pour afficher un tarif "pour 400 mots" calculé comme les estimations.
+CARACTERES_400_MOTS = 2400
+MODELE_CLAUDE_DEFAUT = "claude-opus-5-5"
+# Repli serveur si un filtre de sécurité d'Anthropic refuse une demande :
+# relancée automatiquement sur le modèle recommandé (n'existe pas pour Haiku).
+MODELES_CLAUDE_AVEC_REPLI = {"claude-opus-5-5", "claude-sonnet-5-5"}
+# Langues proposées pour la traduction par Claude (nom tel qu'écrit dans la consigne).
+LANGUES_CLAUDE = ["français", "anglais", "espagnol", "allemand", "italien", "portugais",
+                  "néerlandais", "polonais", "roumain", "grec", "russe", "ukrainien",
+                  "arabe", "turc", "chinois", "japonais", "coréen"]
+# Plateforme des développeurs d'Anthropic (ex-console.anthropic.com, en
+# anglais) : pages directes de chaque étape du guide des réglages.
+URL_CONSOLE_ANTHROPIC = "https://platform.claude.com/"
+URL_CREDIT_ANTHROPIC = "https://platform.claude.com/settings/billing"
+URL_PLAFOND_ANTHROPIC = "https://platform.claude.com/settings/limits"
+URL_CLES_ANTHROPIC = "https://platform.claude.com/settings/keys"
+
+CONSIGNE_TRADUCTION_CLAUDE = """Tu traduis des extraits d'un e-mail. Langue d'arrivée : {langue}.
+Tu reçois un objet JSON {{"fragments": [...]}} : chaque fragment est un passage consécutif du même message. Réponds avec {{"fragments": [...]}} contenant exactement le même nombre d'éléments, dans le même ordre, chacun étant la traduction du fragment correspondant.
+Règles :
+- Les repères ⟦1⟧, ⟦2⟧… représentent la mise en forme d'origine (gras, liens…) : garde chacun d'eux exactement une fois, sans le modifier, au même endroit du sens dans la traduction. Ne traduis que le texte.
+- Ne traduis pas les adresses e-mail, les adresses web, les noms de personnes, de marques ou de produits, ni les codes et références.
+- Garde le registre de l'original (tutoiement ou vouvoiement, ton familier ou soutenu) et adapte les formules d'usage (salutations, formules de politesse) aux habitudes de la langue d'arrivée.
+- Les fragments se suivent : traduis-les de façon cohérente entre eux.
+- Un fragment déjà rédigé dans la langue d'arrivée, ou sans texte à traduire, est renvoyé tel quel.
+- N'ajoute aucun commentaire."""
+
+CONSIGNE_CORRECTION_CLAUDE = """Tu corriges l'orthographe et la grammaire d'un e-mail en cours de rédaction.
+Tu reçois un objet JSON {"fragments": [...]} : chaque fragment est un passage consécutif du message. Réponds avec {"fragments": [...]} contenant exactement le même nombre d'éléments, dans le même ordre, chacun étant le fragment corrigé.
+Corrige : les fautes d'orthographe et de frappe, les accords, les conjugaisons, les homophones (a/à, ces/ses, et/est...), la ponctuation et les majuscules.
+Ne change pas : le sens, le style, le registre, le choix des mots quand il est correct, l'ordre des phrases. Ne reformule jamais une phrase correcte. N'ajoute pas d'espaces insécables. Garde la langue de chaque fragment.
+Un fragment sans faute est renvoyé exactement à l'identique, caractère pour caractère.
+Les repères ⟦1⟧, ⟦2⟧… représentent la mise en forme : garde chacun d'eux exactement une fois, sans le modifier ni le déplacer. N'ajoute aucun commentaire."""
+
+
+def charger_config_claude():
+    try:
+        with open(FICHIER_CONFIG_CLAUDE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+            return config if isinstance(config, dict) else {}
+    except Exception:
+        return {}
+
+
+def sauvegarder_config_claude(config):
+    with open(FICHIER_CONFIG_CLAUDE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=1)
+
+
+def _chiffrer_pour_windows(texte):
+    """Même protection que les mots de passe des comptes (DPAPI par ctypes,
+    sans pywin32 : lancé par COURRIER.exe, win32crypt est introuvable)."""
+    return chiffrer_secret(texte)
+
+
+def _dechiffrer_pour_windows(valeur):
+    return dechiffrer_secret(valeur)
+
+
+def cle_claude():
+    """Clé d'API de l'utilisateur, déchiffrée ; "" si absente ou illisible
+    (par exemple config copiée depuis une autre session Windows)."""
+    chiffree = charger_config_claude().get("cle")
+    if not chiffree:
+        return ""
+    try:
+        return _dechiffrer_pour_windows(chiffree)
+    except Exception:
+        return ""
+
+
+def modele_claude():
+    modele = charger_config_claude().get("modele") or MODELE_CLAUDE_DEFAUT
+    return modele if any(m[0] == modele for m in MODELES_CLAUDE) else MODELE_CLAUDE_DEFAUT
+
+
+def nom_modele_claude(identifiant):
+    for m in MODELES_CLAUDE:
+        if m[0] == identifiant:
+            return m[1].split(" — ")[0]
+    # Modèle de repli hors liste : "claude-opus-4-8" -> "Claude Opus 4.8"
+    morceaux = (identifiant or "").split("-")
+    if len(morceaux) >= 3 and morceaux[0] == "claude":
+        return f"Claude {morceaux[1].capitalize()} {'.'.join(morceaux[2:])}"
+    return identifiant
+
+
+def claude_configure():
+    return bool(cle_claude())
+
+
+def libelle_moteur_claude():
+    """Ligne "Claude" des choix de traduction ; Opus 5.5 est le modèle
+    conseillé par Courrier Adrien."""
+    modele = modele_claude()
+    if modele == MODELE_CLAUDE_DEFAUT:
+        return (f"Claude — en ligne et payant, toutes langues "
+                f"({nom_modele_claude(modele)} traducteur conseillé par Courrier Adrien)")
+    return f"Claude — en ligne et payant, toutes langues ({nom_modele_claude(modele)})"
+
+
+def tarif_claude_400_mots(modele=None):
+    """"≈ 3 centimes € pour 400 mots" : même calcul que les estimations."""
+    return f"{texte_centimes(estimer_cout_claude(['x' * CARACTERES_400_MOTS], modele))} pour 400 mots"
+
+
+def estimer_cout_claude(fragments, modele=None):
+    """Coût estimé ($) au tarif du modèle (choisi par défaut), sur le texte
+    réellement envoyé (mise en forme remplacée par des repères) : environ 1
+    jeton pour 3 caractères, plus la consigne (≈ 450 jetons) ; en sortie, la
+    traduction (un peu plus longue en français) plus la réflexion du modèle.
+    Calé sur les coûts réels relevés dans le journal ([CLAUDE] ... jetons)."""
+    modele = modele or modele_claude()
+    prix = next(((m[2], m[3]) for m in MODELES_CLAUDE if m[0] == modele), (4.0, 20.0))
+    compactes = [_compacter_balises_claude(f)[0] for f in fragments]
+    jetons = len(json.dumps({"fragments": compactes}, ensure_ascii=False)) / 3.0
+    return ((jetons + 450) * prix[0] + (jetons * 1.3 + 250) * prix[1]) / 1_000_000
+
+
+def texte_centimes(cout_dollars):
+    """Montant en dollars affiché en centimes d'euro : "≈ 3 centimes €"."""
+    centimes = cout_dollars * TAUX_DOLLAR_EURO * 100
+    if centimes < 1:
+        return "moins d'1 centime €"
+    centimes = round(centimes)
+    return f"≈ {centimes} centime{'s' if centimes > 1 else ''} €"
+
+
+def mots_pour_5_dollars(modele=MODELE_CLAUDE_DEFAUT):
+    """Nombre de mots traduisibles avec le crédit minimal de 5 $, arrondi."""
+    mots = 5 / estimer_cout_claude(['x' * CARACTERES_400_MOTS], modele) * 400
+    return f"{int(round(mots, -4 if mots >= 20000 else -3)):,}".replace(",", " ")
+
+
+# Mise en forme remplacée par des repères avant l'envoi à Claude (12/10/2026) :
+# une balise comme <span style="font-family:...;color:..."> coûte des dizaines
+# de jetons, envoyés PUIS réécrits par Claude (5 fois plus chers en sortie).
+# Mesuré sur un mail de 176 mots : 1 647 jetons envoyés au lieu d'environ 700.
+# Les balises sont remises à leur place au retour ; la mise en forme est
+# conservée sans être facturée.
+_MOTIF_BALISE_CLAUDE = re.compile(r"<[^<>]+>")
+_MOTIF_REPERE_CLAUDE = re.compile(r"⟦(\d+)⟧")
+
+
+def _compacter_balises_claude(fragment):
+    """("Bonjour ⟦1⟧Pierre⟦2⟧", ["<b>", "</b>"]) pour "Bonjour <b>Pierre</b>"."""
+    balises = []
+
+    def repere(m):
+        balises.append(m.group(0))
+        return f"⟦{len(balises)}⟧"
+
+    return _MOTIF_BALISE_CLAUDE.sub(repere, fragment), balises
+
+
+def _restaurer_balises_claude(texte, balises):
+    """Remet les balises à la place des repères. Si Claude a perdu, doublé
+    ou inventé un repère, le passage est rendu sans sa mise en forme
+    (texte seul) plutôt qu'avec un HTML cassé."""
+    trouves = sorted(int(n) for n in _MOTIF_REPERE_CLAUDE.findall(texte))
+    if trouves != list(range(1, len(balises) + 1)):
+        return _MOTIF_REPERE_CLAUDE.sub("", texte)
+    return _MOTIF_REPERE_CLAUDE.sub(lambda m: balises[int(m.group(1)) - 1], texte)
+
+
+def _texte_apres_repli(message):
+    """Texte de la réponse finale. En cas de repli serveur en cours de
+    réponse, le texte du modèle qui a refusé précède le bloc "fallback" :
+    seul ce qui suit le dernier bloc "fallback" est la vraie réponse."""
+    morceaux = []
+    for bloc in message.content:
+        if bloc.type == "fallback":
+            morceaux = []
+        elif bloc.type == "text":
+            morceaux.append(bloc.text)
+    return "".join(morceaux)
+
+
+class AppelClaude(QThread):
+    """Envoie des fragments HTML à Claude avec une consigne (traduction ou
+    correction) et reçoit autant de fragments en retour (sortie structurée
+    JSON). Progression estimée d'après le texte reçu en continu."""
+    progression = Signal(int)
+    termine = Signal(object, str, str)  # fragments | None, message d'erreur, bilan (modèle, coût)
+
+    def __init__(self, consigne, fragments, cle, modele):
+        super().__init__()
+        self.consigne = consigne
+        self.fragments = list(fragments)
+        self.cle = cle
+        self.modele = modele
+
+    def run(self):
+        # Quoi qu'il arrive, la fenêtre doit recevoir une réponse : sans
+        # "termine", son bouton resterait bloqué en cours de progression.
+        try:
+            self._executer()
+        except Exception as e:
+            self.termine.emit(None, f"Erreur inattendue avec Claude : {e}", "")
+
+    def _executer(self):
+        try:
+            import anthropic
+        except ImportError:
+            self.termine.emit(None, "La bibliothèque « anthropic » n'est pas installée.", "")
+            return
+        client = anthropic.Anthropic(api_key=self.cle, max_retries=2, timeout=300.0)
+        compactes = [_compacter_balises_claude(f) for f in self.fragments]
+        entree = json.dumps({"fragments": [c[0] for c in compactes]}, ensure_ascii=False)
+        schema = {
+            "type": "object",
+            "properties": {"fragments": {"type": "array", "items": {"type": "string"}}},
+            "required": ["fragments"],
+            "additionalProperties": False,
+        }
+        parametres = dict(
+            model=self.modele,
+            max_tokens=64000,
+            system=self.consigne,
+            messages=[{"role": "user", "content": entree}],
+            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": schema}},
+        )
+        if self.modele in MODELES_CLAUDE_AVEC_REPLI:
+            parametres.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+        recu, attendu = 0, max(len(entree), 1)
+        try:
+            with client.beta.messages.stream(**parametres) as flux:
+                for evenement in flux:
+                    if evenement.type == "text":
+                        recu += len(evenement.text)
+                        self.progression.emit(min(95, recu * 100 // attendu))
+                message = flux.get_final_message()
+        except anthropic.AuthenticationError:
+            self.termine.emit(None, "Clé Claude refusée par Anthropic : vérifiez-la dans les réglages de Claude.", "")
+            return
+        except anthropic.PermissionDeniedError:
+            self.termine.emit(None, "Cette clé Claude n'a pas accès à ce modèle.", "")
+            return
+        except anthropic.RateLimitError:
+            self.termine.emit(None, "Trop de demandes à Claude en peu de temps : réessayez dans une minute.", "")
+            return
+        except anthropic.BadRequestError as e:
+            # Cas le plus fréquent : crédit épuisé sur le compte Anthropic.
+            self.termine.emit(None, f"Demande refusée par Anthropic : {e.message}", "")
+            return
+        except anthropic.APIStatusError as e:
+            self.termine.emit(None, f"Erreur du service Claude ({e.status_code}) : réessayez plus tard.", "")
+            return
+        except anthropic.APIConnectionError:
+            self.termine.emit(None, "Claude injoignable : vérifiez la connexion Internet.", "")
+            return
+        except Exception as e:
+            self.termine.emit(None, f"Erreur inattendue avec Claude : {e}", "")
+            return
+        if message.stop_reason == "refusal":
+            self.termine.emit(None, "Claude a refusé de traiter ce texte.", "")
+            return
+        if message.stop_reason == "max_tokens":
+            self.termine.emit(None, "Texte trop long pour une seule demande à Claude.", "")
+            return
+        try:
+            fragments = json.loads(_texte_apres_repli(message))["fragments"]
+        except Exception:
+            self.termine.emit(None, "Réponse de Claude illisible : réessayez.", "")
+            return
+        if len(fragments) != len(self.fragments) or not all(isinstance(f, str) for f in fragments):
+            self.termine.emit(None, "Réponse de Claude incomplète : réessayez.", "")
+            return
+        # Coût indicatif, au tarif du modèle demandé (celui de repli peut différer).
+        prix = next(((m[2], m[3]) for m in MODELES_CLAUDE if m[0] == self.modele), (0.0, 0.0))
+        usage = message.usage
+        cout = (usage.input_tokens * prix[0] + usage.output_tokens * prix[1]) / 1_000_000
+        servi = getattr(message, "model", self.modele) or self.modele
+        self.cout_dollars = cout  # jetons réellement facturés, relevés par lancer_appel_claude
+        bilan = f"{nom_modele_claude(servi)} — cette opération : {texte_centimes(cout)}"
+        try:
+            print(f"[CLAUDE] {servi} : {usage.input_tokens} jetons envoyés, {usage.output_tokens} reçus "
+                  f"(environ {cout:.4f} $)")
+        except Exception:
+            pass  # console sans encodage adapté : le journal n'est pas essentiel
+        fragments = [_restaurer_balises_claude(f, c[1]) for f, c in zip(fragments, compactes)]
+        self.termine.emit(fragments, "", bilan)
+
+
+_appels_claude = set()  # références gardées jusqu'à la fin du thread
+
+
+def texte_euros(dollars):
+    """Montant en dollars affiché en euros : "1,24 €"."""
+    return f"{dollars * TAUX_DOLLAR_EURO:.2f} €".replace(".", ",")
+
+
+def resume_consommation_claude():
+    """"consommé : 1,24 € · restant : 3,26 €" (restant seulement si le
+    crédit acheté a été indiqué dans les réglages). Ne compte que ce que
+    Courrier Adrien a lui-même dépensé sur cet ordinateur."""
+    config = charger_config_claude()
+    consomme = float(config.get("consomme_dollars") or 0.0)
+    texte = f"consommé : {texte_euros(consomme)}"
+    credit = config.get("credit_achete_dollars")
+    if credit:
+        texte += f" · restant : {texte_euros(max(0.0, float(credit) - consomme))}"
+    return texte
+
+
+def enregistrer_consommation_claude(cout_dollars):
+    """Ajoute le coût réel d'une opération au total et au mois en cours."""
+    config = charger_config_claude()
+    config["consomme_dollars"] = round(float(config.get("consomme_dollars") or 0.0) + cout_dollars, 6)
+    mois = datetime.datetime.now().strftime("%Y-%m")
+    par_mois = config.setdefault("consommation_mois", {})
+    courant = par_mois.setdefault(mois, {"dollars": 0.0, "operations": 0})
+    courant["dollars"] = round(courant["dollars"] + cout_dollars, 6)
+    courant["operations"] += 1
+    try:
+        sauvegarder_config_claude(config)
+    except Exception as e:
+        print(f"[CLAUDE] consommation non enregistrée : {e}")
+
+
+def lancer_appel_claude(consigne, fragments, progression, rappel):
+    """Démarre un AppelClaude ; rappel(fragments | None, erreur, bilan).
+    Erreur immédiate si aucune clé n'est enregistrée."""
+    cle = cle_claude()
+    if not cle:
+        rappel(None, "Aucune clé Claude enregistrée.", "")
+        return None
+    appel = AppelClaude(consigne, fragments, cle, modele_claude())
+
+    def fin(resultat, erreur, bilan):
+        # Coût réel ajouté au compteur, puis bilan complet : opération,
+        # total consommé et crédit restant, en euros.
+        if resultat is not None and not erreur:
+            enregistrer_consommation_claude(getattr(appel, "cout_dollars", 0.0))
+            bilan = f"{bilan} · {resume_consommation_claude()}"
+        rappel(resultat, erreur, bilan)
+
+    appel.progression.connect(progression)
+    appel.termine.connect(fin)
+    _appels_claude.add(appel)
+    appel.finished.connect(lambda a=appel: _appels_claude.discard(a))
+    appel.start()
+    return appel
+
+
+class DialogueReglagesClaude(QDialog):
+    """Clé d'API, modèle et avertissements (données envoyées, coût)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QGridLayout
+        self.setWindowTitle("Claude (en ligne) — réglages")
+        self.setMinimumWidth(600)
+        self.setStyleSheet("""
+            QDialog { background-color: #2a2a2a; }
+            QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
+            QComboBox, QLineEdit { background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; padding: 4px; }
+            QComboBox QAbstractItemView { background-color: #1e1e1e; color: white;
+                                          selection-background-color: #A52A2A; }
+            QLabel#info { color: #cccccc; }
+            QLabel#numero { color: #DAA520; font-size: 16px; font-weight: bold; }
+            QFrame#guide { border: 1px solid #444; }
+        """ + STYLE_BOUTON)
+        from PySide6.QtWidgets import QFrame
+        from PySide6.QtGui import QDesktopServices
+        config = charger_config_claude()
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        info = QLabel(
+            "Claude, l'intelligence artificielle d'Anthropic, peut <b>traduire</b> vers de nombreuses "
+            "langues et <b>corriger l'orthographe et la grammaire</b> de vos mails. "
+            "<b>C'est un service en ligne et payant</b>, avec votre propre compte Anthropic "
+            "(l'abonnement Claude Pro ne compte pas : c'est un crédit séparé).<br><br>"
+            "<b>Le texte concerné est envoyé à Anthropic</b> (États-Unis) pour être traité : le mail affiché "
+            "quand vous le traduisez, votre texte (sans la citation) quand vous rédigez. Rien n'est envoyé "
+            "sans que vous le demandiez.")
+        info.setObjectName("info")
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(info)
+
+        # Guide pas à pas : le site d'Anthropic est en anglais et son
+        # parcours peu évident ; chaque bouton ouvre directement la bonne page.
+        cadre_guide = QFrame()
+        cadre_guide.setObjectName("guide")
+        guide = QGridLayout(cadre_guide)
+        guide.setColumnStretch(1, 1)
+        titre = QLabel("<b>Obtenir une clé, en 4 étapes</b> (une seule fois)")
+        titre.setTextFormat(Qt.TextFormat.RichText)
+        guide.addWidget(titre, 0, 0, 1, 3)
+        etapes = [
+            ("Créez votre compte (adresse mail, puis lien de confirmation reçu par mail).",
+             "Créer mon compte", URL_CONSOLE_ANTHROPIC),
+            ("Achetez du crédit : bouton « <b>Buy credits</b> ». Le minimum, 5 $ (environ "
+             f"{5 * TAUX_DOLLAR_EURO:.2f} €".replace(".", ",") + "), suffit pour environ "
+             f"{mots_pour_5_dollars()} mots traduits ou corrigés avec Opus.", "Acheter du crédit", URL_CREDIT_ANTHROPIC),
+            ("Facultatif : fixez un plafond de dépense mensuel (« <b>Limits</b> »).",
+             "Fixer un plafond", URL_PLAFOND_ANTHROPIC),
+            ("Créez la clé : bouton « <b>Create key</b> », nommez-la « Courrier Adrien », puis "
+             "« <b>Copy</b> ». Revenez ici : la clé copiée est collée toute seule.",
+             "Créer ma clé", URL_CLES_ANTHROPIC),
+        ]
+        for rang, (texte, libelle, adresse) in enumerate(etapes, 1):
+            numero = QLabel(str(rang))
+            numero.setObjectName("numero")
+            guide.addWidget(numero, rang, 0, Qt.AlignmentFlag.AlignTop)
+            explication = QLabel(texte)
+            explication.setObjectName("info")
+            explication.setWordWrap(True)
+            explication.setTextFormat(Qt.TextFormat.RichText)
+            guide.addWidget(explication, rang, 1)
+            bouton = QPushButton(f"  {libelle}  ")
+            bouton.clicked.connect(lambda _=False, u=adresse: QDesktopServices.openUrl(QUrl(u)))
+            guide.addWidget(bouton, rang, 2)
+        layout.addWidget(cadre_guide)
+
+        grille = QGridLayout()
+        grille.addWidget(QLabel("Clé d'API :"), 0, 0)
+        self.champ_cle = QLineEdit()
+        self.champ_cle.setEchoMode(QLineEdit.EchoMode.Password)
+        self.champ_cle.setPlaceholderText(
+            "clé enregistrée (laisser vide pour la garder)" if config.get("cle") else "sk-ant-…")
+        grille.addWidget(self.champ_cle, 0, 1)
+        grille.addWidget(QLabel("Modèle :"), 1, 0)
+        self.combo_modele = QComboBox()
+        for identifiant, libelle, _pe, _ps in MODELES_CLAUDE:
+            self.combo_modele.addItem(f"{libelle} ({tarif_claude_400_mots(identifiant)})", identifiant)
+        index = self.combo_modele.findData(modele_claude())
+        self.combo_modele.setCurrentIndex(max(index, 0))
+        grille.addWidget(self.combo_modele, 1, 1)
+        grille.addWidget(QLabel("Crédit acheté :"), 2, 0)
+        ligne_credit = QHBoxLayout()
+        self.champ_credit = QLineEdit()
+        self.champ_credit.setPlaceholderText("total acheté sur la plateforme, en dollars (ex. 5)")
+        if config.get("credit_achete_dollars"):
+            self.champ_credit.setText(f"{float(config['credit_achete_dollars']):g}".replace(".", ","))
+        ligne_credit.addWidget(self.champ_credit, 1)
+        ligne_credit.addWidget(QLabel("$"))
+        btn_zero = QPushButton("  Remettre le compteur à zéro  ")
+        btn_zero.setToolTip("Après un nouvel achat de crédit : remettez le compteur à zéro et "
+                            "indiquez le nouveau total acheté")
+        btn_zero.clicked.connect(self._remettre_a_zero)
+        ligne_credit.addWidget(btn_zero)
+        grille.addLayout(ligne_credit, 2, 1)
+        self.lbl_consommation = QLabel("")
+        self.lbl_consommation.setObjectName("info")
+        self.lbl_consommation.setWordWrap(True)
+        grille.addWidget(self.lbl_consommation, 3, 1)
+        self._afficher_consommation()
+        grille.setColumnStretch(1, 1)
+        layout.addLayout(grille)
+
+        self.lbl_etat = QLabel("")
+        self.lbl_etat.setWordWrap(True)
+        layout.addWidget(self.lbl_etat)
+
+        boutons = QHBoxLayout()
+        btn_tester = QPushButton("  Tester la clé  ")
+        btn_tester.clicked.connect(self._tester)
+        boutons.addWidget(btn_tester)
+        self.btn_supprimer = QPushButton("  Supprimer la clé  ")
+        self.btn_supprimer.setEnabled(bool(config.get("cle")))
+        self.btn_supprimer.clicked.connect(self._supprimer)
+        boutons.addWidget(self.btn_supprimer)
+        boutons.addStretch(1)
+        btn_ok = QPushButton("  Enregistrer  ")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._enregistrer)
+        btn_annuler = QPushButton("  Annuler  ")
+        btn_annuler.clicked.connect(self.reject)
+        boutons.addWidget(btn_ok)
+        boutons.addWidget(btn_annuler)
+        layout.addLayout(boutons)
+
+    def _cle_saisie_ou_enregistree(self):
+        return self.champ_cle.text().strip() or cle_claude()
+
+    def _afficher_consommation(self):
+        config = charger_config_claude()
+        mois = (config.get("consommation_mois") or {}).get(datetime.datetime.now().strftime("%Y-%m"), {})
+        texte = (f"Dépensé par Courrier Adrien (sur cet ordinateur) — {resume_consommation_claude()} "
+                 f"— ce mois-ci : {texte_euros(float(mois.get('dollars', 0.0)))}, "
+                 f"{mois.get('operations', 0)} opération{'s' if mois.get('operations', 0) > 1 else ''}.")
+        if not config.get("credit_achete_dollars"):
+            texte += " Indiquez le crédit acheté pour voir ce qu'il reste."
+        texte += " Solde exact : page Billing de la plateforme."
+        self.lbl_consommation.setText(texte)
+
+    def _remettre_a_zero(self):
+        from PySide6.QtWidgets import QMessageBox
+        if QMessageBox.question(self, "Compteur de Claude",
+                                "Remettre à zéro le montant consommé ?\n(Le détail par mois est conservé.)",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        config = charger_config_claude()
+        config["consomme_dollars"] = 0.0
+        sauvegarder_config_claude(config)
+        self._afficher_consommation()
+
+    def _coller_cle_copiee(self):
+        """Clé "sk-ant-…" copiée sur le site : collée d'elle-même au retour
+        dans la fenêtre (le champ doit être vide, rien n'est remplacé)."""
+        from PySide6.QtWidgets import QApplication
+        if self.champ_cle.text().strip():
+            return
+        copie = (QApplication.clipboard().text() or "").strip()
+        if re.fullmatch(r"sk-ant-[A-Za-z0-9_\-]{20,}", copie):
+            self.champ_cle.setText(copie)
+            self._etat("Clé copiée détectée et collée : cliquez sur « Tester la clé », puis « Enregistrer ».",
+                       "#80c080")
+
+    def showEvent(self, evenement):
+        super().showEvent(evenement)
+        self._coller_cle_copiee()
+
+    def changeEvent(self, evenement):
+        super().changeEvent(evenement)
+        if evenement.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._coller_cle_copiee()
+
+    def _etat(self, texte, couleur):
+        self.lbl_etat.setStyleSheet(f"color: {couleur};")
+        self.lbl_etat.setText(texte)
+
+    def _tester(self):
+        """Interroge la fiche du modèle choisi (gratuit, rien n'est facturé)."""
+        from PySide6.QtWidgets import QApplication
+        cle = self._cle_saisie_ou_enregistree()
+        if not cle:
+            self._etat("Collez d'abord une clé.", "#e08080")
+            return
+        try:
+            import anthropic
+        except ImportError:
+            self._etat("La bibliothèque « anthropic » n'est pas installée.", "#e08080")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            anthropic.Anthropic(api_key=cle, max_retries=1, timeout=20.0).models.retrieve(
+                self.combo_modele.currentData())
+            self._etat("Clé valide : Claude est prêt.", "#80c080")
+        except anthropic.AuthenticationError:
+            self._etat("Clé refusée par Anthropic.", "#e08080")
+        except anthropic.NotFoundError:
+            self._etat("Clé valide, mais ce modèle n'est pas accessible avec ce compte.", "#e08080")
+        except anthropic.APIConnectionError:
+            self._etat("Anthropic injoignable : vérifiez la connexion Internet.", "#e08080")
+        except Exception as e:
+            self._etat(f"Test impossible : {e}", "#e08080")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _supprimer(self):
+        config = charger_config_claude()
+        config.pop("cle", None)
+        sauvegarder_config_claude(config)
+        self.champ_cle.clear()
+        self.champ_cle.setPlaceholderText("sk-ant-…")
+        self.btn_supprimer.setEnabled(False)
+        self._etat("Clé supprimée : Claude n'est plus utilisé.", "#80c080")
+
+    def _enregistrer(self):
+        config = charger_config_claude()
+        nouvelle = self.champ_cle.text().strip()
+        if nouvelle:
+            try:
+                config["cle"] = _chiffrer_pour_windows(nouvelle)
+            except Exception as e:
+                self._etat(f"Impossible de protéger la clé : {e}", "#e08080")
+                return
+        if not config.get("cle"):
+            self._etat("Collez une clé pour utiliser Claude.", "#e08080")
+            return
+        config["modele"] = self.combo_modele.currentData()
+        saisie = self.champ_credit.text().replace("$", "").replace(",", ".").replace(" ", "").strip()
+        if saisie:
+            try:
+                config["credit_achete_dollars"] = float(saisie)
+            except ValueError:
+                self._etat("Crédit acheté : indiquez un nombre (ex. 5 ou 20).", "#e08080")
+                return
+        else:
+            config.pop("credit_achete_dollars", None)
+        sauvegarder_config_claude(config)
+        self.accept()
+
+
+def preparer_claude(parent):
+    """Avant tout usage : True si une clé est enregistrée, sinon ouvre les
+    réglages (où l'avertissement données/coût est affiché)."""
+    if claude_configure():
+        return True
+    return DialogueReglagesClaude(parent).exec() == QDialog.DialogCode.Accepted and claude_configure()
+
+
+def demander_langue_claude(parent, langue_proposee="anglais"):
+    from PySide6.QtWidgets import QInputDialog
+    index = LANGUES_CLAUDE.index(langue_proposee) if langue_proposee in LANGUES_CLAUDE else 0
+    langue, ok = QInputDialog.getItem(parent, "Traduire avec Claude", "Langue d'arrivée :",
+                                      LANGUES_CLAUDE, index, False)
+    return langue if ok else None
+
+
+def _differences_html(avant, apres):
+    """Différences mot à mot, en HTML : supprimé barré en rouge, ajouté en vert."""
+    import difflib
+    jetons_avant = re.findall(r"\s+|\w+|[^\w\s]", avant)
+    jetons_apres = re.findall(r"\s+|\w+|[^\w\s]", apres)
+    morceaux = []
+    for op, a1, a2, b1, b2 in difflib.SequenceMatcher(None, jetons_avant, jetons_apres, autojunk=False).get_opcodes():
+        if op == "equal":
+            morceaux.append(html.escape("".join(jetons_avant[a1:a2])))
+            continue
+        if a2 > a1:
+            morceaux.append('<span style="color:#ff8080;text-decoration:line-through;">'
+                            + html.escape("".join(jetons_avant[a1:a2])) + "</span>")
+        if a2 > a1 and b2 > b1:
+            morceaux.append("&nbsp;")  # sinon "documentdocuments" : illisible
+        if b2 > b1:
+            morceaux.append('<span style="color:#80e080;font-weight:bold;">'
+                            + html.escape("".join(jetons_apres[b1:b2])) + "</span>")
+    return "".join(morceaux)
+
+
+class DialogueCorrectionClaude(QDialog):
+    """Relecture des corrections proposées par Claude : un passage par ligne,
+    supprimé barré en rouge, ajouté en vert, case à cocher pour l'accepter."""
+
+    def __init__(self, avants, apres, bilan, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QCheckBox, QScrollArea
+        self.setWindowTitle("Corrections proposées par Claude")
+        self.resize(760, 520)
+        self.setStyleSheet("""
+            QDialog { background-color: #2a2a2a; }
+            QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
+            QLabel#passage { background-color: #1e1e1e; border: 1px solid #444; padding: 6px; }
+        """ + STYLE_BOUTON)
+        self._apres = apres
+        self._cases = {}
+        layout = QVBoxLayout(self)
+        changes = [i for i in range(len(avants))
+                   if texte_depuis_html([avants[i]]).strip() != texte_depuis_html([apres[i]]).strip()]
+        entete = QLabel(f"{len(changes)} passage{'s' if len(changes) > 1 else ''} corrigé"
+                        f"{'s' if len(changes) > 1 else ''} — décochez ce que vous ne voulez pas garder."
+                        f"<br><span style='color:#999'>{html.escape(bilan)}</span>")
+        entete.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(entete)
+        zone = QScrollArea()
+        zone.setWidgetResizable(True)
+        contenu = QWidget()
+        lignes = QVBoxLayout(contenu)
+        for i in changes:
+            ligne = QHBoxLayout()
+            case = QCheckBox()
+            case.setChecked(True)
+            self._cases[i] = case
+            ligne.addWidget(case, 0, Qt.AlignmentFlag.AlignTop)
+            texte = QLabel(_differences_html(texte_depuis_html([avants[i]]).strip(),
+                                             texte_depuis_html([apres[i]]).strip()))
+            texte.setObjectName("passage")
+            texte.setTextFormat(Qt.TextFormat.RichText)
+            texte.setWordWrap(True)
+            ligne.addWidget(texte, 1)
+            lignes.addLayout(ligne)
+        lignes.addStretch(1)
+        zone.setWidget(contenu)
+        layout.addWidget(zone, 1)
+        boutons = QHBoxLayout()
+        boutons.addStretch(1)
+        btn_ok = QPushButton("  Appliquer les corrections cochées  ")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self.accept)
+        btn_annuler = QPushButton("  Annuler  ")
+        btn_annuler.clicked.connect(self.reject)
+        boutons.addWidget(btn_ok)
+        boutons.addWidget(btn_annuler)
+        layout.addLayout(boutons)
+
+    def passages_retenus(self, avants):
+        """Passage corrigé si coché, d'origine sinon (et pour tout passage
+        dont seul le HTML différait : par prudence, on ne touche pas)."""
+        return [self._apres[i] if i in self._cases and self._cases[i].isChecked() else avants[i]
+                for i in range(len(avants))]
+
+    def nombre_changements(self):
+        return len(self._cases)
+
+
+class DialogueLangue(QDialog):
+    """Fenêtre du bouton Langue de la rédaction : que faire (corriger ou
+    traduire), avec quoi (cet ordinateur ou Claude), vers quelle langue.
+    Les derniers choix sont gardés (config_claude.json, "choix_langue")."""
+
+    def __init__(self, retour_possible=False, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup, QGridLayout
+        self.setWindowTitle("Langue : traduire ou corriger")
+        self.setMinimumWidth(560)
+        self.setStyleSheet("""
+            QDialog { background-color: #2a2a2a; }
+            QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
+            QComboBox { background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; padding: 4px; }
+            QComboBox QAbstractItemView { background-color: #1e1e1e; color: white;
+                                          selection-background-color: #A52A2A; }
+            QRadioButton:disabled { color: #777777; }
+            QLabel#info { color: #cccccc; }
+            QLabel#titre { color: #DAA520; font-weight: bold; }
+        """ + STYLE_BOUTON + """
+            QPushButton:disabled { background-color: #4a3030; color: #8a8a8a;
+                                   border-bottom: 3px solid #3a2020; border-right: 2px solid #3a2020; }
+        """)
+        self.choix = None
+        precedent = charger_config_claude().get("choix_langue") or {}
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        titre = QLabel("Que faire ?")
+        titre.setObjectName("titre")
+        layout.addWidget(titre)
+        self.radio_traduire = QRadioButton("Traduire le texte")
+        self.radio_corriger = QRadioButton("Corriger l'orthographe et la grammaire")
+        self._groupe_action = QButtonGroup(self)
+        for r in (self.radio_traduire, self.radio_corriger):
+            self._groupe_action.addButton(r)
+            layout.addWidget(r)
+        (self.radio_corriger if precedent.get("action") == "corriger" else self.radio_traduire).setChecked(True)
+
+        titre = QLabel("Avec quoi ?")
+        titre.setObjectName("titre")
+        layout.addWidget(titre)
+        self.radio_local = QRadioButton("Cet ordinateur — gratuit, rien ne sort de l'ordinateur, "
+                                        "français ↔ anglais seulement")
+        self.radio_claude = QRadioButton(libelle_moteur_claude())
+        self._groupe_moteur = QButtonGroup(self)
+        for r in (self.radio_local, self.radio_claude):
+            self._groupe_moteur.addButton(r)
+            layout.addWidget(r)
+        (self.radio_claude if precedent.get("moteur") == "claude" else self.radio_local).setChecked(True)
+
+        ligne_langue = QHBoxLayout()
+        self.lbl_langue = QLabel("Traduire vers :")
+        ligne_langue.addWidget(self.lbl_langue)
+        self.combo_langue = QComboBox()
+        ligne_langue.addWidget(self.combo_langue, 1)
+        layout.addLayout(ligne_langue)
+        self._langue_voulue = precedent.get("langue") or "anglais"
+
+        self.lbl_info = QLabel("")
+        self.lbl_info.setObjectName("info")
+        self.lbl_info.setWordWrap(True)
+        layout.addWidget(self.lbl_info)
+
+        boutons = QHBoxLayout()
+        btn_reglages = QPushButton("  Réglages-prix de Claude…  ")
+        btn_reglages.clicked.connect(self._reglages)
+        boutons.addWidget(btn_reglages)
+        self.btn_revenir = QPushButton("  Revenir au texte d'avant  ")
+        self.btn_revenir.setToolTip("Annule la dernière traduction ou correction "
+                                    "(et les modifications faites depuis)")
+        self.btn_revenir.setEnabled(retour_possible)
+        self.btn_revenir.clicked.connect(self._revenir)
+        boutons.addWidget(self.btn_revenir)
+        boutons.addStretch(1)
+        self.btn_lancer = QPushButton("  Lancer  ")
+        self.btn_lancer.setDefault(True)
+        self.btn_lancer.clicked.connect(self._lancer)
+        btn_annuler = QPushButton("  Annuler  ")
+        btn_annuler.clicked.connect(self.reject)
+        boutons.addWidget(self.btn_lancer)
+        boutons.addWidget(btn_annuler)
+        layout.addLayout(boutons)
+
+        for r in (self.radio_traduire, self.radio_corriger, self.radio_local, self.radio_claude):
+            r.toggled.connect(self._mettre_a_jour)
+        self.combo_langue.currentTextChanged.connect(self._sur_langue)
+        self._mettre_a_jour()
+
+    def _sur_langue(self, texte):
+        if texte:
+            self._langue_voulue = texte
+
+    def _mettre_a_jour(self):
+        corriger = self.radio_corriger.isChecked()
+        # La correction "sur cet ordinateur" se fait déjà pendant la frappe
+        # (mots soulignés) : la correction complète passe par Claude.
+        self.radio_local.setEnabled(not corriger)
+        if corriger and self.radio_local.isChecked():
+            self.radio_claude.setChecked(True)
+            return  # _mettre_a_jour est rappelé par le changement de bouton
+        claude = self.radio_claude.isChecked()
+        langues = LANGUES_CLAUDE if claude else ["anglais", "français"]
+        voulue = self._langue_voulue
+        self.combo_langue.blockSignals(True)
+        self.combo_langue.clear()
+        self.combo_langue.addItems(langues)
+        self.combo_langue.setCurrentIndex(langues.index(voulue) if voulue in langues else 0)
+        self.combo_langue.blockSignals(False)
+        self.lbl_langue.setVisible(not corriger)
+        self.combo_langue.setVisible(not corriger)
+        if corriger:
+            info = ("Claude corrige votre texte (pas la citation du mail d'origine) ; vous relisez chaque "
+                    "correction avant de l'appliquer. Les mots inconnus sont déjà soulignés pendant la frappe, "
+                    "gratuitement.")
+        elif claude:
+            info = "Claude traduit votre texte (pas la citation du mail d'origine) vers la langue choisie."
+        else:
+            info = "Traduction sur cet ordinateur : gratuite et privée, entre le français et l'anglais."
+        if claude:
+            info += f" Coût : {tarif_claude_400_mots()}."
+            if not claude_configure():
+                info += " Il faudra d'abord saisir votre clé Claude (bouton « Réglages-prix de Claude… », guidé)."
+        self.lbl_info.setText(info)
+        self.adjustSize()
+
+    def _reglages(self):
+        DialogueReglagesClaude(self).exec()
+        self.radio_claude.setText(libelle_moteur_claude())
+        self._mettre_a_jour()
+
+    def _memoriser(self):
+        config = charger_config_claude()
+        config["choix_langue"] = {k: v for k, v in self.choix.items() if k in ("action", "moteur", "langue")}
+        try:
+            sauvegarder_config_claude(config)
+        except Exception:
+            pass
+
+    def _lancer(self):
+        self.choix = {
+            "action": "corriger" if self.radio_corriger.isChecked() else "traduire",
+            "moteur": "claude" if self.radio_claude.isChecked() else "local",
+            "langue": self.combo_langue.currentText() or self._langue_voulue,
+        }
+        self._memoriser()
+        self.accept()
+
+    def _revenir(self):
+        self.choix = {"action": "revenir"}
+        self.accept()
+
+
+class DialogueTraductionLecture(QDialog):
+    """Bouton TRADUIRE du panneau de lecture : fenêtre de choix (cet
+    ordinateur ou Claude, langue d'arrivée) avec le coût estimé pour CE mail
+    bien visible — un simple menu sous la souris passait inaperçu, et une
+    traduction payante ne doit jamais partir sans que son prix ait été vu.
+    Le dernier moteur choisi est gardé (config_claude.json, "choix_lecture")."""
+
+    def __init__(self, passages, de, vers, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+        self.setWindowTitle("Traduire ce mail")
+        self.setMinimumWidth(560)
+        self.setStyleSheet("""
+            QDialog { background-color: #2a2a2a; }
+            QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
+            QComboBox { background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; padding: 4px; }
+            QComboBox QAbstractItemView { background-color: #1e1e1e; color: white;
+                                          selection-background-color: #A52A2A; }
+            QComboBox:disabled { color: #8a8a8a; }
+            QLabel#info { color: #cccccc; }
+            QLabel#titre { color: #DAA520; font-weight: bold; }
+            QLabel#cout { color: #DAA520; font-weight: bold; }
+        """ + STYLE_BOUTON)
+        self._passages = passages
+        self._cible_locale = LANGUES_TRADUCTION[vers][0]
+        self.choix = None
+        precedent = charger_config_claude().get("choix_lecture") or {}
+        mots = len(re.findall(r"\w+", texte_depuis_html(passages)))
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        entete = QLabel(f"Mail détecté en {LANGUES_TRADUCTION[de][0]} — environ {mots:,} mots.".replace(",", " "))
+        entete.setObjectName("info")
+        layout.addWidget(entete)
+
+        titre = QLabel("Avec quoi ?")
+        titre.setObjectName("titre")
+        layout.addWidget(titre)
+        self.radio_local = QRadioButton(f"Cet ordinateur — gratuit, rien ne sort de l'ordinateur "
+                                        f"({LANGUES_TRADUCTION[de][0]} → {self._cible_locale})")
+        self.radio_claude = QRadioButton(libelle_moteur_claude())
+        groupe = QButtonGroup(self)
+        for r in (self.radio_local, self.radio_claude):
+            groupe.addButton(r)
+            layout.addWidget(r)
+        (self.radio_claude if precedent.get("moteur") == "claude" else self.radio_local).setChecked(True)
+
+        ligne = QHBoxLayout()
+        ligne.addWidget(QLabel("Traduire vers :"))
+        self.combo_langue = QComboBox()
+        self.combo_langue.addItems(LANGUES_CLAUDE)
+        self.combo_langue.setCurrentText(self._cible_locale)
+        ligne.addWidget(self.combo_langue, 1)
+        layout.addLayout(ligne)
+
+        self.lbl_cout = QLabel("")
+        self.lbl_cout.setObjectName("cout")
+        self.lbl_cout.setWordWrap(True)
+        layout.addWidget(self.lbl_cout)
+
+        boutons = QHBoxLayout()
+        btn_reglages = QPushButton("  Réglages-prix de Claude…  ")
+        btn_reglages.clicked.connect(self._reglages)
+        boutons.addWidget(btn_reglages)
+        boutons.addStretch(1)
+        btn_ok = QPushButton("  Traduire  ")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._valider)
+        btn_annuler = QPushButton("  Annuler  ")
+        btn_annuler.clicked.connect(self.reject)
+        boutons.addWidget(btn_ok)
+        boutons.addWidget(btn_annuler)
+        layout.addLayout(boutons)
+
+        self.radio_local.toggled.connect(self._mettre_a_jour)
+        self._mettre_a_jour()
+
+    def _mettre_a_jour(self):
+        claude = self.radio_claude.isChecked()
+        self.combo_langue.setEnabled(claude)
+        if not claude:
+            self.combo_langue.setCurrentText(self._cible_locale)
+            self.lbl_cout.setText("Gratuit.")
+        else:
+            texte = (f"Coût estimé pour ce mail : {texte_centimes(estimer_cout_claude(self._passages))} "
+                     f"({tarif_claude_400_mots()}, mise en forme comprise). Le texte du mail est envoyé "
+                     f"à Anthropic (États-Unis).")
+            if not claude_configure():
+                texte += " Il faudra d'abord saisir votre clé (bouton « Réglages-prix de Claude… », guidé)."
+            self.lbl_cout.setText(texte)
+        self.adjustSize()
+
+    def _reglages(self):
+        DialogueReglagesClaude(self).exec()
+        self.radio_claude.setText(libelle_moteur_claude())
+        self._mettre_a_jour()
+
+    def _valider(self):
+        moteur = "claude" if self.radio_claude.isChecked() else "local"
+        self.choix = {"moteur": moteur, "langue": self.combo_langue.currentText()}
+        config = charger_config_claude()
+        config["choix_lecture"] = {"moteur": moteur}
+        try:
+            sauvegarder_config_claude(config)
+        except Exception:
+            pass
+        self.accept()
 
 
 class FenetreRedaction(QDialog):
@@ -18827,12 +19965,20 @@ class FenetreRedaction(QDialog):
         btn_emoji.clicked.connect(self._ouvrir_boite_emoticones)
         barre_forme.addWidget(btn_emoji)
 
-        btn_traduire = QPushButton(" Traduire ")
-        btn_traduire.setStyleSheet(STYLE_BOUTON)
-        btn_traduire.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        btn_traduire.setToolTip("Traduire le texte rédigé (français ↔ anglais), sur cet ordinateur")
-        btn_traduire.clicked.connect(lambda: self._menu_traduction(btn_traduire))
-        barre_forme.addWidget(btn_traduire)
+        # Bouton unique "Langue" (12/10/2026) : traduire ou corriger, sur cet
+        # ordinateur ou avec Claude — les choix se font dans DialogueLangue.
+        # Largeur figée sur celle du libellé : pendant le travail, le bouton
+        # n'affiche que le pourcentage, qui tient dans cette largeur, et la
+        # barre ne déborde pas (la colonne des pièces jointes réduit la place).
+        self.btn_langue = QPushButton(" Langue ")
+        self.btn_langue.setStyleSheet(STYLE_BOUTON)
+        self.btn_langue.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.btn_langue.setToolTip("Traduire ou corriger le texte rédigé — sur cet ordinateur "
+                                   "(gratuit) ou avec Claude (en ligne, payant)")
+        self.btn_langue.clicked.connect(self._ouvrir_choix_langue)
+        self.btn_langue.ensurePolished()
+        self.btn_langue.setFixedWidth(self.btn_langue.sizeHint().width())
+        barre_forme.addWidget(self.btn_langue)
 
         barre_forme.addStretch(1)
         layout.addLayout(barre_forme)
@@ -18856,7 +20002,11 @@ class FenetreRedaction(QDialog):
 
         # Zone de rédaction — éditeur HTML riche (QWebEngineView contenteditable)
         self.webview = QWebEngineView()
-        self.webview.setStyleSheet("background-color: white;")
+        # Sélecteur QWebEngineView explicite (11/10/2026) : sans lui, le fond
+        # blanc s'appliquait aussi au menu du clic droit, dont le texte est
+        # blanc (STYLE_GLOBAL) -> menu illisible, blanc sur blanc.
+        self.webview.setStyleSheet("QWebEngineView { background-color: white; }")
+        franciser_menu_web(self.webview.page())
         # StrongFocus : sans ça, Qt ignore silencieusement setFocus() sur ce
         # widget, et continue de considérer champ_sujet comme le widget actif
         # même une fois le focus redirigé vers l'éditeur — d'où le double
@@ -19195,60 +20345,146 @@ class FenetreRedaction(QDialog):
         self.lbl_statut_envoi.setText(texte)
         self.lbl_statut_envoi.setToolTip(texte)
 
-    def _menu_traduction(self, bouton):
-        """Bouton Traduire : sens choisi par l'utilisateur (français →
-        anglais ou l'inverse), ou retour au texte d'origine."""
-        from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        act_fr_en = menu.addAction("Français → anglais")
-        act_en_fr = menu.addAction("Anglais → français")
-        menu.addSeparator()
-        act_origine = menu.addAction("Revenir au texte d'origine (annule aussi les modifications faites depuis)")
-        act_origine.setEnabled(getattr(self, "_traduction_faite", False))
-        choix = menu.exec(bouton.mapToGlobal(bouton.rect().bottomLeft()))
-        if choix is act_origine:
-            self.webview.page().runJavaScript("trRevenirRedaction();")
-            self._traduction_faite = False
-            self._statut_traduction("Texte d'origine rétabli.", "#80c080")
-        elif choix in (act_fr_en, act_en_fr):
-            self._lancer_traduction_redaction(*(("fr", "en") if choix is act_fr_en else ("en", "fr")))
-
-    def _lancer_traduction_redaction(self, de, vers):
+    def _ouvrir_choix_langue(self):
+        """Bouton Langue : fenêtre de choix (corriger ou traduire, sur cet
+        ordinateur ou avec Claude, langue d'arrivée, retour en arrière)."""
         if not self._chargement_termine:
             return
+        dialogue = DialogueLangue(getattr(self, "_traduction_faite", False), self)
+        if dialogue.exec() != QDialog.DialogCode.Accepted:
+            return
+        choix = dialogue.choix
+        if choix["action"] == "revenir":
+            self.webview.page().runJavaScript("trRevenirRedaction();")
+            self._traduction_faite = False
+            self._statut_traduction("Texte d'avant rétabli.", "#80c080")
+            return
+        if choix["moteur"] == "claude":
+            if not preparer_claude(self):
+                return
+            if choix["action"] == "corriger":
+                operation = {"type": "claude_corr"}
+            else:
+                operation = {"type": "claude_trad", "langue": choix["langue"]}
+        else:
+            de, vers = ("fr", "en") if choix["langue"] == "anglais" else ("en", "fr")
+            operation = {"type": "local", "de": de, "vers": vers}
+        operation.update(bouton=self.btn_langue, libelle=" Langue ")
+        self._lancer_operation_redaction(operation)
+
+    def _progression_bouton(self, bouton, libelle, pourcentage):
+        """Bouton rempli de gauche à droite du jaune des mails non lus
+        (#DAA520) sur fond blé (#F5DEB3) ; None : retour à la normale."""
+        if pourcentage is None:
+            bouton.setStyleSheet(STYLE_BOUTON)
+            bouton.setText(libelle)
+            return
+        p = max(0.0, min(1.0, pourcentage / 100))
+        arrets = (f"stop:0 #DAA520, stop:{p:.3f} #DAA520, "
+                  f"stop:{min(p + 0.001, 1):.3f} #F5DEB3, stop:1 #F5DEB3")
+        bouton.setStyleSheet(
+            STYLE_BOUTON + "QPushButton { background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+            + arrets + "); color: black; }")
+        bouton.setText(f" {int(pourcentage)} % ")
+
+    def _lancer_operation_redaction(self, operation):
+        """Traduction locale, traduction par Claude ou correction par
+        Claude : la page renvoie d'abord les passages du texte rédigé
+        (citation exclue), traités ensuite dans _sur_segments_traduction."""
+        if not self._chargement_termine:
+            return
+        precedente = getattr(self, "_operation_redaction", None)
+        if precedente and precedente is not operation:
+            self._progression_bouton(precedente["bouton"], precedente["libelle"], None)
         self._jeton_traduction = getattr(self, "_jeton_traduction", 0) + 1
-        self._sens_traduction = (de, vers)
-        self._statut_traduction("Traduction en cours…")
+        self._operation_redaction = operation
+        self._statut_traduction({"local": "Traduction en cours…",
+                                 "claude_trad": "Traduction par Claude en cours…",
+                                 "claude_corr": "Correction par Claude en cours…"}[operation["type"]])
+        self._progression_bouton(operation["bouton"], operation["libelle"], 0)
         self.webview.page().runJavaScript(f"trCollecterRedaction({self._jeton_traduction});")
 
     def _sur_segments_traduction(self, jeton, passages_json):
         """Passages du texte rédigé (citation exclue), renvoyés par la page."""
         if jeton != getattr(self, "_jeton_traduction", None):
             return
+        operation = self._operation_redaction
+        bouton, libelle = operation["bouton"], operation["libelle"]
         try:
             passages = json.loads(passages_json)
         except Exception:
             passages = []
         if not passages:
-            self._statut_traduction("Rien à traduire.", "#80c080")
+            self._progression_bouton(bouton, libelle, None)
+            self._statut_traduction("Rien à corriger." if operation["type"] == "claude_corr"
+                                    else "Rien à traduire.", "#80c080")
             return
-        de, vers = self._sens_traduction
 
-        def rappel(traductions, erreur):
+        def actuel():
+            return jeton == self._jeton_traduction
+
+        def progression(pourcentage):
             try:
-                if erreur:
-                    self._statut_traduction(erreur, "#e08080")
-                    return
-                if jeton != self._jeton_traduction:
-                    return  # nouvelle demande entre-temps
-                self.webview.page().runJavaScript(
-                    f"trAppliquerRedaction({int(jeton)}, {json.dumps(traductions)});")
-                self._traduction_faite = True
-                self._statut_traduction(f"Texte traduit {LANGUES_TRADUCTION[vers][2]}.", "#80c080")
+                if actuel():
+                    self._progression_bouton(bouton, libelle, pourcentage)
             except RuntimeError:
                 pass  # fenêtre fermée entre-temps
 
-        moteur_traduction().traduire(passages, de, vers, rappel)
+        def appliquer(fragments):
+            self.webview.page().runJavaScript(
+                f"trAppliquerRedaction({int(jeton)}, {json.dumps(fragments)});")
+            self._traduction_faite = True
+
+        def rappel_local(traductions, erreur):
+            try:
+                if not actuel():
+                    return  # nouvelle demande entre-temps
+                self._progression_bouton(bouton, libelle, None)
+                if erreur:
+                    self._statut_traduction(erreur, "#e08080")
+                    return
+                appliquer(traductions)
+                self._statut_traduction(
+                    f"Texte traduit {LANGUES_TRADUCTION[operation['vers']][2]}.", "#80c080")
+            except RuntimeError:
+                pass  # fenêtre fermée entre-temps
+
+        def rappel_claude(fragments, erreur, bilan):
+            try:
+                if not actuel():
+                    return
+                self._progression_bouton(bouton, libelle, None)
+                if erreur:
+                    self._statut_traduction(erreur, "#e08080")
+                    return
+                if operation["type"] == "claude_trad":
+                    appliquer(fragments)
+                    self._statut_traduction(f"Texte traduit en {operation['langue']} ({bilan}).", "#80c080")
+                    return
+                dialogue = DialogueCorrectionClaude(passages, fragments, bilan, self)
+                if dialogue.nombre_changements() == 0:
+                    self._statut_traduction(f"Aucune faute trouvée ({bilan}).", "#80c080")
+                    return
+                if dialogue.exec() != QDialog.DialogCode.Accepted:
+                    self._statut_traduction("Corrections non appliquées.", "#e0a050")
+                    return
+                retenus = dialogue.passages_retenus(passages)
+                nb = sum(1 for a, r in zip(passages, retenus) if a != r)
+                appliquer(retenus)
+                self._statut_traduction(
+                    f"{nb} correction{'s' if nb > 1 else ''} appliquée{'s' if nb > 1 else ''} ({bilan}).",
+                    "#80c080")
+            except RuntimeError:
+                pass  # fenêtre fermée entre-temps
+
+        if operation["type"] == "local":
+            moteur_traduction().traduire(passages, operation["de"], operation["vers"],
+                                         rappel_local, progression)
+        elif operation["type"] == "claude_trad":
+            lancer_appel_claude(CONSIGNE_TRADUCTION_CLAUDE.format(langue=operation["langue"]),
+                                passages, progression, rappel_claude)
+        else:
+            lancer_appel_claude(CONSIGNE_CORRECTION_CLAUDE, passages, progression, rappel_claude)
 
     def _ouvrir_carnet_pour(self, champ, libelle):
         """Carnet d'adresses en mode choix pour le champ À/Cc/Cci cliqué
@@ -20770,7 +22006,8 @@ class GestionnaireModeles(QDialog):
 
         # Éditeur (QWebEngineView — remplace l'ancien widget hôte CEF)
         self.webview = QWebEngineView()
-        self.webview.setStyleSheet("background-color: white;")
+        self.webview.setStyleSheet("QWebEngineView { background-color: white; }")
+        franciser_menu_web(self.webview.page())
         self.webview.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.webview.settings().setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
@@ -23456,6 +24693,7 @@ class ClientMail(QMainWindow):
             self._page_lecture = PageLecture(PROFIL_WEB_NOMME, self.webview)
         else:
             self._page_lecture = PageLecture(self.webview)
+        franciser_menu_web(self._page_lecture)
         # Contournement Service Worker franceinfo.fr (10/08/2026) : enquête
         # complète via débogage distant QtWebEngine (QTWEBENGINE_REMOTE_
         # DEBUGGING, retiré une fois le diagnostic terminé) — la page
@@ -24226,7 +25464,7 @@ if (typeof module === 'object') {
                 self.webview.setZoomFactor(1.0)
                 self._pdf_zoom_natif_en_cours = False
         self._page_lecture.zoomFactorChanged.connect(_sur_zoom_natif_change)
-        self.webview.setStyleSheet("background-color: white;")
+        self.webview.setStyleSheet("QWebEngineView { background-color: white; }")
         self.webview.setMouseTracking(True)
         self.webview.installEventFilter(self)
         # Autoriser la page locale (le mail temporaire, écrit en file://) à
@@ -27094,10 +28332,28 @@ if (typeof module === 'object') {
         if nouveau_idx < 0 or nouveau_idx >= parent.childCount():
             return  # déjà en haut/bas parmi ses frères, rien à faire
         expanded = item.isExpanded()
-        parent.takeChild(idx)
-        parent.insertChild(nouveau_idx, item)
-        item.setExpanded(expanded)
-        self.arbre_dossiers.setCurrentItem(item)
+        # Plantage natif du 12/10/2026 18:30 (access violation dans
+        # takeChild) : retirer l'élément COURANT de l'arbre faisait émettre
+        # currentItemChanged en plein milieu du déplacement -> on_dossier_change
+        # relançait chargeur + IDLE sur un dossier voisin pendant que l'item
+        # était détaché. On coupe les signaux le temps de l'opération (le
+        # dossier actif ne change pas) et on garde la référence renvoyée par
+        # takeChild pour que l'objet ne puisse pas être libéré entre-temps.
+        arbre = self.arbre_dossiers
+        modele_sel = arbre.selectionModel()
+        arbre.blockSignals(True)
+        if modele_sel is not None:
+            modele_sel.blockSignals(True)
+        try:
+            item = parent.takeChild(idx)
+            parent.insertChild(nouveau_idx, item)
+            item.setExpanded(expanded)
+            arbre.setCurrentItem(item)
+        finally:
+            if modele_sel is not None:
+                modele_sel.blockSignals(False)
+            arbre.blockSignals(False)
+        arbre.viewport().update()
 
         # Reconstruire l'ordre complet par parcours en profondeur de l'arbre
         # (INBOX en premier, invisible dans l'arbre mais toujours en tête de
@@ -36110,6 +37366,19 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         libelle = f"Traduit {LANGUES_TRADUCTION[de][1]} {LANGUES_TRADUCTION[vers][2]}"
         page = self.webview.page()
 
+        # Fenêtre de choix à chaque fois (cet ordinateur ou Claude), avec le
+        # coût estimé pour ce mail : rien ne part chez Anthropic sans ce choix.
+        dialogue = DialogueTraductionLecture(passages, de, vers, self)
+        if dialogue.exec() != QDialog.DialogCode.Accepted:
+            page.runJavaScript("window.trAnnulerMail && trAnnulerMail();")
+            return
+        langue_claude = None
+        if dialogue.choix["moteur"] == "claude":
+            if not preparer_claude(self):
+                page.runJavaScript("window.trAnnulerMail && trAnnulerMail();")
+                return
+            langue_claude = dialogue.choix["langue"]
+
         def rappel(traductions, erreur):
             try:
                 if self.webview.page() is not page:
@@ -36120,7 +37389,23 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             except RuntimeError:
                 pass  # fenêtre fermée entre-temps
 
-        moteur_traduction().traduire(passages, de, vers, rappel)
+        def progression(pourcentage):
+            try:
+                if self.webview.page() is page:
+                    page.runJavaScript(f"window.trProgressionMail && trProgressionMail({int(pourcentage)});")
+            except RuntimeError:
+                pass
+
+        if langue_claude:
+            def rappel_claude(fragments, erreur, bilan):
+                nonlocal libelle
+                libelle = f"Traduit en {langue_claude} par {bilan}"
+                rappel(fragments, erreur)
+
+            lancer_appel_claude(CONSIGNE_TRADUCTION_CLAUDE.format(langue=langue_claude),
+                                passages, progression, rappel_claude)
+            return
+        moteur_traduction().traduire(passages, de, vers, rappel, progression)
 
     def _afficher_dans_cef(self, html):
         import tempfile, re, time
@@ -38759,6 +40044,9 @@ if __name__ == "__main__":
     # --disable-gpu-compositing SEUL dans cette variable (jamais les deux
     # correctifs mélangés sans le retester).
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-features=CalculateNativeWinOcclusion"
+    # Dictionnaires de la vérification orthographique (voir activer_orthographe) :
+    # QtWebEngine ne lit cette variable qu'à son démarrage.
+    os.environ["QTWEBENGINE_DICTIONARIES_PATH"] = DOSSIER_DICTIONNAIRES
     import warnings
     warnings.filterwarnings("ignore")
 
@@ -39023,6 +40311,13 @@ if __name__ == "__main__":
         installer_protections_web(profil_web)
     except Exception as _err_protections:
         print(f"[PROTECTIONS WEB] Installation impossible : {_err_protections}")
+    # Orthographe : profil par défaut = fenêtres de rédaction ; profil nommé =
+    # champs de saisie des sites web ouverts dans le panneau.
+    try:
+        activer_orthographe(profil_web)
+        activer_orthographe(PROFIL_WEB_NOMME)
+    except Exception as _err_orthographe:
+        print(f"[ORTHOGRAPHE] Activation impossible : {_err_orthographe}")
     # Cookies du panneau de lecture pour yt-dlp (vidéos Facebook réservées aux amis)
     try:
         suivre_cookies_profil_web(PROFIL_WEB_NOMME)

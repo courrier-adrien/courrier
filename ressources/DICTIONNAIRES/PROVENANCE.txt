@@ -1,0 +1,21 @@
+Dictionnaires orthographiques de Courrier Adrien (vérification pendant la frappe,
+moteur Hunspell intégré à Chromium/QtWebEngine). Seule conversion effectuée :
+format Hunspell (.dic/.aff) -> format Chromium (.bdic), avec l'outil officiel
+qwebengine_convert_dict de Qt 6.11.2, sans modification des mots ni des règles.
+
+fr-FR.bdic : « Dictionnaires orthographiques français » version 7.7, variante
+  « toutes variantes » (orthographe classique + réforme de 1990), par
+  Olivier R. et les contributeurs de Dicollecte/Grammalecte.
+  Licence : Mozilla Public License 2.0 (texte : LICENCE_MPL-2.0.txt).
+  Source : https://grammalecte.net/dic/hunspell-french-dictionaries-v7.7.zip
+  (fichiers fr-toutesvariantes.dic / fr-toutesvariantes.aff) ; mentions et
+  contributeurs : README_fr-FR.txt.
+  sha256 : 865649fc84b9f6540f3a3511ad1ec149040304f63262ab11293394b2079110b2
+
+en-US.bdic : dictionnaire anglais (États-Unis) de LibreOffice, issu de SCOWL
+  (Kevin Atkinson) et d'Ispell (Geoff Kuenning) ; licences permissives dont
+  les mentions de copyright et d'autorisation figurent dans README_en-US.txt
+  (à conserver avec le fichier).
+  Source : https://github.com/LibreOffice/dictionaries/tree/master/en
+  (en_US.dic / en_US.aff).
+  sha256 : 373c5f2b63df4ef45817f65092d00a1827f98b3542932c2d24891a3ec6ebbed6

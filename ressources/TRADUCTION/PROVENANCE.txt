@@ -1,4 +1,4 @@
-Traduction intégrée à COURRIER : fichiers de Mozilla, sous Mozilla Public License 2.0
+Traduction intégrée à Courrier Adrien : fichiers de Mozilla, sous Mozilla Public License 2.0
 (texte complet : LICENCE_MPL-2.0.txt). Ces fichiers ne sont pas modifiés.
 
 Moteur : bergamot-translator 0.4.9 (projet Bergamot / Mozilla), paquet npm
@@ -18,4 +18,4 @@ the MPL 2.0 license » (https://github.com/mozilla/translations).
   modeles/fren/vocab.spm = vocab.fren.spm (version 2.0, sha256 783abf3abe075afdf8d85d233994bef2c3a064e935ab1bed946820aff6ac002a)
 
 Les fichiers enveloppe.js et traducteur.html du dossier moteur sont écrits par
-COURRIER lui-même (code de COURRIER, pas de Mozilla).
+Courrier Adrien lui-même (code de Courrier Adrien, pas de Mozilla).
