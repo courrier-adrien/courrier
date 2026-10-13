@@ -420,7 +420,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 16h49"
+VERSION_BUILD = "2026-10-13 17h07"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -22521,9 +22521,24 @@ class GestionnaireModeles(QDialog):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
             liste.addItem(item)
-        liste.itemClicked.connect(lambda it: it.setCheckState(
-            Qt.CheckState.Unchecked if it.checkState() == Qt.CheckState.Checked
-            else Qt.CheckState.Checked))
+        # Clic sur le nom du compte = cocher/décocher. Un clic sur la case
+        # elle-même la coche déjà tout seul : l'inverser encore ici l'annulait
+        # (13/10/2026, remonté par l'utilisateur — "la case ne se coche pas").
+        # Qt signale itemChanged (case inversée) juste AVANT itemClicked quand
+        # on clique sur la case : on le note, et le clic ne fait alors rien.
+        case_deja_inversee = {}
+        liste.itemChanged.connect(lambda it: case_deja_inversee.update(item=it))
+        # Appui sur le nom (Qt n'émet pas itemPressed pour la case) : oublie une
+        # inversion ancienne, par exemple faite au clavier avec Espace.
+        liste.itemPressed.connect(lambda it: case_deja_inversee.clear())
+
+        def _sur_clic_compte(it):
+            if case_deja_inversee.pop("item", None) is it:
+                return  # clic sur la case : déjà inversée par Qt
+            it.setCheckState(Qt.CheckState.Unchecked if it.checkState() == Qt.CheckState.Checked
+                             else Qt.CheckState.Checked)
+            case_deja_inversee.pop("item", None)  # notée par notre propre inversion
+        liste.itemClicked.connect(_sur_clic_compte)
         lay.addWidget(liste, 1)
 
         lay.addWidget(QLabel("Modèles à copier :"))
@@ -23397,7 +23412,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 16h49")
+        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 17h07")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
