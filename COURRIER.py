@@ -311,13 +311,6 @@ class PontLecture(QObject):
         """Bouton PDF intégré au bandeau du mail (à côté de RECHARGER)."""
         self._cm._imprimer_mail_pdf(sujet)
 
-    @Slot()
-    def traduirePageWeb(self):
-        """Bouton TRADUIRE injecté sur une page web (12/10/2026). N'importe
-        quel site peut appeler ce pont : le seul effet possible est d'ouvrir
-        la fenêtre de choix, où rien ne part sans le clic de l'utilisateur."""
-        QTimer.singleShot(0, self._cm._traduire_page_web)
-
     @Slot(int)
     def lireVideoWeb(self, index):
         """Bouton "Lire la vidéo" injecté sur une page externe dont la
@@ -428,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 20h49"
+VERSION_BUILD = "2026-10-13 21h03"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -6608,6 +6601,11 @@ STYLE_BOUTON = """
         padding-top: 7px; padding-left: 14px;
     }
 """
+
+# Boutons de la barre d'adresse du navigateur intégré, plus étroits
+# (13/10/2026) pour y loger TRADUIRE.
+STYLE_BOUTON_BARRE_URL = (STYLE_BOUTON.replace("padding: 5px 12px", "padding: 3px 7px")
+                          .replace("padding-top: 7px; padding-left: 14px;", "padding-top: 5px; padding-left: 9px;"))
 
 STYLE_SCROLLBAR = """
     QScrollBar:vertical { background: #000000; width: 32px; }
@@ -18561,61 +18559,8 @@ JS_TRADUCTION_LECTURE = r"""
   };
 """
 
-# Navigateur intégré (12/10/2026) : bouton TRADUIRE flottant en haut à droite
-# (sous PLEIN ÉCRAN de la barre d'adresse, et sous le bouton vidéo s'il y en a un)
-# des pages web, injecté dans le monde principal de la page (comme le bouton
-# vidéo) pour pouvoir appeler __courrierPont. La traduction elle-même tourne
-# dans le monde isolé (ApplicationWorld) : le site ne voit ni ne modifie ses
-# fonctions. __courrierTradWeb(texte, pourcentage, bilan) met le bouton à jour.
-JS_BOUTON_TRADUCTION_WEB = r"""
-(function () {
-    if (document.getElementById('__courrier_trad_web__') || !document.body) return;
-    var boite = document.createElement('div');
-    boite.id = '__courrier_trad_web__';
-    boite.setAttribute('contenteditable', 'false');
-    boite.style.cssText = 'position:fixed;top:10px;right:10px;z-index:2147483647;display:flex;'
-        + 'align-items:center;gap:8px;max-width:70vw;';
-    var bilan = document.createElement('span');
-    bilan.style.cssText = 'font:11px Verdana,sans-serif;color:#222;background:rgba(245,222,179,0.95);'
-        + 'padding:4px 8px;border-radius:4px;box-shadow:0 2px 6px rgba(0,0,0,0.3);display:none;';
-    var b = document.createElement('div');
-    b.textContent = 'TRADUIRE';
-    b.title = 'Traduire cette page (sur cet ordinateur ou avec Claude) — Courrier Adrien';
-    b.style.cssText = 'background:#A52A2A;color:white;font:bold 12px Verdana,sans-serif;padding:6px 12px;'
-        + 'border:1px solid #6b1a1a;border-radius:4px;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.5);'
-        + 'user-select:none;white-space:nowrap;';
-    b.addEventListener('click', function (e) {
-        e.preventDefault(); e.stopPropagation();
-        if (window.__courrierPont && window.__courrierPont.traduirePageWeb) window.__courrierPont.traduirePageWeb();
-    });
-    boite.appendChild(bilan);
-    boite.appendChild(b);
-    document.body.appendChild(boite);
-    // Même coin que le bouton vidéo (_injecter_bouton_video_web) : se range
-    // dessous, y compris quand celui-ci apparaît après coup (détection vidéo
-    // en arrière-plan) ou disparaît.
-    function placer() {
-        var video = document.getElementById('__courrier_video_web__');
-        var bas = video ? video.getBoundingClientRect().bottom : 0;
-        boite.style.top = (bas > 0 ? Math.round(bas) + 6 : 10) + 'px';
-    }
-    placer();
-    new MutationObserver(placer).observe(document.body, {childList: true});
-    window.__courrierTradWeb = function (texte, pourcentage, texteBilan) {
-        b.textContent = texte;
-        if (pourcentage === null || pourcentage === undefined) {
-            b.style.background = '#A52A2A'; b.style.color = 'white';
-        } else {
-            b.style.background = 'linear-gradient(to right, #DAA520 ' + pourcentage + '%, #F5DEB3 ' + pourcentage + '%)';
-            b.style.color = 'black';
-        }
-        if (texteBilan !== null && texteBilan !== undefined) {
-            bilan.textContent = texteBilan;
-            bilan.style.display = texteBilan ? '' : 'none';
-        }
-    };
-})();
-"""
+INFOBULLE_TRADUIRE_URL = ("Traduire cette page (sur cet ordinateur ou avec Claude) ; "
+                          "une fois traduite : ORIGINAL pour revenir au texte d'origine")
 
 # Monde isolé de la page : contenu principal (article) s'il existe, sinon
 # toute la page, découpé en passages par trCollecter.
@@ -24149,7 +24094,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 20h49")
+        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 21h03")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -25453,20 +25398,20 @@ class ClientMail(QMainWindow):
         self.label_url.setMinimumWidth(0)
         self.label_url.setMaximumWidth(16777215)
         self.label_url.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.btn_corps_url = QPushButton("  CORPS  ")
+        self.btn_corps_url = QPushButton("CORPS")
         self.btn_corps_url.setFixedHeight(22)
-        self.btn_corps_url.setStyleSheet(STYLE_BOUTON)
+        self.btn_corps_url.setStyleSheet(STYLE_BOUTON_BARRE_URL)
         self.btn_corps_url.clicked.connect(self._revenir_corps_mail)
-        btn_copier_url = QPushButton("  COPIER  ")
+        btn_copier_url = QPushButton("COPIER")
         btn_copier_url.setFixedHeight(22)
-        btn_copier_url.setStyleSheet(STYLE_BOUTON)
+        btn_copier_url.setStyleSheet(STYLE_BOUTON_BARRE_URL)
         def _copier_url():
             QApplication.clipboard().setText(getattr(self, '_url_courante', '') or '')
             self.label_url.selectAll()
         btn_copier_url.clicked.connect(_copier_url)
-        btn_url_firefox = QPushButton("  INTERNET  ")
+        btn_url_firefox = QPushButton("INTERNET")
         btn_url_firefox.setFixedHeight(22)
-        btn_url_firefox.setStyleSheet(STYLE_BOUTON)
+        btn_url_firefox.setStyleSheet(STYLE_BOUTON_BARRE_URL)
         btn_url_firefox.setToolTip("Ouvrir cette page dans un navigateur (menu de choix)")
         btn_url_firefox.clicked.connect(self._ouvrir_url_menu_navigateurs)
         # Indicateur "page bloquée" (15/09/2026, demandé par l'utilisateur
@@ -25502,9 +25447,17 @@ class ClientMail(QMainWindow):
             "par défaut de Windows.")
         self.btn_page_bloquee_url.clicked.connect(self._ouvrir_page_bloquee_externe)
         self.btn_page_bloquee_url.hide()
-        self._btn_plein_url = QPushButton("  PLEIN ÉCRAN  ")
+        self._btn_plein_url = QPushButton("PLEIN ÉCRAN")
         self._btn_plein_url.setFixedHeight(22)
-        self._btn_plein_url.setStyleSheet(STYLE_BOUTON)
+        self._btn_plein_url.setStyleSheet(STYLE_BOUTON_BARRE_URL)
+        # TRADUIRE dans la barre d'adresse (13/10/2026) plutôt que posé sur
+        # la page, où il masquait parfois des commandes du site.
+        self.btn_traduire_url = QPushButton("TRADUIRE")
+        self.btn_traduire_url.setFixedHeight(22)
+        self.btn_traduire_url.setStyleSheet(STYLE_BOUTON_BARRE_URL)
+        self.btn_traduire_url.setToolTip(INFOBULLE_TRADUIRE_URL)
+        self.btn_traduire_url.clicked.connect(self._traduire_page_web)
+        self.btn_traduire_url.hide()
         self._btn_plein_url.setToolTip("Afficher cette page en plein écran dans le panneau de lecture")
         self._btn_plein_url.clicked.connect(self._basculer_plein_ecran_site)
         layout_url.addWidget(self.btn_corps_url)
@@ -25512,6 +25465,7 @@ class ClientMail(QMainWindow):
         layout_url.addWidget(self.btn_page_bloquee_url)
         layout_url.addWidget(btn_copier_url)
         layout_url.addWidget(self.label_url, 1)
+        layout_url.addWidget(self.btn_traduire_url)
         layout_url.addWidget(self._btn_plein_url)
         self.barre_url.hide()
         layout_corps.addWidget(self.barre_url)
@@ -28958,7 +28912,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 13/10/2026 à 20h49")
+        lbl_version = QLabel("Version du 13/10/2026 à 21h03")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -37156,6 +37110,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         # blocage Akamai sur CETTE page précise, une fois son chargement
         # terminé (pas de scan possible dès urlChanged, la page est encore vide).
         self.btn_page_bloquee_url.hide()
+        self._bouton_traduction_web(None, "TRADUIRE", None, "")
+        self.btn_traduire_url.setVisible(url.startswith(("http://", "https://")))
         if url and not url.startswith("file:///") and url != "about:blank":
             url_affichee = url if len(url) <= 200 else url[:200] + "…"
             self.label_url.setText(f"  {url_affichee}")
@@ -37434,7 +37390,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             frame_corps.setMaximumWidth(w_splitter)
             QApplication.processEvents()
             self._log_largeur_debug("site_plein_ecran:entree")
-            self._btn_plein_url.setText("  QUITTER PLEIN ÉCRAN  ")
+            self._btn_plein_url.setText("QUITTER PLEIN ÉCRAN")
             self.splitter.widget(2).setMaximumWidth(16777215)
             QTimer.singleShot(50, lambda: self.splitter.setSizes([0, 0, self.splitter.width()]))
 
@@ -37461,7 +37417,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             self.frame_haut.show()
             self.splitter.widget(0).show()
             self.splitter.widget(1).show()
-            self._btn_plein_url.setText("  PLEIN ÉCRAN  ")
+            self._btn_plein_url.setText("PLEIN ÉCRAN")
             frame_corps = self.splitter.widget(2)
             frame_corps.setMinimumWidth(0)
             frame_corps.setMaximumWidth(16777215)
@@ -38374,17 +38330,26 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         if not url.startswith(("http://", "https://")):
             return
         self._trad_web = {"url": url, "traduit": False, "en_cours": False, "jeton": 0}
-        try:
-            self.webview.page().runJavaScript(JS_BOUTON_TRADUCTION_WEB)
-        except Exception:
-            pass
+        self._bouton_traduction_web(None, "TRADUIRE", None, "")
 
     def _bouton_traduction_web(self, page, texte, pourcentage=None, bilan=None):
-        try:
-            page.runJavaScript(f"window.__courrierTradWeb && __courrierTradWeb({json.dumps(texte)}, "
-                               f"{json.dumps(pourcentage)}, {json.dumps(bilan)});")
-        except RuntimeError:
-            pass
+        """Bouton TRADUIRE de la barre d'adresse : texte, progression (fond
+        doré qui avance) et bilan (infobulle affichée quelques secondes)."""
+        b = self.btn_traduire_url
+        b.setText(texte)
+        if pourcentage is None:
+            b.setStyleSheet(STYLE_BOUTON_BARRE_URL)
+        else:
+            f = min(max(pourcentage, 0), 100) / 100
+            b.setStyleSheet(STYLE_BOUTON_BARRE_URL.replace(
+                "background-color: #A52A2A; color: white;",
+                f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #DAA520, "
+                f"stop:{f:.3f} #DAA520, stop:{min(f + 0.001, 1):.3f} #F5DEB3, stop:1 #F5DEB3); color: black;", 1))
+        if bilan is not None:
+            b.setToolTip(f"{bilan}\n{INFOBULLE_TRADUIRE_URL}" if bilan else INFOBULLE_TRADUIRE_URL)
+            if bilan and b.isVisible():
+                from PySide6.QtWidgets import QToolTip
+                QToolTip.showText(b.mapToGlobal(b.rect().bottomLeft()), bilan, b, b.rect(), 6000)
 
     def _traduire_page_web(self):
         """Clic sur TRADUIRE d'une page web : passages lus dans le monde
