@@ -420,7 +420,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 12h10"
+VERSION_BUILD = "2026-10-13 12h56"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -22063,11 +22063,6 @@ class GestionnaireModeles(QDialog):
         btn_supprimer_modele.clicked.connect(self._supprimer_modele_courant)
         barre_haut.addWidget(btn_supprimer_modele)
 
-        self.btn_sauvegarder = QPushButton(" Sauvegarder ")
-        self.btn_sauvegarder.setStyleSheet(STYLE_BOUTON)
-        self.btn_sauvegarder.clicked.connect(self._sauvegarder_tout)
-        barre_haut.addWidget(self.btn_sauvegarder)
-
         layout.addWidget(conteneur_haut)
 
         # Barre de mise en forme — même mécanique que la fenêtre de rédaction
@@ -22149,8 +22144,14 @@ class GestionnaireModeles(QDialog):
         # déclenche closeEvent, qui capture et sauvegarde déjà le contenu en
         # cours d'édition avant de fermer (même chemin que la croix de la
         # fenêtre) — pas besoin de dupliquer cette logique ici.
+        # Sauvegarder déplacé ici, juste à gauche de Fermer (13/10/2026,
+        # demandé par l'utilisateur — il était à droite de la ligne du haut).
         ligne_bas = QHBoxLayout()
         ligne_bas.addStretch(1)
+        self.btn_sauvegarder = QPushButton(" Sauvegarder ")
+        self.btn_sauvegarder.setStyleSheet(STYLE_BOUTON)
+        self.btn_sauvegarder.clicked.connect(self._sauvegarder_tout)
+        ligne_bas.addWidget(self.btn_sauvegarder)
         btn_fermer = QPushButton("  Fermer  ")
         btn_fermer.setStyleSheet(STYLE_BOUTON)
         btn_fermer.clicked.connect(self.close)
