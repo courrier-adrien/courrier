@@ -420,7 +420,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 14h10"
+VERSION_BUILD = "2026-10-13 14h36"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -23320,7 +23320,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN")
+        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 14h36")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -40578,7 +40578,7 @@ if __name__ == "__main__":
     # Mise a jour automatique (src/mise_a_jour.py) : verifie GitHub en arriere-plan.
     try:
         import mise_a_jour
-        mise_a_jour.demarrer(fenetre, VERSION_BUILD, DOSSIER_APP)
+        mise_a_jour.demarrer(fenetre, VERSION_BUILD, DOSSIER_APP, STYLE_BOUTON)
     except Exception as _e_maj:
         print(f"[MAJ] desactivee : {_e_maj}")
 

@@ -183,8 +183,12 @@ if ($Relancer -eq 1) { Start-Process -FilePath $exe -WorkingDirectory $Installat
 
 
 class GestionnaireMiseAJour(QObject):
-    def __init__(self, fenetre, version_actuelle, dossier_donnees):
+    def __init__(self, fenetre, version_actuelle, dossier_donnees, style_boutons=""):
         super().__init__(fenetre)
+        # Meme apparence que les autres boites de message de COURRIER (boutons rouges)
+        self.style_boutons = style_boutons
+        self.style_boites = ("QMessageBox { background-color: #2a2a2a; } QLabel { color: white; }"
+                             + style_boutons)
         self.fenetre = fenetre
         self.version_actuelle = version_actuelle
         self.dossier_donnees = dossier_donnees
@@ -214,6 +218,14 @@ class GestionnaireMiseAJour(QObject):
         if self._verificateur is not None and self._verificateur.isRunning():
             self._verificateur.wait(3000)
 
+    def _boite(self, icone, titre, texte):
+        boite = QMessageBox(self.fenetre)
+        boite.setIcon(icone)
+        boite.setWindowTitle(titre)
+        boite.setText(texte)
+        boite.setStyleSheet(self.style_boites)
+        return boite
+
     def _annoncer_resultat_precedent(self):
         if not os.path.exists(self.fichier_resultat):
             # Restes d'une mise a jour abandonnee (telechargement interrompu, etc.)
@@ -227,15 +239,15 @@ class GestionnaireMiseAJour(QObject):
             return
         shutil.rmtree(self.dossier_travail, ignore_errors=True)
         if lignes and lignes[0] == "OK":
-            QMessageBox.information(self.fenetre, "Mise à jour",
-                                    f"COURRIER a été mis à jour (version du "
-                                    f"{version_lisible(self.version_actuelle)}).\n\n"
-                                    f"Vos comptes, mails et réglages sont conservés.")
+            self._boite(QMessageBox.Icon.Information, "Mise à jour",
+                        f"COURRIER a été mis à jour (version du "
+                        f"{version_lisible(self.version_actuelle)}).\n\n"
+                        f"Vos comptes, mails et réglages sont conservés.").exec()
         elif lignes:
-            QMessageBox.warning(self.fenetre, "Mise à jour",
-                                "La mise à jour de COURRIER n'a pas pu être installée.\n\n"
-                                + "\n".join(lignes[1:])
-                                + f"\n\nVous pouvez la télécharger à la main :\n{URL_PAGE}")
+            self._boite(QMessageBox.Icon.Warning, "Mise à jour",
+                        "La mise à jour de COURRIER n'a pas pu être installée.\n\n"
+                        + "\n".join(lignes[1:])
+                        + f"\n\nVous pouvez la télécharger à la main :\n{URL_PAGE}").exec()
 
     def _prefs(self):
         try:
@@ -269,11 +281,9 @@ class GestionnaireMiseAJour(QObject):
         if self._prefs().get("version_ignoree") == info["version"]:
             return
         self.info = info
-        boite = QMessageBox(self.fenetre)
-        boite.setIcon(QMessageBox.Icon.Information)
-        boite.setWindowTitle("Mise à jour disponible")
-        boite.setText(f"Une nouvelle version de COURRIER est disponible "
-                      f"(version du {version_lisible(info['version'])}).")
+        boite = self._boite(QMessageBox.Icon.Information, "Mise à jour disponible",
+                            f"Une nouvelle version de COURRIER est disponible "
+                            f"(version du {version_lisible(info['version'])}).")
         boite.setInformativeText(
             f"Votre version : {version_lisible(self.version_actuelle)}\n"
             f"Téléchargement : environ {max(1, info['taille'] // (1024 * 1024))} Mo\n\n"
@@ -304,19 +314,20 @@ class GestionnaireMiseAJour(QObject):
 
     def telecharger(self):
         if not self._installation_modifiable():
-            QMessageBox.warning(
-                self.fenetre, "Mise à jour",
+            self._boite(
+                QMessageBox.Icon.Warning, "Mise à jour",
                 f"COURRIER est installé dans un dossier protégé par Windows :\n"
                 f"{self.installation}\n\n"
                 f"La mise à jour automatique ne peut pas le modifier. Téléchargez la "
                 f"nouvelle version à la main (la page va s'ouvrir), ou déplacez le "
-                f"dossier de COURRIER dans Documents par exemple.")
+                f"dossier de COURRIER dans Documents par exemple.").exec()
             QDesktopServices.openUrl(QUrl(URL_PAGE))
             return
         total_mo = max(1, self.info["taille"] // (1024 * 1024))
         self._progression = QProgressDialog("Téléchargement de la mise à jour...", "Annuler",
                                             0, total_mo, self.fenetre)
         self._progression.setWindowTitle("Mise à jour de COURRIER")
+        self._progression.setStyleSheet("QLabel { color: white; }" + self.style_boutons)
         self._progression.setWindowModality(Qt.WindowModality.NonModal)
         self._progression.setMinimumDuration(0)
         self._progression.setAutoClose(False)
@@ -363,10 +374,10 @@ class GestionnaireMiseAJour(QObject):
     def _sur_erreur_telechargement(self, message):
         self._fermer_progression()
         shutil.rmtree(self.dossier_travail, ignore_errors=True)
-        QMessageBox.warning(self.fenetre, "Mise à jour",
-                            f"Le téléchargement de la mise à jour a échoué :\n{message}\n\n"
-                            f"Rien n'a été modifié. COURRIER vous la proposera à nouveau "
-                            f"au prochain démarrage.")
+        self._boite(QMessageBox.Icon.Warning, "Mise à jour",
+                    f"Le téléchargement de la mise à jour a échoué :\n{message}\n\n"
+                    f"Rien n'a été modifié. COURRIER vous la proposera à nouveau "
+                    f"au prochain démarrage.").exec()
 
     def _sur_telechargement_fini(self, dossier_nouvelle):
         self._fermer_progression()
@@ -391,11 +402,9 @@ class GestionnaireMiseAJour(QObject):
             # tant qu'elle est affichee, elle bloque toutes les fenetres de COURRIER
             # (impossible alors de les fermer). On surveille ensuite leur fermeture.
             titres = "\n".join(f"  - {w.windowTitle() or 'fenêtre sans titre'}" for w in autres[:8])
-            boite = QMessageBox(self.fenetre)
-            boite.setIcon(QMessageBox.Icon.Warning)
-            boite.setWindowTitle("Mise à jour prête")
-            boite.setText("La mise à jour est prête, mais d'autres fenêtres de COURRIER sont "
-                          "encore ouvertes :\n" + titres)
+            boite = self._boite(QMessageBox.Icon.Warning, "Mise à jour prête",
+                                "La mise à jour est prête, mais d'autres fenêtres de "
+                                "COURRIER sont encore ouvertes :\n" + titres)
             boite.setInformativeText("Terminez ou fermez-les (un mail en cours de rédaction "
                                      "serait perdu). Dès qu'elles seront toutes fermées, "
                                      "COURRIER vous proposera de redémarrer.\n\n"
@@ -424,11 +433,9 @@ class GestionnaireMiseAJour(QObject):
 
     def _confirmer_redemarrage(self, deja_confirme):
         if not deja_confirme:
-            boite = QMessageBox(self.fenetre)
-            boite.setIcon(QMessageBox.Icon.Question)
-            boite.setWindowTitle("Mise à jour prête")
-            boite.setText("Les autres fenêtres sont fermées. Redémarrer COURRIER maintenant "
-                          "pour installer la mise à jour ?")
+            boite = self._boite(QMessageBox.Icon.Question, "Mise à jour prête",
+                                "Les autres fenêtres sont fermées. Redémarrer COURRIER "
+                                "maintenant pour installer la mise à jour ?")
             b_redemarrer = boite.addButton("Redémarrer", QMessageBox.ButtonRole.AcceptRole)
             boite.addButton("À la fermeture de COURRIER", QMessageBox.ButtonRole.RejectRole)
             boite.exec()
@@ -469,11 +476,12 @@ class GestionnaireMiseAJour(QObject):
         self.nouvelle = None
 
 
-def demarrer(fenetre, version_actuelle, dossier_donnees):
-    """Point d'entree appele par COURRIER au demarrage. Sans effet hors exe."""
+def demarrer(fenetre, version_actuelle, dossier_donnees, style_boutons=""):
+    """Point d'entree appele par COURRIER au demarrage. Sans effet hors exe.
+    style_boutons : STYLE_BOUTON de COURRIER (boutons rouges des boites de message)."""
     if not getattr(sys, "frozen", False) or not version_actuelle:
         return None
-    gestionnaire = GestionnaireMiseAJour(fenetre, version_actuelle, dossier_donnees)
+    gestionnaire = GestionnaireMiseAJour(fenetre, version_actuelle, dossier_donnees, style_boutons)
     fenetre._gestionnaire_mise_a_jour = gestionnaire  # garde l'objet en vie
     gestionnaire.demarrer()
     return gestionnaire
