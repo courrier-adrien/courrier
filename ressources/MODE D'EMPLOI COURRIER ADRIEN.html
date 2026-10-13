@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mode d'emploi — Courrier Adrien</title>
+<style>
+  :root {
+    --fond: #1e1e1e;
+    --carte: #2a2a2a;
+    --texte: #ececec;
+    --doux: #b5b5b5;
+    --brique: #A52A2A;
+    --or: #DAA520;
+    --ble: #F5DEB3;
+    --bord: #444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--fond); color: var(--texte);
+    font-family: Verdana, "Segoe UI", sans-serif; font-size: 15px; line-height: 1.6;
+  }
+  header {
+    background: var(--brique); color: #fff; padding: 28px 16px 22px; text-align: center;
+  }
+  header h1 { margin: 0; font-size: 30px; letter-spacing: 1px; }
+  header p { margin: 6px 0 0; color: var(--ble); }
+  .page { display: flex; max-width: 1150px; margin: 0 auto; gap: 28px; padding: 24px 16px 60px; }
+  nav {
+    flex: 0 0 240px; position: sticky; top: 16px; align-self: flex-start;
+    background: var(--carte); border: 1px solid var(--bord); border-radius: 6px; padding: 14px 16px;
+    max-height: calc(100vh - 32px); overflow-y: auto;
+  }
+  nav b { color: var(--or); display: block; margin-bottom: 6px; }
+  nav ol { margin: 0; padding-left: 20px; font-size: 13px; }
+  nav a { color: var(--texte); text-decoration: none; }
+  nav a:hover { color: var(--or); }
+  main { flex: 1; min-width: 0; }
+  section {
+    background: var(--carte); border: 1px solid var(--bord); border-radius: 6px;
+    padding: 6px 22px 18px; margin-bottom: 22px;
+  }
+  h2 { color: var(--or); border-bottom: 1px solid var(--brique); padding-bottom: 6px; font-size: 21px; }
+  h3 { color: var(--ble); font-size: 16px; margin-bottom: 4px; }
+  a { color: var(--or); }
+  .btn {
+    display: inline-block; background: var(--brique); color: #fff; border-radius: 3px;
+    padding: 0 7px; font-size: 12px; font-weight: bold; white-space: nowrap; line-height: 1.7;
+  }
+  kbd {
+    background: #111; border: 1px solid #666; border-radius: 3px; padding: 0 5px;
+    font-family: Consolas, monospace; font-size: 13px;
+  }
+  code { background: #111; padding: 1px 5px; border-radius: 3px; font-family: Consolas, monospace; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--bord); padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #333; color: var(--ble); }
+  .note, .attention {
+    border-left: 4px solid var(--or); background: #333; padding: 8px 14px; margin: 12px 0; border-radius: 0 4px 4px 0;
+  }
+  .attention { border-left-color: #e04040; }
+  .note b, .attention b { color: var(--ble); }
+  .recherche { margin-bottom: 12px; }
+  .recherche input {
+    width: 100%; padding: 6px 8px; font: inherit; font-size: 14px;
+    background: #111; color: var(--texte); border: 1px solid var(--brique); border-radius: 4px;
+  }
+  .recherche input:focus { outline: 2px solid var(--or); }
+  .recherche .infos { font-size: 12px; color: var(--doux); margin-top: 4px; min-height: 18px; }
+  .recherche .infos button {
+    background: var(--brique); color: #fff; border: 0; border-radius: 3px;
+    padding: 1px 7px; margin-left: 4px; cursor: pointer; font-size: 12px;
+  }
+  .recherche .retour {
+    width: 100%; margin-top: 6px; padding: 5px 8px; cursor: pointer;
+    background: var(--brique); color: #fff; border: 1px solid var(--or); border-radius: 4px;
+    font: inherit; font-size: 13px; font-weight: bold;
+  }
+  .recherche .retour:hover { background: #c0392b; }
+  .recherche .retour[hidden] { display: none; }
+  mark { background: var(--or); color: #000; border-radius: 2px; }
+  mark.courant { background: #ff7b00; outline: 2px solid #fff; }
+  section.cache, nav li.cache { display: none; }
+  @media (max-width: 820px) {
+    .page { flex-direction: column; }
+    nav { position: static; max-height: none; flex: none; }
+    section { padding: 4px 14px 14px; }
+    table { display: block; overflow-x: auto; }
+  }
+  @media print {
+    body { background: #fff; color: #000; }
+    nav { display: none; }
+    section { background: #fff; border-color: #ccc; break-inside: avoid-page; }
+    h2 { color: var(--brique); } h3 { color: #000; }
+    .note, .attention { background: #f4f4f4; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>COURRIER ADRIEN</h1>
+  <p>Mode d'emploi — client mail multi-comptes pour Windows</p>
+</header>
+
+<div class="page">
+<nav>
+  <div class="recherche">
+    <b>Rechercher</b>
+    <input id="champ-recherche" type="search" placeholder="ex. : spam, pièce jointe…" autocomplete="off">
+    <div class="infos" id="infos-recherche"></div>
+    <button type="button" id="retour-sommaire" class="retour" hidden>↩ Retour au sommaire complet</button>
+  </div>
+  <b>Sommaire</b>
+  <ol>
+    <li><a href="#presentation">Présentation</a></li>
+    <li><a href="#installation">Installation et premier lancement</a></li>
+    <li><a href="#ecran">L'écran principal</a></li>
+    <li><a href="#comptes">Comptes et dossiers</a></li>
+    <li><a href="#liste">La liste des mails</a></li>
+    <li><a href="#lecture">Lire un mail</a></li>
+    <li><a href="#pj">Pièces jointes</a></li>
+    <li><a href="#redaction">Écrire un mail</a></li>
+    <li><a href="#delai">Envoi différé (DÉLAI)</a></li>
+    <li><a href="#langue">Orthographe, grammaire, traduction</a></li>
+    <li><a href="#macros">Macros et modèles</a></li>
+    <li><a href="#carnet">Carnet d'adresses</a></li>
+    <li><a href="#spam">Spam</a></li>
+    <li><a href="#recherche">Rechercher et trier</a></li>
+    <li><a href="#internet">Navigateur intégré et vidéos</a></li>
+    <li><a href="#rss">RSS to Email</a></li>
+    <li><a href="#todo">TODO (rappels)</a></li>
+    <li><a href="#mailing">MAILING</a></li>
+    <li><a href="#tel">Téléphone : TÉL et SMS</a></li>
+    <li><a href="#sons">Sons</a></li>
+    <li><a href="#controle">CONTRÔLE et CONSOLE</a></li>
+    <li><a href="#raccourcis">Raccourcis clavier</a></li>
+    <li><a href="#donnees">Vos données, désinstallation</a></li>
+    <li><a href="#majs">Mises à jour</a></li>
+    <li><a href="#probleme">En cas de problème</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="presentation">
+  <h2>1. Présentation</h2>
+  <p>Courrier Adrien est un client mail pour Windows qui gère plusieurs comptes à la fois (IMAP : Gmail, Orange, Free, o2switch… et Outlook / Hotmail).
+  Il n'a <b>aucun menu déroulant</b> : chaque fonction est un bouton visible, accessible en un ou deux clics.</p>
+  <p>En plus de la messagerie, il réunit dans une seule fenêtre : un navigateur intégré, un logiciel de mailing, un lecteur de flux RSS qui les envoie en mails, des macros, des modèles, des rappels (TODO), un carnet d'adresses, l'envoi de SMS et l'affichage de l'écran d'un téléphone Android.</p>
+  <p>Tout est stocké sur votre ordinateur. Rien n'est envoyé ailleurs qu'à votre fournisseur de messagerie, sauf si vous choisissez vous-même la correction ou la traduction en ligne par Claude (voir <a href="#langue">section 10</a>).</p>
+  <p>Licence : <b>PolyForm Noncommercial 1.0.0</b>, usage non commercial. Le texte complet est dans le bouton <span class="btn">À PROPOS</span>.</p>
+</section>
+
+<section id="installation">
+  <h2>2. Installation et premier lancement</h2>
+  <ol>
+    <li>Décompressez tout le dossier où vous voulez (Bureau, Documents…). <b>Ne déplacez pas</b> <code>COURRIER ADRIEN.exe</code> seul : il a besoin du dossier <code>_internal</code> placé à côté de lui.</li>
+    <li>Double-cliquez sur <code>COURRIER ADRIEN.exe</code>.</li>
+    <li>Si Windows affiche « Windows a protégé votre ordinateur » (SmartScreen), cliquez sur <b>Informations complémentaires</b>, puis sur <b>Exécuter quand même</b>. Ce message apparaît parce que le programme n'est pas signé numériquement. Certains antivirus peuvent aussi le signaler à tort.</li>
+  </ol>
+  <h3>Ajouter votre premier compte</h3>
+  <p>Au premier lancement, la fenêtre <span class="btn">COMPTES</span> s'ouvre toute seule :</p>
+  <ol>
+    <li>Cliquez sur <b>Ajouter</b>, choisissez votre fournisseur (les réglages des serveurs sont préremplis), puis saisissez votre adresse et votre mot de passe.</li>
+    <li>Pour un compte <b>Outlook / Hotmail</b>, utilisez <b>Se connecter avec Microsoft</b> : la connexion se fait sur la page de Microsoft, sans donner votre mot de passe à Courrier Adrien.</li>
+    <li>Pour un compte <b>Gmail</b>, il faut généralement un « mot de passe d'application », créé dans les réglages de sécurité de votre compte Google.</li>
+    <li>Supprimez ensuite le compte d'exemple « A CONFIGURER ».</li>
+  </ol>
+  <p>La même fenêtre sert plus tard à modifier ou supprimer un compte, à vider le cache HTML d'un compte et à lancer une <b>Mise à jour des comptes</b>.</p>
+  <h3>Courrier Adrien comme messagerie par défaut</h3>
+  <p>Le bouton <span class="btn">DÉFAUT</span>, en bas à droite, propose Courrier Adrien à Windows comme application de messagerie par défaut. Windows ouvre ensuite ses propres réglages pour que vous confirmiez ce choix.</p>
+</section>
+
+<section id="ecran">
+  <h2>3. L'écran principal</h2>
+  <h3>Barre du haut, à gauche : les outils</h3>
+  <table>
+    <tr><th>Bouton</th><th>Rôle</th></tr>
+    <tr><td><span class="btn">CONTRÔLE</span></td><td>Poste de contrôle : ce que fait le logiciel, compte par compte (<a href="#controle">section 21</a>).</td></tr>
+    <tr><td><span class="btn">SUPPRIMER</span></td><td>Supprime le ou les mails sélectionnés.</td></tr>
+    <tr><td><span class="btn">COMPTES</span></td><td>Ajouter, modifier ou supprimer un compte.</td></tr>
+    <tr><td><span class="btn">TÉL</span> <span class="btn">SMS</span></td><td>Écran du téléphone Android sur le PC, et envoi de SMS (<a href="#tel">section 19</a>).</td></tr>
+    <tr><td><span class="btn">MAILING</span></td><td>Envoi d'un même message à une liste de destinataires (<a href="#mailing">section 18</a>).</td></tr>
+    <tr><td><span class="btn">MACROS</span> <span class="btn">MODÈLES</span></td><td>Réponses toutes faites et modèles de mails (<a href="#macros">section 11</a>).</td></tr>
+    <tr><td><span class="btn">SONS</span></td><td>Son de réception, compte par compte.</td></tr>
+    <tr><td><span class="btn">SPAM</span></td><td>Liste des expéditeurs indésirables (<a href="#spam">section 13</a>).</td></tr>
+    <tr><td><span class="btn">ADRESSES</span></td><td>Carnet d'adresses (<a href="#carnet">section 12</a>).</td></tr>
+    <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span> <span class="btn">CHRONO</span></td><td>Recherche, retour à l'affichage normal, et choix du tri (<a href="#recherche">section 14</a>).</td></tr>
+    <tr><td><span class="btn">INTERNET</span></td><td>Ouvre le mail affiché dans un navigateur installé sur l'ordinateur.</td></tr>
+    <tr><td><span class="btn">RSS to Email</span></td><td>Abonnements RSS reçus sous forme de mails (<a href="#rss">section 16</a>).</td></tr>
+    <tr><td><span class="btn">TODO</span></td><td>Rappels programmés (<a href="#todo">section 17</a>).</td></tr>
+  </table>
+  <h3>Barre du haut, à droite : les actions sur les mails</h3>
+  <p><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span> (renvoie le mail à l'identique).</p>
+  <h3>Barre du bas (barre d'état)</h3>
+  <p>De gauche à droite : <span class="btn">SPAM</span> / <span class="btn">NON SPAM</span> pour le mail affiché, l'état du compte et ses compteurs, les téléchargements en cours (progression, pause, arrêt, dossier d'enregistrement), les boutons de vos macros, puis <span class="btn">DÉLAI</span>, <span class="btn">CONSOLE</span>, <span class="btn">À PROPOS</span>, <span class="btn">AIDE</span> (ouvre ce mode d'emploi) et <span class="btn">DÉFAUT</span>.</p>
+  <div class="note"><b>Affichage Windows à 125 % ou plus :</b> si la place manque, la barre du haut réduit d'elle-même la taille de ses boutons pour que tout reste visible.</div>
+</section>
+
+<section id="comptes">
+  <h2>4. Comptes et dossiers</h2>
+  <p>La colonne de gauche affiche une barre par compte. <b>Chaque barre sert de boîte de réception</b> : cliquez dessus pour afficher les mails reçus de ce compte. Son arborescence de dossiers s'affiche juste en dessous.</p>
+  <ul>
+    <li>Le nombre de mails non lus s'affiche à droite de chaque barre.</li>
+    <li>Le <b>petit rond gris</b> devant le nom d'un compte force la relève immédiate de ce seul compte.</li>
+    <li>Pour changer l'ordre des comptes, ouvrez <span class="btn">COMPTES</span> et utilisez les boutons <b>▲ Monter</b> / <b>▼ Descendre</b>.</li>
+    <li>Pour renommer un compte, double-cliquez sur son nom (ou appuyez sur <kbd>F2</kbd>).</li>
+  </ul>
+  <h3>La barre du compte actif</h3>
+  <table>
+    <tr><th>Bouton</th><th>Rôle</th></tr>
+    <tr><td>Intervalle (ex. « 10 min »)</td><td>Fréquence de relève de ce compte : à la demande, 5, 10, 20 ou 30 minutes, 1 heure ou 8 heures.</td></tr>
+    <tr><td><span class="btn">+</span></td><td>Créer un dossier sur le serveur (<b>l'abonnement au dossier est automatique</b>).</td></tr>
+    <tr><td><span class="btn">−</span></td><td>Supprimer un dossier.</td></tr>
+    <tr><td><span class="btn">=</span></td><td>Renommer un dossier.</td></tr>
+    <tr><td><span class="btn">▮</span></td><td>Insérer une ligne de séparation avant le dossier sélectionné (clic droit sur la ligne pour la retirer).</td></tr>
+    <tr><td><span class="btn">α</span></td><td>Trier par ordre alphabétique les sous-dossiers du dossier sélectionné.</td></tr>
+    <tr><td><span class="btn">▲</span> <span class="btn">▼</span></td><td>Monter ou descendre le dossier sélectionné. Vous composez ainsi une arborescence dans l'ordre qui vous convient.</td></tr>
+  </table>
+  <p>Pour <b>déplacer des mails</b> vers un autre dossier, faites-les glisser depuis la liste vers ce dossier.</p>
+</section>
+
+<section id="liste">
+  <h2>5. La liste des mails</h2>
+  <p>Chaque mail occupe deux lignes. Les couleurs indiquent son état :</p>
+  <table>
+    <tr><th>Couleur</th><th>Signification</th></tr>
+    <tr><td><span style="background:#DAA520;color:#000;padding:0 6px">doré</span></td><td>Mail non lu</td></tr>
+    <tr><td><span style="background:#F5DEB3;color:#000;padding:0 6px">blé</span></td><td>Mail sélectionné</td></tr>
+    <tr><td><span style="background:#CD853F;color:#000;padding:0 6px">ocre</span></td><td>Survol par la souris</td></tr>
+  </table>
+  <p>Quatre symboles cliquables :</p>
+  <ul>
+    <li>à gauche, un <b>triangle</b> (rouge si le mail a des pièces jointes) et un <b>rond</b> qui indique si vous avez répondu ;</li>
+    <li>à droite, une <b>étoile</b> pour épingler le mail, et un <b>petit bonhomme</b> qui retrouve tous les mails de cet expéditeur, quel que soit leur dossier.</li>
+  </ul>
+  <p>Sélection multiple : <kbd>Maj</kbd> + clic, <kbd>Ctrl</kbd> + clic, ou <kbd>Ctrl</kbd>+<kbd>A</kbd>. Les flèches <kbd>↑</kbd> <kbd>↓</kbd> passent d'un mail à l'autre.</p>
+</section>
+
+<section id="lecture">
+  <h2>6. Lire un mail</h2>
+  <p>L'en-tête affiche l'expéditeur, le destinataire, la date en toutes lettres et le sujet en gros caractères. Cliquer sur une adresse ouvre le carnet d'adresses pour y ajouter cette personne.</p>
+  <p>Boutons du bandeau du mail :</p>
+  <table>
+    <tr><th>Bouton</th><th>Rôle</th></tr>
+    <tr><td><span class="btn">COPIER</span></td><td>Copie le texte du mail.</td></tr>
+    <tr><td><span class="btn">RECHARGER</span></td><td>Télécharge à nouveau ce mail depuis le serveur, par exemple s'il s'affiche mal.</td></tr>
+    <tr><td><span class="btn">PDF</span></td><td>Enregistre le mail dans un fichier PDF.</td></tr>
+    <tr><td><span class="btn">TRADUIRE</span></td><td>Traduit le mail sur place (<a href="#langue">section 10</a>). Il devient <span class="btn">ORIGINAL</span> pour revenir au texte d'origine.</td></tr>
+    <tr><td><span class="btn">▲</span> <span class="btn">▼</span></td><td>Aller en haut ou en bas du mail.</td></tr>
+  </table>
+  <ul>
+    <li>Sur un mail auquel vous avez répondu, la mention <b>« Vous avez répondu le… »</b> est cliquable : elle affiche votre réponse.</li>
+    <li>Sur les photos, un <b>badge de téléchargement</b> enregistre l'image en un clic.</li>
+    <li>Les traceurs invisibles insérés dans certaines newsletters (« pixels espions ») ne bloquent pas l'affichage.</li>
+  </ul>
+</section>
+
+<section id="pj">
+  <h2>7. Pièces jointes</h2>
+  <p>Les pièces jointes s'affichent en haut du mail, avec leur icône, leur nom et leur poids.</p>
+  <ul>
+    <li><b>Un clic</b> ouvre l'aperçu dans la fenêtre du mail : PDF, Word, Excel, OpenDocument, PowerPoint, images et vidéos.</li>
+    <li>Le bouton <span class="btn">Plein écran</span> agrandit l'aperçu ; <span class="btn">Retour à la page</span> revient au mail.</li>
+    <li>Pour les images et les PDF, les flèches <span class="btn">◀</span> <span class="btn">▶</span> passent d'une photo ou d'une page à l'autre. Les touches directionnelles <kbd>←</kbd> <kbd>→</kbd> font la même chose.</li>
+    <li><b>Zoom :</b> boutons <span class="btn">+</span> <span class="btn">−</span>, ou touches <kbd>+</kbd> et <kbd>−</kbd> du clavier.</li>
+    <li>La <b>petite flèche</b> à côté d'une pièce jointe l'ouvre avec le logiciel habituel de Windows.</li>
+    <li>Enregistrement : une seule pièce jointe, une sélection (<b>Tout sélectionner</b> / <b>Tout désélectionner</b>) ou toutes à la fois, dans le dossier de votre choix (<b>Parcourir</b>).</li>
+  </ul>
+</section>
+
+<section id="redaction">
+  <h2>8. Écrire un mail</h2>
+  <p>Cliquez sur <span class="btn">NOUVEAU</span>, <span class="btn">RÉPONDRE</span> (<kbd>Ctrl</kbd>+<kbd>R</kbd>), <span class="btn">RÉP. À TOUS</span>, <span class="btn">TRANSFERT</span> ou <span class="btn">RENVOYER</span>.</p>
+  <ul>
+    <li><b>Destinataires :</b> les adresses se complètent pendant la frappe. Cliquer sur l'étiquette À, Cc ou Cci ouvre le carnet d'adresses pour choisir les destinataires.</li>
+    <li><b>Mise en forme :</b> boutons <span class="btn">Gras</span> <span class="btn">Italique</span> <span class="btn">Souligné</span> <span class="btn">Barré</span> <span class="btn">Couleur</span> <span class="btn">Émoticônes</span> <span class="btn">Langue</span>, ainsi que la taille de la police.</li>
+    <li><b>Pièces jointes :</b> elles s'affichent dans une colonne à droite. La petite croix rouge retire une pièce jointe.</li>
+    <li><span class="btn">Accusé de réception</span> : enfoncé, il demande un accusé de lecture au destinataire.</li>
+  </ul>
+  <h3>Deux façons d'envoyer</h3>
+  <table>
+    <tr><th>Bouton</th><th>Effet</th></tr>
+    <tr><td><span class="btn">Envoyer</span> ou <kbd>Ctrl</kbd>+<kbd>Entrée</kbd></td><td>Met le mail en file d'attente : il part après le délai choisi avec <span class="btn">DÉLAI</span>. Vous pouvez encore changer d'avis pendant ce temps.</td></tr>
+    <tr><td><span class="btn">Envoi rapide</span></td><td>Envoie tout de suite, sans tenir compte du délai.</td></tr>
+  </table>
+</section>
+
+<section id="delai">
+  <h2>9. Envoi différé (DÉLAI)</h2>
+  <p>Le bouton <span class="btn">DÉLAI</span>, en bas de la fenêtre, règle le délai appliqué au bouton <b>Envoyer</b> :</p>
+  <ul>
+    <li><b>1 minute</b>, <b>15 minutes</b> ou <b>30 minutes</b> ;</li>
+    <li><b>Heure précise</b>, au format HH.MM (par exemple <code>08.00</code>). Si l'heure est déjà passée, le mail part le lendemain à cette heure-là.</li>
+  </ul>
+  <p>Le délai choisi reste affiché sur le bouton (« DÉLAI 15mn », « DÉLAI 08.00 »…). Les mails en attente sont indiqués dans la barre du bas.</p>
+  <div class="note"><b>Astuce :</b> un délai d'une minute suffit pour rattraper un mail parti trop vite, une pièce jointe oubliée ou un mauvais destinataire.</div>
+</section>
+
+<section id="langue">
+  <h2>10. Orthographe, grammaire, traduction</h2>
+  <h3>Orthographe pendant la frappe (gratuit)</h3>
+  <p>Les mots inconnus sont soulignés pendant que vous écrivez. Faites un <b>clic droit</b> sur un mot souligné : les corrections proposées s'affichent en haut du menu. Les dictionnaires français (orthographe classique et réformée de 1990) et anglais sont actifs ensemble. La correction fonctionne aussi dans les champs des sites web ouverts dans Courrier Adrien.</p>
+  <h3>Le bouton « Langue » de la fenêtre de rédaction</h3>
+  <p>Il ouvre une fenêtre de choix : <b>corriger</b> ou <b>traduire</b>, <b>sur cet ordinateur</b> (gratuit) ou <b>avec Claude</b> (en ligne, payant). Seul le texte que vous avez écrit est traité, jamais la citation du mail d'origine. <span class="btn">Revenir au texte d'avant</span> annule la dernière correction ou traduction.</p>
+  <table>
+    <tr><th>Outil</th><th>Ce qu'il fait</th><th>Où ça se passe</th></tr>
+    <tr><td><b>Traduction locale</b> (Firefox Translations, Mozilla)</td><td>Français ↔ anglais, mise en page conservée</td><td>Sur l'ordinateur, gratuit, rien ne part sur Internet</td></tr>
+    <tr><td><b>Grammalecte</b></td><td>Orthographe et grammaire en français. Rouge : orthographe ; bleu : grammaire. Clic sur le mot : corrections, « Ignorer », « Ajouter au dictionnaire ».</td><td>Sur l'ordinateur, gratuit. Au premier usage, Courrier Adrien propose de le télécharger (environ 7 Mo, depuis le site officiel des extensions de Mozilla).</td></tr>
+    <tr><td><b>Claude</b> (Anthropic)</td><td>Correction orthographe et grammaire, chaque modification étant montrée (supprimé barré en rouge, ajouté en vert) et à cocher ou non ; traduction dans 17 langues</td><td>En ligne et payant, avec votre propre clé d'API</td></tr>
+  </table>
+  <h3>Traduire un mail reçu</h3>
+  <p>Le bouton <span class="btn">TRADUIRE</span> du bandeau détecte la langue et traduit le mail vers l'autre langue (français ↔ anglais). Si une clé Claude est enregistrée, vous pouvez choisir « Sur cet ordinateur » ou « Avec Claude », qui traduit depuis toutes les langues. Le bouton se remplit de jaune avec le pourcentage d'avancement. Le même bouton existe dans la barre d'adresse des pages web.</p>
+  <h3>Configurer Claude (facultatif)</h3>
+  <p>Dans la fenêtre <b>Langue</b>, cliquez sur <span class="btn">Réglages-prix de Claude…</span>. Quatre boutons vous mènent directement aux pages du site platform.claude.com : création du compte, achat de crédit, plafond de dépense et création de la clé. La clé que vous copiez sur le site est collée toute seule au retour dans Courrier Adrien.</p>
+  <ul>
+    <li>Modèles : <b>Opus</b> par défaut (environ 2 centimes par mail), <b>Sonnet</b> (environ 1 centime) ou <b>Haiku</b> (moins de 0,1 centime).</li>
+    <li><span class="btn">Tester la clé</span> ne coûte rien. Le coût approximatif s'affiche après chaque opération, et un compteur suit vos dépenses (<span class="btn">Remettre le compteur à zéro</span> après un nouvel achat).</li>
+    <li>L'abonnement Claude Pro n'inclut pas ce crédit d'API.</li>
+    <li>La clé est chiffrée par Windows et illisible depuis une autre session Windows.</li>
+  </ul>
+  <div class="attention"><b>Confidentialité :</b> avec Claude, le texte concerné est envoyé à Anthropic (États-Unis). Rien n'est envoyé sans une action de votre part. Les outils locaux, eux, ne transmettent rien.</div>
+</section>
+
+<section id="macros">
+  <h2>11. Macros et modèles</h2>
+  <h3>MACROS</h3>
+  <p>Une macro écrit un texte tout prêt en un clic. Elle ouvre la fenêtre de rédaction comme le bouton choisi (Nouveau mail, Répondre, Répondre à tous, Transférer ou Renvoyer le mail sélectionné), puis insère son contenu à l'emplacement du curseur. <b>L'envoi reste manuel</b> : c'est vous qui cliquez sur Envoyer.</p>
+  <p>Dans <span class="btn">MACROS</span>, créez une macro avec <span class="btn">+</span> et choisissez son bouton de départ. Ajoutez ensuite ses étapes (<b>Ajouter</b>) : du texte, un saut de ligne, ou le contenu du presse-papiers au moment du clic. Ordonnez-les (<b>▲ Monter</b> / <b>▼ Descendre</b>), puis cliquez sur <b>Sauvegarder</b>. Chaque macro devient un bouton dans la <b>barre du bas</b>, à gauche de <span class="btn">DÉLAI</span>.</p>
+  <h3>MODÈLES</h3>
+  <p>Les modèles sont définis <b>compte par compte</b>, avec deux types : <b>Nouveau message</b> et <b>Réponse / Transfert</b>. Le modèle est appliqué automatiquement quand vous écrivez depuis ce compte.</p>
+  <ul>
+    <li>Outils de l'éditeur : <b>Couleur</b>, <b>Image</b> (logo, signature…), <b>Séparateur</b>, et <b>Curseur</b>, qui indique où placer le curseur au début de la rédaction.</li>
+    <li><b>Dupliquer le modèle nouveau message</b> le recopie dans le modèle de réponse.</li>
+    <li><b>Copier vers un autre compte</b> reprend le même modèle sur d'autres comptes (cases à cocher).</li>
+    <li>N'oubliez pas de cliquer sur <b>Sauvegarder</b>.</li>
+  </ul>
+</section>
+
+<section id="carnet">
+  <h2>12. Carnet d'adresses</h2>
+  <p>Bouton <span class="btn">ADRESSES</span>. Les contacts sont rangés dans des dossiers (<b>Nouveau</b>, <b>Renommer</b>, <b>Supprimer</b> ; <kbd>F2</kbd> pour renommer).</p>
+  <ul>
+    <li>Chaque contact peut avoir une adresse mail, un numéro de téléphone, ou les deux.</li>
+    <li>La recherche fonctionne sur le nom, l'adresse ou le numéro (par exemple « 06 12 »).</li>
+    <li><span class="btn">Écrire</span> : nouveau mail aux contacts sélectionnés. <span class="btn">SMS</span> : SMS aux contacts sélectionnés, par le téléphone relié.</li>
+    <li><span class="btn">Copier vers…</span> copie des contacts dans un autre dossier. Vous pouvez aussi les faire glisser vers ce dossier en tenant la touche <kbd>Ctrl</kbd>.</li>
+    <li><b>Import / export CSV</b> : les colonnes Téléphone, Mobile ou Portable sont reconnues. Réimporter un fichier complète les contacts déjà présents.</li>
+    <li><b>Import / export Excel</b> : un onglet par dossier (créé automatiquement s'il n'existe pas), plus un onglet avec tous les contacts à l'export.</li>
+    <li><span class="btn">Restaurer…</span> revient à un état précédent du carnet. Une sauvegarde est faite automatiquement avant chaque modification.</li>
+  </ul>
+</section>
+
+<section id="spam">
+  <h2>13. Spam</h2>
+  <p>Sur un mail indésirable, cliquez sur <span class="btn">SPAM</span> dans la barre du bas : le mail part dans le dossier spam du compte, et l'expéditeur est ajouté à une <b>liste commune à tous vos comptes</b>. Ses prochains mails iront directement en spam, quel que soit le compte qui les reçoit.</p>
+  <p>Une erreur ? Ouvrez le mail dans le dossier spam et cliquez sur <span class="btn">NON SPAM</span>. Le bouton <span class="btn">SPAM</span> de la barre du haut affiche la liste complète des expéditeurs bloqués.</p>
+  <div class="attention"><b>Attention :</b> un mail supprimé depuis un dossier spam est effacé définitivement, sans passer par la corbeille.</div>
+  <p>Courrier Adrien n'a pas de filtres automatiques (règles de tri).</p>
+</section>
+
+<section id="recherche">
+  <h2>14. Rechercher et trier</h2>
+  <ul>
+    <li><span class="btn">RECHERCHER</span> : recherche par expéditeur ou dans les en-têtes. <span class="btn">✕</span> revient à l'affichage normal.</li>
+    <li>Le <b>petit bonhomme</b> d'un mail (à droite dans la liste) affiche tous les mails de cet expéditeur, avec leur dossier.</li>
+    <li>Le bouton de tri change de mode à chaque clic : <span class="btn">CHRONO</span> (par date de réception) ou <span class="btn">EXPÉDITEUR</span> (par ordre alphabétique). Le tri choisi est mémorisé pour chaque dossier. Les mails épinglés restent toujours en haut.</li>
+    <li>Dans la <b>Corbeille</b> seulement, un troisième mode apparaît : <span class="btn">SUPPRESSION</span>. Il affiche en premier les mails supprimés le plus récemment, pour retrouver vite un mail effacé par erreur, même dans une corbeille de plusieurs centaines de mails.</li>
+  </ul>
+</section>
+
+<section id="internet">
+  <h2>15. Navigateur intégré et vidéos</h2>
+  <p>Un clic sur un lien d'un mail ouvre la page <b>dans Courrier Adrien</b>, à la place du mail. La barre d'adresse propose :</p>
+  <ul>
+    <li><span class="btn">CORPS</span> pour revenir au mail ;</li>
+    <li><span class="btn">COPIER</span> pour copier l'adresse de la page ;</li>
+    <li><span class="btn">INTERNET</span> pour ouvrir la page dans un autre navigateur, choisi dans une liste ;</li>
+    <li><span class="btn">TRADUIRE</span> et <span class="btn">PLEIN ÉCRAN</span>.</li>
+  </ul>
+  <p>Si un site refuse de s'afficher dans le panneau intégré, un bouton rouge <b>« ⚠ PAGE BLOQUÉE — OUVRIR EN EXTERNE »</b> l'ouvre dans le navigateur par défaut de Windows.</p>
+  <p>Le clic droit offre les commandes habituelles : copier l'adresse du lien ou de l'image, enregistrer l'image ou la page, etc.</p>
+  <h3>Vidéos</h3>
+  <p>Les vidéos YouTube (et Facebook, si vous vous y êtes connecté au moins une fois dans Courrier Adrien) se lisent dans le logiciel, avec <b>reprise à l'endroit où vous vous étiez arrêté</b>. <kbd>Espace</kbd> : lecture / pause.</p>
+  <h3>Téléchargements</h3>
+  <p>Les téléchargements s'affichent dans la barre du bas : progression, pause, arrêt et annulation. Cliquez sur l'icône de dossier pour choisir où ils sont enregistrés.</p>
+</section>
+
+<section id="rss">
+  <h2>16. RSS to Email</h2>
+  <p>Recevez les nouveaux articles de vos sites préférés sous forme de mails, dans le compte de votre choix.</p>
+  <ol>
+    <li>Cliquez sur <span class="btn">RSS to Email</span>.</li>
+    <li>Saisissez l'adresse d'un site, puis cliquez sur <b>Rechercher</b> : Courrier Adrien trouve son flux RSS.</li>
+    <li>Si le site n'a pas de flux, <b>Créer un flux pour cette page</b> en fabrique un, si c'est possible.</li>
+    <li>Choisissez le compte de destination et cliquez sur <b>Ajouter</b>.</li>
+  </ol>
+  <p>Autres boutons : <b>Vérifier maintenant</b>, <b>Récupérer d'anciens articles</b>, <b>Copier l'adresse</b>, <b>Renommer</b> (<kbd>F2</kbd>), <b>▲ Monter</b> / <b>▼ Descendre</b> et <b>Supprimer</b>.</p>
+</section>
+
+<section id="todo">
+  <h2>17. TODO (rappels)</h2>
+  <p>Bouton <span class="btn">TODO</span>. Saisissez le texte du rappel, la date et l'heure (format libre : <code>9.20</code>, <code>9:20</code> ou <code>22.30</code>), puis cliquez sur <b>Ajouter</b>. Vous pouvez choisir un son (bouton <b>Fichier</b>, et <b>▶</b> pour l'écouter).</p>
+  <p>À l'heure prévue, une fenêtre s'affiche avec le son. Cliquez sur <b>OK</b>, ou sur <b>Reporter</b> : dans 10 minutes, 30 minutes, 1 heure, demain à la même heure, dans une semaine, ou à une heure précise.</p>
+</section>
+
+<section id="mailing">
+  <h2>18. MAILING</h2>
+  <p>Le bouton <span class="btn">MAILING</span> ouvre un logiciel d'envoi groupé (newsletters, annonces). Chaque destinataire reçoit son propre mail. La liste peut venir d'un dossier du carnet d'adresses, d'un fichier CSV ou d'un fichier Excel.</p>
+  <div class="note"><b>Conseil :</b> c'est <b>vous</b> qui déterminez la fréquence d'envoi (par exemple, 1 mail toutes les 30 secondes). Renseignez-vous auprès de votre fournisseur de messagerie sur les fréquences qu'il autorise. Les hébergeurs surveillent les envois en nombre : gardez un rythme raisonnable, et envoyez de préférence depuis votre connexion habituelle : un envoi en masse depuis une connexion inconnue (4G, chez un ami…) peut être bloqué par l'hébergeur.</div>
+</section>
+
+<section id="tel">
+  <h2>19. Téléphone : TÉL et SMS</h2>
+  <p><span class="btn">TÉL</span> affiche l'écran de votre téléphone sur le PC ; vous pouvez le piloter à la souris. <span class="btn">SMS</span> envoie des SMS par votre téléphone, avec votre forfait, un par un.</p>
+  <div class="attention"><b>Android uniquement.</b> Les iPhone ne sont pas compatibles, car Apple ne permet pas à un PC de piloter un iPhone.</div>
+  <h3>Préparation, une seule fois, sur le téléphone</h3>
+  <ol>
+    <li><b>Paramètres › À propos du téléphone › Informations sur le logiciel</b> : touchez 7 fois « Numéro de version ». Le menu « Options pour les développeurs » apparaît.</li>
+    <li>Dans les <b>Options pour les développeurs</b>, activez le <b>Débogage USB</b>.</li>
+    <li>Branchez le téléphone en USB et acceptez le PC sur l'écran du téléphone (« Autoriser le débogage USB »).</li>
+    <li><b>Le mieux</b> est d'associer votre téléphone et votre ordinateur (Android 11 et plus), pour vous passer du câble :
+      <ul>
+        <li>dans les <b>Options pour les développeurs</b>, activez le <b>Débogage sans fil</b>, entrez dans ce menu et touchez <b>« Associer l'appareil avec un code d'association »</b>. Le téléphone affiche une adresse (par exemple <code>192.168.1.20:37000</code>) et un code à 6 chiffres ;</li>
+        <li>Courrier Adrien ne sait pas encore faire cette association lui-même. Faites-la <b>une seule fois</b> avec QtScrcpy, ou avec l'outil <code>adb</code> fourni : ouvrez une invite de commandes dans le dossier <code>%LOCALAPPDATA%\COURRIER\scrcpy</code>, tapez <code>adb pair</code> suivi de l'adresse affichée, puis saisissez le code.</li>
+      </ul>
+      Ensuite, Courrier Adrien se connecte à votre téléphone <b>en 1 clic</b>, sans câble, dès que le Débogage sans fil est activé et que l'ordinateur et le téléphone sont sur le <b>même réseau Wi-Fi</b>.</li>
+  </ol>
+  <h3>Envoyer des SMS</h3>
+  <ul>
+    <li>Choisissez les destinataires : dans le carnet (dossier entier ou contacts sélectionnés), ou depuis un fichier CSV ou Excel. Vous pouvez joindre des photos.</li>
+    <li>Réglez l'intervalle entre deux SMS (20 secondes minimum). Les opérateurs bloquent une ligne qui envoie en rafale, c'est pourquoi Courrier Adrien est réglé par défaut sur <b>30 secondes</b> (45 secondes quand des photos sont jointes, car les MMS sont plus lents).</li>
+    <li><span class="btn">LANCER L'ENVOI</span>, puis <span class="btn">PAUSE</span>, <span class="btn">ARRÊTER</span> si besoin.</li>
+    <li>Laissez le téléphone <b>allumé et déverrouillé</b> pendant l'envoi. S'il se verrouille ou si un envoi échoue, l'envoi se met en pause sans sauter de destinataire. Déverrouillez, puis cliquez sur <span class="btn">REPRENDRE</span>. Après une fermeture de la fenêtre, REPRENDRE repart au bon endroit, avec la même liste et le même message. <span class="btn">ABANDONNER</span> oublie l'envoi interrompu.</li>
+    <li>Au-delà d'environ 30 SMS en 30 minutes, Android demande normalement une confirmation. Courrier Adrien relève ce seuil pendant l'envoi, puis le remet comme avant.</li>
+  </ul>
+  <p>L'envoi automatique a été testé avec l'application Messages de Samsung. Avec une autre application SMS ou un téléphone double SIM, il peut ne pas trouver le bouton Envoyer : rien n'est alors envoyé et l'envoi se met en pause.</p>
+</section>
+
+<section id="sons">
+  <h2>20. Sons</h2>
+  <p>Le bouton <span class="btn">SONS</span> attribue un son de réception à chaque compte (<b>Fichier</b> pour le choisir, <b>▶ Lire</b> pour l'écouter, puis <b>Enregistrer</b>). Vous savez ainsi, sans regarder, quel compte vient de recevoir un mail.</p>
+</section>
+
+<section id="controle">
+  <h2>21. CONTRÔLE et CONSOLE</h2>
+  <p><span class="btn">CONTRÔLE</span> montre ce que fait le logiciel, compte par compte : relèves en cours et à venir, nombre de mails et de dossiers, images qui n'ont pas pu être téléchargées. La liste de ces images peut être nettoyée (<b>Supprimer la sélection</b>, ou touche <kbd>Suppr</kbd>).</p>
+  <p><span class="btn">CONSOLE</span> affiche le journal technique en direct. Il est utile pour comprendre un problème ou le signaler.</p>
+</section>
+
+<section id="raccourcis">
+  <h2>22. Raccourcis clavier</h2>
+  <table>
+    <tr><th>Touche</th><th>Effet</th></tr>
+    <tr><th colspan="2">Dans la liste des mails et la rédaction</th></tr>
+    <tr><td>Flèches directionnelles <kbd>↑</kbd> <kbd>↓</kbd></td><td>Mail précédent / suivant</td></tr>
+    <tr><td><kbd>Maj</kbd> / <kbd>Ctrl</kbd> + clic, <kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>Sélection multiple</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Répondre au mail affiché</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>Entrée</kbd></td><td>Envoyer (dans la fenêtre de rédaction)</td></tr>
+    <tr><th colspan="2">Dans l'aperçu d'une pièce jointe (photo, PDF, Word, Excel…)</th></tr>
+    <tr><td>Flèches directionnelles <kbd>←</kbd> <kbd>→</kbd></td><td>Photo ou page précédente / suivante</td></tr>
+    <tr><td><kbd>Page préc.</kbd> <kbd>Page suiv.</kbd></td><td>PDF : page précédente / suivante. Autres documents : défilement d'un écran</td></tr>
+    <tr><td>Flèches directionnelles <kbd>↑</kbd> <kbd>↓</kbd></td><td>Défilement vers le haut / le bas</td></tr>
+    <tr><td><kbd>Début</kbd> <kbd>Fin</kbd></td><td>Tout début / toute fin du document</td></tr>
+    <tr><td><kbd>+</kbd> <kbd>−</kbd></td><td>Zoom avant / arrière</td></tr>
+    <tr><td><kbd>Échap</kbd></td><td>Quitter le plein écran d'un PDF</td></tr>
+    <tr><th colspan="2">Ailleurs</th></tr>
+    <tr><td><kbd>Espace</kbd></td><td>Lecture / pause d'une vidéo</td></tr>
+    <tr><td><kbd>F2</kbd></td><td>Renommer (compte, dossier, flux RSS, dossier du carnet)</td></tr>
+    <tr><td><kbd>Suppr</kbd></td><td>Supprimer la sélection (fenêtres de liste)</td></tr>
+  </table>
+</section>
+
+<section id="donnees">
+  <h2>23. Vos données, désinstallation</h2>
+  <p>Tout est stocké <b>uniquement sur votre PC</b>, dans le dossier suivant :</p>
+  <p><code>%LOCALAPPDATA%\COURRIER</code></p>
+  <p>Collez ce chemin dans la barre d'adresse de l'Explorateur Windows pour l'ouvrir. Il contient vos comptes, vos mails, vos modèles, vos macros, le carnet d'adresses, les sons et vos réglages.</p>
+  <ul>
+    <li><b>Sauvegarde :</b> copiez ce dossier.</li>
+    <li><b>Désinstallation :</b> supprimez le dossier décompressé, puis le dossier <code>%LOCALAPPDATA%\COURRIER</code>. Aucune clé de registre n'est créée lors d'un lancement normal.</li>
+  </ul>
+</section>
+
+<section id="majs">
+  <h2>24. Mises à jour</h2>
+  <p>Courrier Adrien se met à jour <b>tout seul</b>. Vous n'avez rien à télécharger vous-même.</p>
+  <ol>
+    <li>Une vingtaine de secondes après le démarrage, il vérifie s'il existe une version plus récente.</li>
+    <li>Si c'est le cas, une fenêtre « Mise à jour disponible » affiche votre version et la nouvelle, avec trois choix :
+      <ul>
+        <li><b>Installer maintenant</b> : la mise à jour est téléchargée (barre de progression, bouton Annuler possible) ;</li>
+        <li><b>Plus tard</b> : elle vous sera proposée au prochain démarrage ;</li>
+        <li><b>Ignorer cette version</b> : elle ne vous sera plus proposée. La suivante le sera.</li>
+      </ul>
+    </li>
+    <li>Une fois le téléchargement terminé, Courrier Adrien se ferme normalement, installe la nouvelle version, puis <b>redémarre tout seul</b>. Une petite fenêtre « Installation de la mise à jour… » vous fait patienter quelques secondes.</li>
+    <li>Au redémarrage, un message confirme la mise à jour et la date de la nouvelle version.</li>
+  </ol>
+  <p>Si d'autres fenêtres de Courrier Adrien sont ouvertes, par exemple un mail en cours de rédaction, il ne les ferme pas d'office : il vous les liste. Choisissez <b>Je les ferme</b> (il proposera de redémarrer dès qu'elles seront fermées) ou <b>À la fermeture de COURRIER ADRIEN</b> (la mise à jour s'installera quand vous quitterez le logiciel).</p>
+  <div class="note"><b>Vos comptes, vos mails et vos réglages sont conservés.</b> Seul le programme est remplacé ; le dossier <code>%LOCALAPPDATA%\COURRIER</code> n'est jamais touché. Le mode d'emploi, lui, est mis à jour en même temps.</div>
+  <ul>
+    <li><b>Emplacement :</b> pour que la mise à jour automatique fonctionne, placez Courrier Adrien dans un dossier où vous pouvez écrire (Bureau, Documents…), pas dans « Program Files ». Sinon, il vous le signale et ouvre la page de téléchargement.</li>
+    <li><b>En cas d'échec</b> (téléchargement interrompu, fichiers bloqués par un antivirus…), rien n'est modifié : l'ancienne version reste en place, et la mise à jour vous sera proposée à nouveau au prochain démarrage. Vous pouvez aussi la télécharger à la main sur la page des versions de Courrier Adrien, indiquée dans le message.</li>
+  </ul>
+</section>
+
+<section id="probleme">
+  <h2>25. En cas de problème</h2>
+  <ul>
+    <li><b>Un mail s'affiche mal :</b> cliquez sur <span class="btn">RECHARGER</span> dans son bandeau.</li>
+    <li><b>Un compte ne reçoit plus :</b> cliquez sur le petit rond gris devant son nom, puis regardez <span class="btn">CONTRÔLE</span>.</li>
+    <li><b>Un site ne s'affiche pas :</b> utilisez <span class="btn">INTERNET</span> ou le bouton « Page bloquée ».</li>
+    <li><b>Le cache d'un compte prend trop de place :</b> <span class="btn">COMPTES</span> › <b>Vider le cache HTML</b>. Les mails eux-mêmes sont conservés.</li>
+  </ul>
+  <p>Pour signaler un bug, écrivez à <a href="mailto:adrienmel@gmail.com">adrienmel@gmail.com</a> en joignant si possible les fichiers <code>journal.txt</code>, <code>crash_traceback.txt</code> et <code>crash_natif.txt</code>, ainsi que le dossier <code>Logs</code>, tous situés dans <code>%LOCALAPPDATA%\COURRIER</code>.</p>
+</section>
+
+</main>
+</div>
+<script>
+(function () {
+  var champ = document.getElementById("champ-recherche");
+  var infos = document.getElementById("infos-recherche");
+  var sections = Array.prototype.slice.call(document.querySelectorAll("main section"));
+  var liens = Array.prototype.slice.call(document.querySelectorAll("nav ol li"));
+  var marques = [], courant = -1, minuteur = null;
+
+  // Comparaison sans accents ni majuscules : « suppression » trouve « SUPPRESSION »,
+  // « piece » trouve « pièce ».
+  function normaliser(t) {
+    return t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  }
+
+  function effacer() {
+    document.querySelectorAll("main mark").forEach(function (m) {
+      var parent = m.parentNode;
+      parent.replaceChild(document.createTextNode(m.textContent), m);
+      parent.normalize();
+    });
+    sections.forEach(function (s) { s.classList.remove("cache"); });
+    liens.forEach(function (l) { l.classList.remove("cache"); });
+    marques = []; courant = -1;
+  }
+
+  function surligner(section, cible) {
+    var parcours = document.createTreeWalker(section, NodeFilter.SHOW_TEXT, null);
+    var noeuds = [], n;
+    while ((n = parcours.nextNode())) noeuds.push(n);
+    noeuds.forEach(function (noeud) {
+      var texte = noeud.nodeValue;
+      // Caractère par caractère, pour que les positions restent celles du texte d'origine.
+      var norm = Array.prototype.map.call(texte, function (c) {
+        return normaliser(c).charAt(0) || c;
+      }).join("");
+      var pos = norm.indexOf(cible);
+      if (pos < 0) return;
+      var frag = document.createDocumentFragment(), debut = 0;
+      while (pos >= 0) {
+        frag.appendChild(document.createTextNode(texte.slice(debut, pos)));
+        var m = document.createElement("mark");
+        m.textContent = texte.slice(pos, pos + cible.length);
+        frag.appendChild(m);
+        marques.push(m);
+        debut = pos + cible.length;
+        pos = norm.indexOf(cible, debut);
+      }
+      frag.appendChild(document.createTextNode(texte.slice(debut)));
+      noeud.parentNode.replaceChild(frag, noeud);
+    });
+  }
+
+  function aller(i) {
+    if (!marques.length) return;
+    if (courant >= 0) marques[courant].classList.remove("courant");
+    courant = (i + marques.length) % marques.length;
+    marques[courant].classList.add("courant");
+    marques[courant].scrollIntoView({ block: "center" });
+    document.getElementById("pos-recherche").textContent = (courant + 1) + " / " + marques.length;
+  }
+
+  function rechercher() {
+    effacer();
+    var cible = normaliser(champ.value.trim());
+    if (cible.length < 2) { infos.textContent = ""; return; }
+    var trouvees = 0;
+    sections.forEach(function (s, i) {
+      if (normaliser(s.textContent).indexOf(cible) >= 0) {
+        surligner(s, cible);
+        trouvees++;
+      } else {
+        s.classList.add("cache");
+        if (liens[i]) liens[i].classList.add("cache");
+      }
+    });
+    if (!marques.length) {
+      infos.textContent = "Aucun résultat.";
+      return;
+    }
+    infos.innerHTML = '<span id="pos-recherche"></span> — ' + trouvees +
+      (trouvees > 1 ? " parties" : " partie") +
+      '<button type="button" id="prec" title="Précédent (Maj+Entrée)">▲</button>' +
+      '<button type="button" id="suiv" title="Suivant (Entrée)">▼</button>';
+    document.getElementById("prec").onclick = function () { aller(courant - 1); };
+    document.getElementById("suiv").onclick = function () { aller(courant + 1); };
+    aller(0);
+  }
+
+  // Retour au sommaire complet : efface la recherche, réaffiche tout et remonte en haut.
+  function retourSommaire() {
+    clearTimeout(minuteur);
+    champ.value = "";
+    effacer();
+    infos.textContent = "";
+    document.getElementById("retour-sommaire").hidden = true;
+    window.scrollTo(0, 0);
+  }
+  window.retourSommaire = retourSommaire;
+
+  // Pendant une recherche, cliquer dans le sommaire sur une partie masquée
+  // revient d'abord au sommaire complet, puis va à cette partie.
+  liens.forEach(function (li) {
+    var a = li.querySelector("a");
+    a.addEventListener("click", function () {
+      if (document.querySelector("section.cache")) {
+        var id = a.getAttribute("href");
+        retourSommaire();
+        setTimeout(function () { document.querySelector(id).scrollIntoView(); }, 0);
+      }
+    });
+  });
+
+  // Le bouton n'apparaît que pendant une recherche.
+  var btnRetour = document.getElementById("retour-sommaire");
+  new MutationObserver(function () {
+    btnRetour.hidden = !champ.value.trim();
+  }).observe(infos, { childList: true, characterData: true, subtree: true });
+  btnRetour.onclick = retourSommaire;
+
+  champ.addEventListener("input", function () {
+    clearTimeout(minuteur);
+    minuteur = setTimeout(rechercher, 200);
+  });
+  champ.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); aller(e.shiftKey ? courant - 1 : courant + 1); }
+    if (e.key === "Escape") { champ.value = ""; effacer(); infos.textContent = ""; }
+  });
+  // Ctrl+F place directement le curseur dans la case de recherche.
+  document.addEventListener("keydown", function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); champ.focus(); champ.select(); }
+  });
+})();
+</script>
+</body>
+</html>

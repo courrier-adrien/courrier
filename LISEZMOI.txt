@@ -16,6 +16,10 @@ INSTALLATION
      Certains antivirus peuvent aussi le signaler a tort : c'est un programme
      Python empaquete, sans rien d'installe sur votre PC.
 
+MODE D'EMPLOI
+  Ouvrez "MODE D'EMPLOI COURRIER ADRIEN.html" (dans ce dossier), ou cliquez
+  sur le bouton AIDE en bas a droite de COURRIER.
+
 PREMIER LANCEMENT
   La fenetre COMPTES s'ouvre toute seule. Ajoutez votre compte mail
   (choisissez votre fournisseur, entrez votre adresse et votre mot de passe),

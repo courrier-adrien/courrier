@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 21h03"
+VERSION_BUILD = "2026-10-13 23h28"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -24094,7 +24094,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 21h03")
+        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 23h28")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -26684,6 +26684,16 @@ if (typeof module === 'object') {
         btn_apropos.clicked.connect(self.ouvrir_a_propos)
         layout_bas.addWidget(btn_apropos)
 
+        # Bouton AIDE (13/10/2026, demandé) : ouvre le mode d'emploi HTML
+        # dans le navigateur par défaut (voir ouvrir_mode_emploi). Libellé
+        # court : la barre du bas déborde vite en affichage 125 %.
+        btn_aide = QPushButton("AIDE")
+        btn_aide.setStyleSheet(STYLE_BTN_BAS)
+        btn_aide.setFixedHeight(16)
+        btn_aide.setToolTip("Ouvrir le mode d'emploi de Courrier Adrien")
+        btn_aide.clicked.connect(self.ouvrir_mode_emploi)
+        layout_bas.addWidget(btn_aide)
+
         # Bouton DÉFAUT (15/09/2026, demandé) : enregistre COURRIER auprès
         # de Windows comme application de messagerie candidate (voir
         # enregistrer_client_mail_windows, déjà utilisée depuis le
@@ -28875,6 +28885,21 @@ if (typeof module === 'object') {
         except Exception:
             pass
 
+    def ouvrir_mode_emploi(self):
+        """Bouton AIDE (13/10/2026) — ouvre le mode d'emploi dans le
+        navigateur par défaut de Windows (sa case de recherche y fonctionne
+        comme sur n'importe quelle page). Le fichier est dans DOSSIER_APP :
+        C:\\COURRIER ici ; dans la version diffusée, build.bat le place dans
+        ressources\\, recopié dans %LOCALAPPDATA%\\COURRIER au lancement et
+        remis à jour à chaque nouvelle version."""
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QMessageBox
+        chemin = os.path.join(DOSSIER_APP, "MODE D'EMPLOI COURRIER ADRIEN.html")
+        if not os.path.isfile(chemin):
+            QMessageBox.warning(self, "AIDE", f"Mode d'emploi introuvable :\n{chemin}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(chemin))
+
     def ouvrir_a_propos(self):
         """Écran "À propos" (16/08/2026, demandé) — affiche le texte de la
         licence directement DANS l'application, pas seulement dans un
@@ -28912,7 +28937,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 13/10/2026 à 21h03")
+        lbl_version = QLabel("Version du 13/10/2026 à 23h28")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -33786,7 +33811,7 @@ if (typeof module === 'object') {
             if not os.path.isdir(dossier):
                 dossier = os.path.expanduser("~")
         chemin, _ = QFileDialog.getSaveFileName(
-            self, "Imprimer le mail en PDF",
+            self, "Enregistrer le mail en PDF",
             os.path.join(dossier, nom + ".pdf"), "Fichiers PDF (*.pdf)"
         )
         if not chemin:
@@ -38152,7 +38177,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
   <div id="__ligne_boutons_bandeau__" style="clear:both;margin-top:4px;display:flex;align-items:center;flex-wrap:wrap;">
     <button data-courrier-action="copier" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">COPIER</button>
     <button data-courrier-action="recharger" title="Force le retéléchargement complet de ce mail (texte + images distantes) — utile si une image reste cassée suite à un échec réseau ponctuel" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">RECHARGER</button>
-    <button id="__btn_pdf__" data-courrier-action="pdf" title="Imprimer ce mail dans un fichier PDF" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">PDF</button>
+    <button id="__btn_pdf__" data-courrier-action="pdf" title="Enregistrer ce mail en PDF" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">PDF</button>
     <button id="__btn_traduire__" data-courrier-action="traduire" title="Traduire ce mail (français ↔ anglais), sur cet ordinateur" style="font-family:Verdana;font-size:10px;background:#A52A2A;color:white;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;height:22px;line-height:16px;box-sizing:border-box;margin-right:16px;">TRADUIRE</button>
   </div>
 </div>

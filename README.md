@@ -19,6 +19,8 @@ Client mail multi-comptes pour Windows (IMAP / Outlook), écrit en Python avec P
 Rendez-vous dans l'onglet **[Releases](../../releases)**, téléchargez le zip, décompressez-le et lancez `COURRIER ADRIEN.exe`.
 Les instructions détaillées (premier lancement, téléphone, désinstallation) sont dans [LISEZMOI.txt](LISEZMOI.txt).
 
+**[Mode d'emploi complet](https://courrier-adrien.github.io/courrier/mode-emploi.html)** : toutes les fonctions, avec une case de recherche (aussi accessible dans le logiciel par le bouton AIDE).
+
 Le programme n'est pas signé numériquement : Windows SmartScreen peut afficher un avertissement
 (« Informations complémentaires » puis « Exécuter quand même »).
 
