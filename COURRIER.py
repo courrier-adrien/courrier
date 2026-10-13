@@ -420,7 +420,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 12h56"
+VERSION_BUILD = "2026-10-13 13h40"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -20031,8 +20031,13 @@ class FenetreRedaction(QDialog):
 
         # Barre de mise en forme — pilote l'éditeur CEF via document.execCommand
         from PySide6.QtWidgets import QComboBox, QColorDialog, QToolButton, QMenu
-        barre_forme = QHBoxLayout()
-        barre_forme.setSpacing(4)
+        # Retour à la ligne automatique (13/10/2026, demandé par l'utilisateur) :
+        # en QHBoxLayout, quand la place manquait (colonne des pièces jointes,
+        # affichage 125 %), Qt écrasait les boutons à la même largeur et coupait
+        # le texte des plus longs ("moticône"). Même mécanique que GestionnaireModeles.
+        conteneur_forme = QWidget()
+        barre_forme = FlowLayout(conteneur_forme, h_spacing=4, v_spacing=6)
+        barre_forme.setContentsMargins(0, 0, 0, 0)
 
         self.combo_police = QComboBox()
         self.combo_police.addItems([
@@ -20103,8 +20108,7 @@ class FenetreRedaction(QDialog):
         self.btn_langue.setFixedWidth(self.btn_langue.sizeHint().width())
         barre_forme.addWidget(self.btn_langue)
 
-        barre_forme.addStretch(1)
-        layout.addLayout(barre_forme)
+        layout.addWidget(conteneur_forme)
 
         # Corps du mail (CEF) — la colonne de pièces jointes, elle, est
         # rattachée à layout_externe plus bas, pour occuper toute la hauteur
