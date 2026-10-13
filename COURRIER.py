@@ -172,12 +172,20 @@ class PontEditeur(QObject):
     HTML, seul le préfixe 'pyBridge.' est ajouté."""
 
     def __init__(self, recevoir_html=None, debug_focus=None, rendu_visuel_termine=None,
-                 segments_traduction=None, parent=None):
+                 segments_traduction=None, evenement_grammalecte=None, parent=None):
         super().__init__(parent)
         self._recevoir_html = recevoir_html
         self._debug_focus = debug_focus
         self._rendu_visuel_termine = rendu_visuel_termine
         self._segments_traduction = segments_traduction
+        self._evenement_grammalecte = evenement_grammalecte
+
+    @Slot(str, str)
+    def evenementGrammalecte(self, type_evenement, donnees):
+        """Correction par Grammalecte (13/10/2026) : segments à vérifier,
+        bilan des soulignements, mot ajouté au dictionnaire personnel."""
+        if self._evenement_grammalecte:
+            self._evenement_grammalecte(type_evenement, donnees)
 
     @Slot(int, str)
     def segmentsTraduction(self, jeton, passages_json):
@@ -420,7 +428,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 17h07"
+VERSION_BUILD = "2026-10-13 19h17"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -18635,6 +18643,7 @@ JS_TRADUCTION_REDACTION = r"""
   }
   function trCollecterRedaction(jeton) {
       var zone = document.getElementById('zone-edition');
+      if (typeof _glRetirerMarques === 'function') _glRetirerMarques(zone);
       var passages = trCollecter(jeton, zone, _trDebutCitation(zone));
       if (pyBridge) pyBridge.segmentsTraduction(jeton, JSON.stringify(passages));
   }
@@ -19526,12 +19535,11 @@ class DialogueLangue(QDialog):
 
     def _mettre_a_jour(self):
         corriger = self.radio_corriger.isChecked()
-        # La correction "sur cet ordinateur" se fait déjà pendant la frappe
-        # (mots soulignés) : la correction complète passe par Claude.
-        self.radio_local.setEnabled(not corriger)
-        if corriger and self.radio_local.isChecked():
-            self.radio_claude.setChecked(True)
-            return  # _mettre_a_jour est rappelé par le changement de bouton
+        # Correction "sur cet ordinateur" : Grammalecte (français seulement).
+        self.radio_local.setText(
+            "Cet ordinateur — Grammalecte : gratuit, rien ne sort de l'ordinateur, français seulement"
+            if corriger else
+            "Cet ordinateur — gratuit, rien ne sort de l'ordinateur, français ↔ anglais seulement")
         claude = self.radio_claude.isChecked()
         langues = LANGUES_CLAUDE if claude else ["anglais", "français"]
         voulue = self._langue_voulue
@@ -19542,10 +19550,15 @@ class DialogueLangue(QDialog):
         self.combo_langue.blockSignals(False)
         self.lbl_langue.setVisible(not corriger)
         self.combo_langue.setVisible(not corriger)
-        if corriger:
+        if corriger and not claude:
+            info = ("Grammalecte souligne les fautes d'orthographe (en rouge) et de grammaire (en bleu) de "
+                    "votre texte (pas la citation) ; cliquez sur un mot souligné pour choisir la correction.")
+            if not grammalecte_installe():
+                info += (" Au premier usage, il est téléchargé depuis le site des extensions de Mozilla "
+                         "(≈ 7 Mo, gratuit, licence GPL 3) : il n'est pas fourni avec Courrier Adrien.")
+        elif corriger:
             info = ("Claude corrige votre texte (pas la citation du mail d'origine) ; vous relisez chaque "
-                    "correction avant de l'appliquer. Les mots inconnus sont déjà soulignés pendant la frappe, "
-                    "gratuitement.")
+                    "correction avant de l'appliquer.")
         elif claude:
             info = "Claude traduit votre texte (pas la citation du mail d'origine) vers la langue choisie."
         else:
@@ -19724,6 +19737,558 @@ def js_taille_police_px(px):
         "convertir(zone);"
         "})();" % int(px)
     )
+
+
+# ---------------------------------------------------------------------------
+# Grammalecte, téléchargé à la demande (13/10/2026) — correction française
+# ---------------------------------------------------------------------------
+# Grammalecte (Olivier R., publié par Algoo) est sous GPL 3, licence
+# incompatible avec celle de Courrier Adrien : il n'est NI fourni NI
+# distribué avec Courrier Adrien. C'est l'utilisateur qui le télécharge, à sa
+# demande, depuis le site officiel des extensions de Mozilla (option retenue
+# après accord téléphonique avec Grammalecte le 13/10/2026). Courrier Adrien
+# en fait tourner le moteur JavaScript (celui de l'extension Firefox) dans une
+# page QtWebEngine invisible, avec son propre profil, comme la traduction.
+DOSSIER_GRAMMALECTE = os.path.join(DOSSIER_APP, "GRAMMALECTE")
+URL_API_GRAMMALECTE = "https://addons.mozilla.org/api/v5/addons/addon/grammalecte-fr/"
+URL_PAGE_GRAMMALECTE = "https://addons.mozilla.org/fr/firefox/addon/grammalecte-fr/"
+FICHIER_DICTIONNAIRE_PERSO = os.path.join(DOSSIER_APP, "dictionnaire_perso.json")
+NB_MAX_MOTS_SUGGESTIONS_GRAMMALECTE = 60
+
+
+def grammalecte_installe():
+    return all(os.path.isfile(os.path.join(DOSSIER_GRAMMALECTE, *chemin.split("/")))
+               for chemin in ("gce_worker.js", "grammalecte/fr/gc_engine.js",
+                              "grammalecte/graphspell/spellchecker.js"))
+
+
+def charger_dictionnaire_perso():
+    try:
+        with open(FICHIER_DICTIONNAIRE_PERSO, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def ajouter_au_dictionnaire_perso(mot):
+    mot = (mot or "").strip()
+    if not mot:
+        return
+    mots = charger_dictionnaire_perso()
+    mots.add(mot)
+    with open(FICHIER_DICTIONNAIRE_PERSO, "w", encoding="utf-8") as f:
+        json.dump(sorted(mots), f, ensure_ascii=False, indent=1)
+
+
+# Page invisible du moteur (écrite par Courrier Adrien dans le dossier de
+# Grammalecte) : lance le worker de l'extension et répond à analyser({...}).
+PAGE_GRAMMALECTE_HTML = r"""<!DOCTYPE html>
+<!-- Écrit par Courrier Adrien (pas un fichier de Grammalecte). -->
+<html><head><meta charset="utf-8">
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+</head><body><script>
+var pont = null, travailleur = null, pret = null, attente = null, chaine = Promise.resolve();
+var BASE = location.href.replace(/[^\/]*$/, "");
+function initialiser() {
+    if (!pret) {
+        pret = new Promise(function (ok, ko) {
+            travailleur = new Worker("gce_worker.js");
+            travailleur.onerror = function (e) { pret = null; ko(new Error(e.message || "moteur introuvable")); };
+            travailleur.onmessage = function (e) {
+                var r = e.data;
+                if (r.sActionDone === "init") {
+                    if (r.bError) { pret = null; ko(new Error("initialisation impossible")); } else ok();
+                    return;
+                }
+                if (attente) attente(r);
+            };
+            // Options désactivées : peu utiles dans un mail et sources de faux
+            // positifs (apostrophe typographique, espaces, insécables).
+            travailleur.postMessage({sCommand: "init", oInfo: {}, oParam: {sExtensionPath: BASE,
+                dOptions: {apos: false, esp: false, nbsp: false}, sContext: "JavaScript"}});
+        });
+    }
+    return pret;
+}
+function analyserTexte(texte) {
+    return new Promise(function (ok, ko) {
+        var paragraphes = [];
+        attente = function (r) {
+            if (r.sActionDone !== "parseAndSpellcheck") return;
+            if (r.bError) { attente = null; ko(new Error("analyse impossible")); return; }
+            if (r.bEnd) { attente = null; ok(paragraphes); } else paragraphes.push(r.result);
+        };
+        travailleur.postMessage({sCommand: "parseAndSpellcheck", oInfo: {},
+            oParam: {sText: texte, sCountry: "FR", bDebug: false, bContext: false}});
+    });
+}
+// Les suggestions arrivent en un nombre variable de blocs, sans marque de
+// fin : une demande "getOptions" envoyée juste après sert de borne (le
+// worker traite ses messages dans l'ordre).
+function suggestions(mot) {
+    return new Promise(function (ok) {
+        var liste = [];
+        attente = function (r) {
+            if (r.sActionDone === "getSpellSuggestions" && r.result && r.result.aSugg) liste = liste.concat(r.result.aSugg);
+            else if (r.sActionDone === "getOptions") { attente = null; ok(liste); }
+        };
+        travailleur.postMessage({sCommand: "getSpellSuggestions", oInfo: {}, oParam: {sWord: mot}});
+        travailleur.postMessage({sCommand: "getOptions", oInfo: {}, oParam: {}});
+    });
+}
+async function traiter(d) {
+    try {
+        await initialiser();
+        var paragraphes = await analyserTexte(d.textes.join("\n"));
+        var mots = {};
+        paragraphes.forEach(function (p) { p.aSpellErr.forEach(function (e) { mots[e.sValue] = true; }); });
+        var liste = Object.keys(mots).slice(0, d.max_mots), sugg = {};
+        for (var i = 0; i < liste.length; i++) sugg[liste[i]] = (await suggestions(liste[i])).slice(0, 8);
+        pont.resultat(d.id, JSON.stringify({suggestions: sugg, paragraphes: paragraphes.map(function (p) {
+            return {n: p.iParaNum,
+                    gram: p.aGrammErr.map(function (e) { return [e.nStart, e.nEnd, e.sMessage, e.aSuggestions || []]; }),
+                    orth: p.aSpellErr.map(function (e) { return [e.nStart, e.nEnd, e.sValue]; })};
+        })}));
+    } catch (e) {
+        pont.resultat(d.id, JSON.stringify({erreur: String(e && e.message || e)}));
+    }
+}
+function analyser(d) { chaine = chaine.then(function () { return traiter(d); }); }
+new QWebChannel(qt.webChannelTransport, function (canal) { pont = canal.objects.pont; pont.pret(); });
+</script></body></html>
+"""
+
+
+class MoteurGrammalecte(QObject):
+    """Page QtWebEngine invisible faisant tourner le moteur JavaScript de
+    Grammalecte (extension Firefox téléchargée par l'utilisateur). Même
+    principe et même profil isolé que MoteurTraduction (le pont
+    PontTraducteur appelle _sur_page_prete / _sur_resultat)."""
+
+    def __init__(self):
+        super().__init__()
+        self._page = None
+        self._pret = False
+        self._en_attente = []
+        self._demandes = {}  # ident → (segments, rappel)
+        self._compteur = 0
+
+    def _demarrer(self):
+        from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
+        _ecrire_si_different(os.path.join(DOSSIER_GRAMMALECTE, "moteur_page.html"),
+                             PAGE_GRAMMALECTE_HTML)
+        self._profil = QWebEngineProfile(self)
+        self._page = QWebEnginePage(self._profil, self)
+        self._page.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        self._pont = PontTraducteur(self)
+        self._canal = QWebChannel(self)
+        self._canal.registerObject("pont", self._pont)
+        self._page.setWebChannel(self._canal)
+        self._page.loadFinished.connect(lambda ok: ok or self._echouer_tout(
+            "La page du moteur Grammalecte n'a pas pu être chargée."))
+        self._page.load(QUrl.fromLocalFile(os.path.join(DOSSIER_GRAMMALECTE, "moteur_page.html")))
+        print("[GRAMMALECTE] démarrage du moteur")
+
+    def _sur_page_prete(self):
+        self._pret = True
+        for demande in self._en_attente:
+            self._page.runJavaScript(f"analyser({demande});")
+        self._en_attente = []
+
+    def analyser(self, segments, rappel):
+        """rappel(erreurs au format de glAppliquer, "") ou rappel(None, message)."""
+        if not grammalecte_installe():
+            rappel(None, "Grammalecte n'est pas installé.")
+            return
+        self._compteur += 1
+        ident = self._compteur
+        self._demandes[ident] = (list(segments), rappel)
+        demande = json.dumps({"id": ident, "textes": list(segments), "max_mots": NB_MAX_MOTS_SUGGESTIONS_GRAMMALECTE})
+        if self._pret:
+            self._page.runJavaScript(f"analyser({demande});")
+        else:
+            self._en_attente.append(demande)
+            if self._page is None:
+                self._demarrer()
+        QTimer.singleShot(60000, lambda: self._expirer(ident))
+
+    def _sur_resultat(self, ident, donnees):
+        segments, rappel = self._demandes.pop(ident, (None, None))
+        if rappel is None:
+            return
+        try:
+            reponse = json.loads(donnees)
+        except Exception:
+            reponse = {"erreur": "réponse illisible du moteur"}
+        if reponse.get("erreur"):
+            print(f"[GRAMMALECTE] erreur : {reponse['erreur']}")
+            rappel(None, f"Grammalecte : {reponse['erreur']}")
+            return
+        # Positions renvoyées par le moteur JavaScript : déjà en unités
+        # UTF-16, comme le DOM de l'éditeur.
+        dictionnaire = charger_dictionnaire_perso()
+        suggestions = reponse.get("suggestions") or {}
+        erreurs = []
+        for paragraphe in reponse.get("paragraphes", []):
+            k = paragraphe.get("n", -1)
+            if not 0 <= k < len(segments):
+                continue
+            for debut, fin, message, propositions in paragraphe.get("gram", []):
+                erreurs.append({"s": k, "d": debut, "f": fin, "t": "gram", "m": message,
+                                "sg": list(propositions)[:8]})
+            for debut, fin, mot in paragraphe.get("orth", []):
+                if mot in dictionnaire:
+                    continue
+                erreurs.append({"s": k, "d": debut, "f": fin, "t": "orth", "m": f"Mot inconnu : « {mot} »",
+                                "sg": list(suggestions.get(mot) or []), "mot": mot})
+        rappel(erreurs, "")
+
+    def _expirer(self, ident):
+        _segments, rappel = self._demandes.pop(ident, (None, None))
+        if rappel is not None:
+            rappel(None, "Grammalecte n'a pas répondu (délai dépassé).")
+
+    def _echouer_tout(self, message):
+        demandes, self._demandes = self._demandes, {}
+        self._en_attente = []
+        self._page = None
+        self._pret = False
+        for _segments, rappel in demandes.values():
+            rappel(None, message)
+
+
+_moteur_grammalecte = None
+
+
+def moteur_grammalecte():
+    global _moteur_grammalecte
+    if _moteur_grammalecte is None:
+        _moteur_grammalecte = MoteurGrammalecte()
+    return _moteur_grammalecte
+
+
+class InstallateurGrammalecte(QThread):
+    """Téléchargement de l'extension Firefox officielle de Grammalecte
+    (fiche de l'API du site des extensions de Mozilla : adresse du fichier
+    et empreinte SHA-256, vérifiée), décompression sécurisée dans
+    DOSSIER_GRAMMALECTE, note de provenance."""
+    progression = Signal(int)
+    termine = Signal(str)  # "" si réussi, sinon le message d'erreur
+
+    def run(self):
+        import urllib.request, hashlib, zipfile, io, shutil
+        try:
+            with urllib.request.urlopen(URL_API_GRAMMALECTE, timeout=30, context=CONTEXTE_SSL) as r:
+                fiche = json.loads(r.read().decode("utf-8"))
+            version = fiche["current_version"]
+            fichier = version["file"]
+            morceaux, recu = [], 0
+            with urllib.request.urlopen(fichier["url"], timeout=120, context=CONTEXTE_SSL) as r:
+                total = int(r.headers.get("Content-Length") or fichier.get("size") or 0)
+                while True:
+                    bloc = r.read(65536)
+                    if not bloc:
+                        break
+                    morceaux.append(bloc)
+                    recu += len(bloc)
+                    if total:
+                        self.progression.emit(min(95, recu * 95 // total))
+            brut = b"".join(morceaux)
+            empreinte = fichier.get("hash", "")
+            if empreinte.startswith("sha256:") and hashlib.sha256(brut).hexdigest() != empreinte[7:]:
+                raise ValueError("le fichier reçu ne correspond pas à l'empreinte publiée")
+            provisoire = DOSSIER_GRAMMALECTE + ".installation"
+            shutil.rmtree(provisoire, ignore_errors=True)
+            os.makedirs(provisoire)
+            racine = os.path.realpath(provisoire)
+            with zipfile.ZipFile(io.BytesIO(brut)) as archive:
+                for nom in archive.namelist():
+                    cible = os.path.realpath(os.path.join(racine, nom))
+                    if cible != racine and not cible.startswith(racine + os.sep):
+                        raise ValueError(f"chemin suspect dans l'archive : {nom}")
+                archive.extractall(racine)
+            if not os.path.isfile(os.path.join(provisoire, "gce_worker.js")):
+                raise ValueError("le moteur est absent de l'archive téléchargée")
+            licence = (version.get("license") or {}).get("slug") or "GPL-3.0"
+            with open(os.path.join(provisoire, "PROVENANCE.txt"), "w", encoding="utf-8") as f:
+                f.write(f"Grammalecte {version.get('version', '')} — correcteur grammatical français, "
+                        f"par Olivier R. (publié par Algoo), licence {licence}.\n"
+                        f"Téléchargé à la demande de l'utilisateur le "
+                        f"{datetime.datetime.now():%d/%m/%Y à %H:%M}, depuis le site officiel des extensions "
+                        f"de Mozilla :\n{fichier['url']}\n{empreinte}\n\n"
+                        f"Grammalecte n'est pas fourni avec Courrier Adrien. Site : https://grammalecte.net/\n"
+                        f"Le fichier moteur_page.html est écrit par Courrier Adrien.\n")
+            arreter_moteur_grammalecte()
+            shutil.rmtree(DOSSIER_GRAMMALECTE, ignore_errors=True)
+            os.replace(provisoire, DOSSIER_GRAMMALECTE)
+            self.progression.emit(100)
+            print(f"[GRAMMALECTE] version {version.get('version', '')} installée dans {DOSSIER_GRAMMALECTE}")
+            self.termine.emit("")
+        except Exception as e:
+            self.termine.emit(f"Installation de Grammalecte impossible : {e}")
+
+
+def arreter_moteur_grammalecte():
+    """Oublie le moteur en cours (avant remplacement de ses fichiers)."""
+    global _moteur_grammalecte
+    _moteur_grammalecte = None
+
+
+def installer_grammalecte(parent):
+    """Propose le téléchargement de Grammalecte, puis l'installe avec une
+    barre de progression. True si Grammalecte est prêt."""
+    from PySide6.QtWidgets import QMessageBox, QProgressDialog
+    from PySide6.QtCore import QEventLoop
+    if QMessageBox.question(
+            parent, "Grammalecte",
+            "Grammalecte, le correcteur grammatical français libre (par Olivier R., publié par Algoo), "
+            "n'est pas fourni avec Courrier Adrien : il est téléchargé à votre demande, une seule fois, "
+            "depuis le site officiel des extensions de Mozilla (≈ 7 Mo).\n\n"
+            "Il est gratuit (licence GPL 3) et fonctionne ensuite entièrement sur cet ordinateur : "
+            "rien n'est envoyé sur Internet.\n\nTélécharger Grammalecte maintenant ?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        return False
+    progres = QProgressDialog("Téléchargement de Grammalecte…", "", 0, 100, parent)
+    progres.setWindowTitle("Grammalecte")
+    progres.setCancelButton(None)
+    progres.setWindowModality(Qt.WindowModality.WindowModal)
+    progres.setMinimumDuration(0)
+    progres.setValue(0)
+    resultat = {}
+    boucle = QEventLoop()
+    installateur = InstallateurGrammalecte()
+    installateur.progression.connect(progres.setValue)
+    installateur.termine.connect(lambda erreur: (resultat.update(erreur=erreur), boucle.quit()))
+    _threads_installation_grammalecte.add(installateur)
+    installateur.finished.connect(lambda i=installateur: _threads_installation_grammalecte.discard(i))
+    installateur.start()
+    boucle.exec()
+    progres.close()
+    if resultat.get("erreur"):
+        QMessageBox.warning(parent, "Grammalecte", resultat["erreur"])
+        return False
+    return grammalecte_installe()
+
+
+_threads_installation_grammalecte = set()
+
+
+CSS_GRAMMALECTE = r"""
+  span.gl-err { text-decoration-line: underline; text-decoration-style: wavy;
+                text-decoration-skip-ink: none; cursor: pointer; }
+  span.gl-orth { text-decoration-color: #e00000; }
+  span.gl-gram { text-decoration-color: #1a6fd6; }
+  span.gl-ok { text-decoration: none; cursor: auto; }
+  #gl-bulle { position: absolute; z-index: 1000; max-width: 360px;
+              background: #2a2a2a; color: white; border: 1px solid #A52A2A;
+              font-family: Verdana, sans-serif; font-size: 11px;
+              box-shadow: 0 2px 8px rgba(0,0,0,0.35); user-select: none; }
+  #gl-bulle .gl-msg { padding: 6px 8px; color: #dddddd; border-bottom: 1px solid #444; }
+  #gl-bulle .gl-choix { padding: 5px 8px; cursor: pointer; }
+  #gl-bulle .gl-choix:hover { background: #A52A2A; }
+  #gl-bulle .gl-sugg { font-weight: bold; }
+  #gl-bulle .gl-action { color: #bbbbbb; border-top: 1px solid #444; }
+"""
+
+# Côté page éditeur : découpage du texte en segments (un par paragraphe
+# visuel), soulignement des erreurs renvoyées par Python, bulle de
+# suggestions au clic. Les <span class="gl-err"> ne doivent JAMAIS partir
+# dans le mail : envoyerContenuAPython() les retire d'une copie du DOM.
+JS_GRAMMALECTE = r"""
+  var _glSegments = [];
+  var _glErreurs = [];
+  function _glZone() { return document.getElementById('zone-edition'); }
+  function _glRetirerMarques(racine) {
+      var spans = racine.querySelectorAll('span.gl-err');
+      for (var i = 0; i < spans.length; i++) _glDeballer(spans[i]);
+  }
+  function _glDeballer(sp) {
+      var parent = sp.parentNode;
+      if (!parent) return;
+      while (sp.firstChild) parent.insertBefore(sp.firstChild, sp);
+      parent.removeChild(sp);
+      parent.normalize();
+  }
+  function _glFermerBulle() {
+      var b = document.getElementById('gl-bulle');
+      if (b) b.parentNode.removeChild(b);
+  }
+  // Début de la citation (réponse/transfert) : le séparateur posé par
+  // appliquer_variables_modele. Ni lui ni ce qui suit n'est vérifié.
+  function _glDebutCitation(zone) {
+      var divs = zone.querySelectorAll('div[style]');
+      for (var i = 0; i < divs.length; i++) {
+          var st = divs[i].getAttribute('style').replace(/\s/g, '').toLowerCase();
+          if (st.indexOf('border-top:1pxsolid#999') !== -1) return divs[i];
+      }
+      return null;
+  }
+  function _glEstBloc(el) {
+      var d = window.getComputedStyle(el).display;
+      return d !== 'inline' && d !== 'inline-block' && d !== 'contents';
+  }
+  function _glExclu(noeud, zone) {
+      for (var el = noeud.parentNode; el && el !== zone; el = el.parentNode) {
+          if (el.tagName === 'BLOCKQUOTE' || el.tagName === 'STYLE' ||
+              el.tagName === 'SCRIPT' || el.contentEditable === 'false') return true;
+      }
+      return false;
+  }
+  function glCollecterSegments() {
+      _glFermerBulle();
+      var zone = _glZone();
+      _glRetirerMarques(zone);
+      var citation = _glDebutCitation(zone);
+      var segments = [], courant = null;
+      function blocDe(n) {
+          var el = n.parentNode;
+          while (el && el !== zone && !_glEstBloc(el)) el = el.parentNode;
+          return el;
+      }
+      function clore() {
+          if (courant && courant.texte.trim()) segments.push(courant);
+          courant = null;
+      }
+      var parcours = document.createTreeWalker(zone, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, null);
+      var n;
+      while ((n = parcours.nextNode())) {
+          if (citation && (n === citation ||
+              (citation.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING))) break;
+          if (n.nodeType === 1) {
+              if (n.tagName === 'BR' || n.tagName === 'IMG' || n.tagName === 'HR' || _glEstBloc(n)) clore();
+              continue;
+          }
+          if (_glExclu(n, zone)) continue;
+          var bloc = blocDe(n);
+          if (courant && bloc !== courant.bloc) clore();
+          if (!courant) courant = {bloc: bloc, texte: '', noeuds: []};
+          courant.noeuds.push({n: n, debut: courant.texte.length});
+          courant.texte += n.nodeValue.replace(/[\r\n\t]/g, ' ');
+      }
+      clore();
+      _glSegments = segments;
+      if (pyBridge) pyBridge.evenementGrammalecte('segments',
+          JSON.stringify(segments.map(function(s) { return s.texte; })));
+  }
+  function _glMarquer(seg, e) {
+      for (var i = seg.noeuds.length - 1; i >= 0; i--) {
+          var info = seg.noeuds[i], n = info.n, lg = n.nodeValue.length;
+          var a = Math.max(e.d, info.debut), b = Math.min(e.f, info.debut + lg);
+          if (a >= b) continue;
+          var la = a - info.debut, lb = b - info.debut;
+          if (lb < lg) n.splitText(lb);
+          var milieu = la > 0 ? n.splitText(la) : n;
+          var sp = document.createElement('span');
+          sp.className = 'gl-err gl-' + e.t;
+          sp.setAttribute('data-gl', e.id);
+          milieu.parentNode.insertBefore(sp, milieu);
+          sp.appendChild(milieu);
+      }
+  }
+  function glAppliquer(erreurs) {
+      _glErreurs = erreurs;
+      var parSegment = {};
+      erreurs.forEach(function(e, i) {
+          e.id = i;
+          (parSegment[e.s] = parSegment[e.s] || []).push(e);
+      });
+      var nb = 0, perimes = 0;
+      Object.keys(parSegment).forEach(function(k) {
+          var seg = _glSegments[k];
+          if (!seg) return;
+          // Texte modifié pendant la vérification : on ne souligne pas ce
+          // paragraphe, les positions renvoyées n'y correspondraient plus.
+          var actuel = seg.noeuds.map(function(x) {
+              return x.n.isConnected ? x.n.nodeValue.replace(/[\r\n\t]/g, ' ') : '\u0000';
+          }).join('');
+          if (actuel !== seg.texte) { perimes++; return; }
+          // Erreurs qui se chevauchent : on garde la première, puis on
+          // marque de la fin vers le début pour ne pas décaler les positions.
+          var liste = parSegment[k].slice().sort(function(a, b) { return a.d - b.d || b.f - a.f; });
+          var gardees = [], fin = -1;
+          liste.forEach(function(e) { if (e.d >= fin && e.f > e.d) { gardees.push(e); fin = e.f; } });
+          for (var i = gardees.length - 1; i >= 0; i--) { _glMarquer(seg, gardees[i]); nb++; }
+      });
+      if (pyBridge) pyBridge.evenementGrammalecte('bilan', JSON.stringify({nb: nb, perimes: perimes}));
+  }
+  function _glSpans(id) {
+      return _glZone().querySelectorAll('span.gl-err[data-gl="' + id + '"]');
+  }
+  function _glRemplacer(id, texte) {
+      var spans = _glSpans(id);
+      if (!spans.length) return;
+      var parent = spans[0].parentNode;
+      spans[0].parentNode.replaceChild(document.createTextNode(texte), spans[0]);
+      for (var i = 1; i < spans.length; i++) spans[i].parentNode.removeChild(spans[i]);
+      parent.normalize();
+      _glFermerBulle();
+  }
+  function _glIgnorer(id) {
+      var spans = _glSpans(id);
+      for (var i = 0; i < spans.length; i++) _glDeballer(spans[i]);
+      _glFermerBulle();
+  }
+  function _glIgnorerMot(mot) {
+      _glErreurs.forEach(function(e) { if (e.t === 'orth' && e.mot === mot) _glIgnorer(e.id); });
+  }
+  function _glChoix(bulle, libelle, classe, action) {
+      var x = document.createElement('div');
+      x.className = 'gl-choix ' + classe;
+      x.textContent = libelle;
+      x.addEventListener('click', action);
+      bulle.appendChild(x);
+  }
+  function _glOuvrirBulle(sp) {
+      _glFermerBulle();
+      var e = _glErreurs[+sp.getAttribute('data-gl')];
+      if (!e) return;
+      var b = document.createElement('div');
+      b.id = 'gl-bulle';
+      // Ne pas voler le focus/la sélection de la zone d'édition.
+      b.addEventListener('mousedown', function(ev) { ev.preventDefault(); });
+      var msg = document.createElement('div');
+      msg.className = 'gl-msg';
+      msg.textContent = e.m;
+      b.appendChild(msg);
+      (e.sg || []).slice(0, 8).forEach(function(s) {
+          _glChoix(b, s, 'gl-sugg', function() { _glRemplacer(e.id, s); });
+      });
+      _glChoix(b, 'Ignorer', 'gl-action', function() { _glIgnorer(e.id); });
+      if (e.t === 'orth') {
+          _glChoix(b, 'Ajouter au dictionnaire', 'gl-action', function() {
+              if (pyBridge) pyBridge.evenementGrammalecte('ajouter_mot', e.mot);
+              _glIgnorerMot(e.mot);
+          });
+      }
+      document.body.appendChild(b);
+      var r = sp.getBoundingClientRect();
+      var gauche = Math.min(r.left, document.documentElement.clientWidth - b.offsetWidth - 4);
+      b.style.left = (Math.max(0, gauche) + window.scrollX) + 'px';
+      b.style.top = (r.bottom + window.scrollY + 4) + 'px';
+  }
+  _glZone().addEventListener('click', function(ev) {
+      var sp = ev.target.closest ? ev.target.closest('span.gl-err') : null;
+      if (sp) _glOuvrirBulle(sp); else _glFermerBulle();
+  });
+  // Frappe dans un mot souligné : le soulignement n'a plus de sens. On se
+  // contente de le neutraliser (classe gl-ok) sans toucher au DOM, sinon
+  // déplacer le nœud texte ferait sauter le curseur en pleine frappe ; le
+  // <span> restant est retiré à l'envoi comme les autres.
+  _glZone().addEventListener('input', function() {
+      _glFermerBulle();
+      var sel = window.getSelection();
+      var n = sel && sel.anchorNode;
+      var el = n && (n.nodeType === 1 ? n : n.parentNode);
+      var sp = el && el.closest ? el.closest('span.gl-err') : null;
+      if (!sp) return;
+      var spans = _glSpans(sp.getAttribute('data-gl'));
+      for (var i = 0; i < spans.length; i++) {
+          spans[i].className = 'gl-err gl-ok';
+          spans[i].removeAttribute('data-gl');
+      }
+  });
+  document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape') _glFermerBulle(); });
+"""
 
 
 class FenetreRedaction(QDialog):
@@ -20382,6 +20947,7 @@ class FenetreRedaction(QDialog):
       box-sizing: border-box;
   }}
   img {{ max-width: 100%; }}
+{CSS_GRAMMALECTE}
 </style></head>
 <body>
 <div id="zone-edition" contenteditable="true">{corps}</div>
@@ -20389,6 +20955,7 @@ class FenetreRedaction(QDialog):
   var pyBridge = null;
 {JS_TRADUCTION_DOM}
 {JS_TRADUCTION_REDACTION}
+{JS_GRAMMALECTE}
   new QWebChannel(qt.webChannelTransport, function(channel) {{
       pyBridge = channel.objects.pyBridge;
       if (document.readyState === 'complete') {{ _mesurerRenduVisuelEditeur(); }}
@@ -20471,8 +21038,12 @@ class FenetreRedaction(QDialog):
   // que le focus Qt/natif est bien établi avant de poser la sélection DOM.
   // Exposer le contenu courant à Python via le pont QWebChannel (pyBridge),
   // qui remplace le binding JS direct de cefpython3.
+  // Les soulignements Grammalecte sont retirés d'une COPIE du DOM : ils ne
+  // partent jamais dans le mail, et restent visibles si l'envoi échoue.
   function envoyerContenuAPython() {{
-      var html = document.getElementById('zone-edition').innerHTML;
+      var copie = document.getElementById('zone-edition').cloneNode(true);
+      _glRetirerMarques(copie);
+      var html = copie.innerHTML;
       if (pyBridge) pyBridge.recevoir_html_courant(html);
   }}
 </script>
@@ -20517,6 +21088,9 @@ class FenetreRedaction(QDialog):
             self._traduction_faite = False
             self._statut_traduction("Texte d'avant rétabli.", "#80c080")
             return
+        if choix["action"] == "corriger" and choix["moteur"] == "local":
+            self._lancer_grammalecte()
+            return
         if choix["moteur"] == "claude":
             if not preparer_claude(self):
                 return
@@ -20529,6 +21103,63 @@ class FenetreRedaction(QDialog):
             operation = {"type": "local", "de": de, "vers": vers}
         operation.update(bouton=self.btn_langue, libelle=" Langue ")
         self._lancer_operation_redaction(operation)
+
+    def _lancer_grammalecte(self):
+        """Correction par Grammalecte : installation au premier usage, puis
+        le JS découpe le texte (citation exclue) et l'envoie par
+        evenementGrammalecte("segments", ...)."""
+        if not grammalecte_installe() and not installer_grammalecte(self):
+            return
+        self._grammalecte_en_cours = True
+        self._progression_bouton(self.btn_langue, " Langue ", 0)
+        self._statut_traduction("Correction par Grammalecte en cours…")
+        self.webview.page().runJavaScript("glCollecterSegments();")
+
+    def _sur_evenement_grammalecte(self, type_evenement, donnees):
+        if type_evenement == "segments":
+            try:
+                segments = json.loads(donnees)
+            except Exception:
+                segments = []
+            if not segments:
+                self._progression_bouton(self.btn_langue, " Langue ", None)
+                self._statut_traduction("Rien à corriger.", "#80c080")
+                return
+            if detecter_langue_fr_en(" ".join(segments)) == "en":
+                self._progression_bouton(self.btn_langue, " Langue ", None)
+                self._statut_traduction("Grammalecte ne corrige que le français : pour l'anglais, "
+                                        "choisissez Claude.", "#e0a050")
+                return
+
+            def rappel(erreurs, erreur):
+                try:
+                    self._progression_bouton(self.btn_langue, " Langue ", None)
+                    if erreur:
+                        self._statut_traduction(erreur, "#e08080")
+                        return
+                    self.webview.page().runJavaScript(f"glAppliquer({json.dumps(erreurs)});")
+                except RuntimeError:
+                    pass  # fenêtre fermée entre-temps
+
+            moteur_grammalecte().analyser(segments, rappel)
+        elif type_evenement == "bilan":
+            try:
+                bilan = json.loads(donnees)
+            except Exception:
+                return
+            nb = bilan.get("nb", 0)
+            if bilan.get("perimes"):
+                self._statut_traduction("Texte modifié pendant la correction : relancez Langue → Corriger.")
+            elif nb == 0:
+                self._statut_traduction("Grammalecte : aucune faute détectée.", "#80c080")
+            else:
+                self._statut_traduction(f"Grammalecte : {nb} faute{'s' if nb > 1 else ''} — "
+                                        "cliquez sur le mot souligné.")
+        elif type_evenement == "ajouter_mot":
+            try:
+                ajouter_au_dictionnaire_perso(donnees)
+            except Exception as e:
+                self._statut_traduction(f"Dictionnaire personnel non enregistré : {e}", "#e08080")
 
     def _progression_bouton(self, bouton, libelle, pourcentage):
         """Bouton rempli de gauche à droite du jaune des mails non lus
@@ -20821,6 +21452,7 @@ class FenetreRedaction(QDialog):
             debug_focus=self._debug_focus_etat,
             rendu_visuel_termine=self._sur_rendu_visuel_termine,
             segments_traduction=self._sur_segments_traduction,
+            evenement_grammalecte=self._sur_evenement_grammalecte,
         )
         self._channel = QWebChannel()
         self._channel.registerObject("pyBridge", self._pont)
@@ -23412,7 +24044,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 17h07")
+        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 19h17")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -28217,9 +28849,13 @@ if (typeof module === 'object') {
         layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(12)
 
-        lbl_titre = QLabel("COURRIER ADRIEN v1")
+        lbl_titre = QLabel("COURRIER ADRIEN")
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
+
+        lbl_version = QLabel("Version du 13/10/2026 à 19h17")
+        lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
+        layout.addWidget(lbl_version)
 
         lbl_sous_titre = QLabel("Client mail multi-comptes IMAP")
         lbl_sous_titre.setStyleSheet("color: #bbbbbb; font-size: 13px;")
