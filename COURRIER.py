@@ -420,7 +420,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 16h14"
+VERSION_BUILD = "2026-10-13 16h49"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -19695,6 +19695,37 @@ class DialogueTraductionLecture(QDialog):
         self.accept()
 
 
+def js_taille_police_px(px):
+    """JavaScript qui applique une taille de police EXACTE en pixels dans
+    l'éditeur 'zone-edition' (13/10/2026, demandé par l'utilisateur — les
+    tailles 8 et 9, 10 et 11, 14 et 16 donnaient le même résultat).
+
+    document.execCommand('fontSize') n'accepte que l'échelle HTML historique
+    1-7 (10, 13, 16, 18, 24, 32, 48 px) : on demande la taille 7, puis chaque
+    <font size="7"> ainsi produit reçoit la vraie taille en style. Un
+    MutationObserver fait de même pour le texte tapé APRÈS avoir choisi une
+    taille sans sélection (Chromium ne crée la balise qu'à la frappe). On
+    garde l'élément <font> (seul l'attribut change) pour ne pas déplacer le
+    curseur pendant la frappe."""
+    return (
+        "(function(){"
+        "var zone=document.getElementById('zone-edition');"
+        "window._taillePoliceDemandee=%d;"
+        "function convertir(racine){"
+        " racine.querySelectorAll('font[size=\"7\"]').forEach(function(f){"
+        "  f.style.fontSize=window._taillePoliceDemandee+'px'; f.removeAttribute('size');});}"
+        "if(!window._observateurTaillePolice){"
+        " window._observateurTaillePolice=new MutationObserver(function(){convertir(zone);});"
+        " window._observateurTaillePolice.observe(zone,{childList:true,subtree:true,"
+        "  attributes:true,attributeFilter:['size']});}"
+        "zone.focus();"
+        "document.execCommand('styleWithCSS',false,false);"
+        "document.execCommand('fontSize',false,'7');"
+        "convertir(zone);"
+        "})();" % int(px)
+    )
+
+
 class FenetreRedaction(QDialog):
     reponse_envoyee = Signal(object, str, str)  # uid du mail original, date RFC2822, dossier_imap
 
@@ -20633,16 +20664,13 @@ class FenetreRedaction(QDialog):
         self._executer_commande_editeur("fontName", nom_police)
 
     def _appliquer_taille(self, taille_texte):
-        """document.execCommand('fontSize') n'accepte que des tailles 1-7
-        (échelle HTML historique) ; on convertit donc le px réel choisi
-        en taille la plus proche sur cette échelle."""
+        """Taille exacte en pixels (voir js_taille_police_px)."""
         try:
             px = int(taille_texte)
         except ValueError:
             return
-        echelle = [(8, 1), (10, 2), (12, 3), (14, 4), (18, 5), (24, 6), (32, 7)]
-        taille_html = min(echelle, key=lambda t: abs(t[0] - px))[1]
-        self._executer_commande_editeur("fontSize", str(taille_html))
+        if self._chargement_termine:
+            self.webview.page().runJavaScript(js_taille_police_px(px))
 
     def _choisir_couleur(self):
         from PySide6.QtWidgets import QColorDialog
@@ -22044,7 +22072,8 @@ class GestionnaireModeles(QDialog):
         # Transfert" (10/08/2026, demandé par l'utilisateur) : logique
         # puisque ce bouton copie justement le contenu de l'autre onglet —
         # sa place naturelle est à côté des deux boutons d'onglet, pas dans
-        # le groupe d'actions à droite.
+        # le groupe d'actions à droite. Copie toujours Nouveau message vers
+        # Réponse / Transfert (voir _copier_autre_modele, corrigé le 13/10/2026).
         btn_copier_autre = QPushButton(" Dupliquer le modèle nouveau message ")
         btn_copier_autre.setStyleSheet(STYLE_BOUTON)
         btn_copier_autre.clicked.connect(self._copier_autre_modele)
@@ -22298,13 +22327,13 @@ class GestionnaireModeles(QDialog):
         self.webview.page().runJavaScript(js)
 
     def _appliquer_taille(self, taille_texte):
+        """Taille exacte en pixels (voir js_taille_police_px)."""
         try:
             px = int(taille_texte)
         except ValueError:
             return
-        echelle = [(8, 1), (10, 2), (12, 3), (14, 4), (18, 5), (24, 6), (32, 7)]
-        taille_html = min(echelle, key=lambda t: abs(t[0] - px))[1]
-        self._executer_commande_editeur("fontSize", str(taille_html))
+        if self._chargement_termine:
+            self.webview.page().runJavaScript(js_taille_police_px(px))
 
     def _choisir_couleur(self):
         from PySide6.QtWidgets import QColorDialog
@@ -22398,17 +22427,65 @@ class GestionnaireModeles(QDialog):
         self.webview.setFocus()  # même correctif que _inserer_curseur (10/08/2026)
 
     def _copier_autre_modele(self):
-        """Copie le contenu de l'autre onglet (Nouveau ↔ Réponse) du même
-        compte — utile car les deux partagent souvent la même bannière, le
-        même séparateur et la même signature ; seule la citation change,
-        et elle est ajoutée automatiquement, pas besoin de la dupliquer."""
-        if not self._chargement_termine:
+        """Bouton "Dupliquer le modèle nouveau message" : copie le modèle
+        Nouveau message dans Réponse / Transfert du même compte — utile car
+        les deux partagent souvent la même bannière, le même séparateur et la
+        même signature ; seule la citation change, et elle est ajoutée
+        automatiquement.
+
+        Corrigé le 13/10/2026 (remontée de l'utilisateur) : le bouton
+        copiait jusqu'ici "l'autre onglet" dans l'onglet affiché. Cliqué
+        depuis Nouveau message, il remplaçait donc ce modèle par celui de
+        Réponse / Transfert — et la sauvegarde silencieuse de la fermeture
+        rendait cette perte définitive. Désormais il fait toujours ce que dit
+        son nom, quel que soit l'onglet affiché, et ne touche jamais au
+        modèle Nouveau message. Capture d'abord l'écran en cours, pour copier
+        la dernière version du modèle Nouveau message."""
+        if not self.adresse_courante:
             return
-        autre = "reponse" if self.emplacement_courant == "nouveau" else "nouveau"
-        html_source = self.donnees.get(self.adresse_courante, {}).get(autre, "")
-        html_avec_chip = (html_source or "").replace("{{CURSEUR}}", self._html_chip_curseur()) or "<br>"
-        js = f"document.getElementById('zone-edition').innerHTML = {json.dumps(html_avec_chip)};"
-        self.webview.page().runJavaScript(js)
+        self._capturer_puis(self._dupliquer_nouveau_vers_reponse)
+
+    def _dupliquer_nouveau_vers_reponse(self):
+        import re
+        from PySide6.QtWidgets import QMessageBox
+        modeles = self.donnees.setdefault(self.adresse_courante, {})
+        source = modeles.get("nouveau", "") or ""
+        actuel = modeles.get("reponse", "") or ""
+
+        def _vide(html):
+            return not re.sub(r"<br\s*/?>|&nbsp;|\s|</?(div|p|span)[^>]*>", "", html)
+
+        def _boite(icone, texte):
+            boite = QMessageBox(self)
+            boite.setIcon(icone)
+            boite.setWindowTitle("Dupliquer le modèle")
+            boite.setText(texte)
+            boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                                "QLabel { color: white; }" + STYLE_BOUTON)
+            return boite
+
+        if _vide(source):
+            _boite(QMessageBox.Icon.Information,
+                   "Le modèle Nouveau message de ce compte est vide : rien à dupliquer.").exec()
+            return
+        if not _vide(actuel) and actuel != source:
+            boite = _boite(QMessageBox.Icon.Question,
+                           "Le modèle Réponse / Transfert de ce compte n'est pas vide.\n\n"
+                           "Le remplacer par une copie du modèle Nouveau message ?")
+            b_remplacer = boite.addButton("Remplacer", QMessageBox.ButtonRole.AcceptRole)
+            boite.addButton("Annuler", QMessageBox.ButtonRole.RejectRole)
+            boite.exec()
+            if boite.clickedButton() is not b_remplacer:
+                return
+        modeles["reponse"] = source
+        # Affiche le résultat dans l'onglet Réponse / Transfert
+        if self.emplacement_courant == "reponse":
+            self._charger_emplacement_actuel()
+        else:
+            self._appliquer_onglet("reponse")
+        self.lbl_statut.setStyleSheet("color: #80c080; font-family: Verdana; font-size: 11px;")
+        self.lbl_statut.setText("Modèle Nouveau message copié dans Réponse / Transfert. "
+                                "Cliquez sur Sauvegarder pour l'enregistrer.")
 
     def _copier_vers_autre_compte(self):
         """Copie les modèles du compte affiché vers un ou plusieurs autres
@@ -23320,7 +23397,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 16h14")
+        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 16h49")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))

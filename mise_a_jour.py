@@ -168,7 +168,7 @@ for ($i = 0; $i -lt 20 -and -not $deCote; $i++) {
     } catch { Start-Sleep -Seconds 2 }
 }
 if (-not $deCote) {
-    Ecrire-Resultat "ECHEC`nLes fichiers de COURRIER sont restés verrouillés (antivirus ?). Rien n'a été modifié."
+    Ecrire-Resultat "ECHEC`nLes fichiers de COURRIER ADRIEN sont restés verrouillés (antivirus ?). Rien n'a été modifié."
 } else {
     try {
         Copy-Item -LiteralPath (Join-Path $Nouvelle "_internal") -Destination $interne -Recurse -Force
@@ -207,10 +207,10 @@ $rouge = [System.Drawing.ColorTranslator]::FromHtml("#A52A2A")
 $fond = [System.Drawing.ColorTranslator]::FromHtml("#2a2a2a")
 
 $f = New-Object System.Windows.Forms.Form
-$f.Text = "Mise à jour de COURRIER"
+$f.Text = "Mise à jour de COURRIER ADRIEN"
 $f.FormBorderStyle = "None"
 $f.StartPosition = "CenterScreen"
-$f.ClientSize = New-Object System.Drawing.Size(440, 130)
+$f.ClientSize = New-Object System.Drawing.Size(460, 140)
 $f.BackColor = $rouge          # liseré rouge autour du panneau sombre
 $f.TopMost = $true
 $f.ShowInTaskbar = $true
@@ -218,7 +218,7 @@ $f.ShowInTaskbar = $true
 $panneau = New-Object System.Windows.Forms.Panel
 $panneau.BackColor = $fond
 $panneau.Location = New-Object System.Drawing.Point(2, 2)
-$panneau.Size = New-Object System.Drawing.Size(436, 126)
+$panneau.Size = New-Object System.Drawing.Size(456, 136)
 $f.Controls.Add($panneau)
 
 $texte = New-Object System.Windows.Forms.Label
@@ -226,17 +226,17 @@ $texte.ForeColor = [System.Drawing.Color]::White
 $texte.Font = New-Object System.Drawing.Font("Verdana", 10)
 $texte.TextAlign = "MiddleCenter"
 $texte.Location = New-Object System.Drawing.Point(10, 14)
-$texte.Size = New-Object System.Drawing.Size(416, 60)
+$texte.Size = New-Object System.Drawing.Size(436, 70)
 if ($Relancer -eq 1) {
-    $texte.Text = "Installation de la mise à jour de COURRIER...`nCOURRIER va redémarrer tout seul, merci de patienter."
+    $texte.Text = "Installation de la mise à jour de COURRIER ADRIEN...`nCOURRIER ADRIEN va redémarrer tout seul.`nMerci de patienter."
 } else {
-    $texte.Text = "Installation de la mise à jour de COURRIER...`nMerci de patienter."
+    $texte.Text = "Installation de la mise à jour de COURRIER ADRIEN...`nMerci de patienter."
 }
 $panneau.Controls.Add($texte)
 
 $piste = New-Object System.Windows.Forms.Panel
 $piste.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1a1a1a")
-$piste.Location = New-Object System.Drawing.Point(40, 86)
+$piste.Location = New-Object System.Drawing.Point(50, 98)
 $piste.Size = New-Object System.Drawing.Size(356, 16)
 $panneau.Controls.Add($piste)
 
@@ -326,12 +326,12 @@ class GestionnaireMiseAJour(QObject):
         shutil.rmtree(self.dossier_travail, ignore_errors=True)
         if lignes and lignes[0] == "OK":
             self._boite(QMessageBox.Icon.Information, "Mise à jour",
-                        f"COURRIER a été mis à jour (version du "
+                        f"COURRIER ADRIEN a été mis à jour (version du "
                         f"{version_lisible(self.version_actuelle)}).\n\n"
                         f"Vos comptes, mails et réglages sont conservés.").exec()
         elif lignes:
             self._boite(QMessageBox.Icon.Warning, "Mise à jour",
-                        "La mise à jour de COURRIER n'a pas pu être installée.\n\n"
+                        "La mise à jour de COURRIER ADRIEN n'a pas pu être installée.\n\n"
                         + "\n".join(lignes[1:])
                         + f"\n\nVous pouvez la télécharger à la main :\n{URL_PAGE}").exec()
 
@@ -368,13 +368,13 @@ class GestionnaireMiseAJour(QObject):
             return
         self.info = info
         boite = self._boite(QMessageBox.Icon.Information, "Mise à jour disponible",
-                            f"Une nouvelle version de COURRIER est disponible "
+                            f"Une nouvelle version de COURRIER ADRIEN est disponible "
                             f"(version du {version_lisible(info['version'])}).")
         boite.setInformativeText(
             f"Votre version : {version_lisible(self.version_actuelle)}\n"
             f"Téléchargement : environ {max(1, info['taille'] // (1024 * 1024))} Mo\n\n"
             f"Vos comptes, mails et réglages sont conservés.\n"
-            f"COURRIER se fermera puis redémarrera tout seul.")
+            f"COURRIER ADRIEN se fermera puis redémarrera tout seul.")
         b_installer = boite.addButton("Installer maintenant", QMessageBox.ButtonRole.AcceptRole)
         boite.addButton("Plus tard", QMessageBox.ButtonRole.RejectRole)
         b_ignorer = boite.addButton("Ignorer cette version", QMessageBox.ButtonRole.DestructiveRole)
@@ -402,17 +402,17 @@ class GestionnaireMiseAJour(QObject):
         if not self._installation_modifiable():
             self._boite(
                 QMessageBox.Icon.Warning, "Mise à jour",
-                f"COURRIER est installé dans un dossier protégé par Windows :\n"
+                f"COURRIER ADRIEN est installé dans un dossier protégé par Windows :\n"
                 f"{self.installation}\n\n"
                 f"La mise à jour automatique ne peut pas le modifier. Téléchargez la "
                 f"nouvelle version à la main (la page va s'ouvrir), ou déplacez le "
-                f"dossier de COURRIER dans Documents par exemple.").exec()
+                f"dossier de COURRIER ADRIEN dans Documents par exemple.").exec()
             QDesktopServices.openUrl(QUrl(URL_PAGE))
             return
         total_mo = max(1, self.info["taille"] // (1024 * 1024))
         self._progression = QProgressDialog("Téléchargement de la mise à jour...", "Annuler",
                                             0, total_mo, self.fenetre)
-        self._progression.setWindowTitle("Mise à jour de COURRIER")
+        self._progression.setWindowTitle("Mise à jour de COURRIER ADRIEN")
         self._progression.setStyleSheet("QLabel { color: white; }" + self.style_boutons)
         # Largeur finale des l'ouverture (sinon la boite s'elargit quand le texte
         # "... 120 / 337 Mo" apparait)
@@ -465,7 +465,7 @@ class GestionnaireMiseAJour(QObject):
         shutil.rmtree(self.dossier_travail, ignore_errors=True)
         self._boite(QMessageBox.Icon.Warning, "Mise à jour",
                     f"Le téléchargement de la mise à jour a échoué :\n{message}\n\n"
-                    f"Rien n'a été modifié. COURRIER vous la proposera à nouveau "
+                    f"Rien n'a été modifié. COURRIER ADRIEN vous la proposera à nouveau "
                     f"au prochain démarrage.").exec()
 
     def _sur_telechargement_fini(self, dossier_nouvelle):
@@ -493,14 +493,14 @@ class GestionnaireMiseAJour(QObject):
             titres = "\n".join(f"  - {w.windowTitle() or 'fenêtre sans titre'}" for w in autres[:8])
             boite = self._boite(QMessageBox.Icon.Warning, "Mise à jour prête",
                                 "La mise à jour est prête, mais d'autres fenêtres de "
-                                "COURRIER sont encore ouvertes :\n" + titres)
+                                "COURRIER ADRIEN sont encore ouvertes :\n" + titres)
             boite.setInformativeText("Terminez ou fermez-les (un mail en cours de rédaction "
                                      "serait perdu). Dès qu'elles seront toutes fermées, "
-                                     "COURRIER vous proposera de redémarrer.\n\n"
+                                     "COURRIER ADRIEN vous proposera de redémarrer.\n\n"
                                      "Sinon, la mise à jour s'installera quand vous "
-                                     "quitterez COURRIER.")
+                                     "quitterez COURRIER ADRIEN.")
             b_attendre = boite.addButton("Je les ferme", QMessageBox.ButtonRole.AcceptRole)
-            boite.addButton("À la fermeture de COURRIER", QMessageBox.ButtonRole.RejectRole)
+            boite.addButton("À la fermeture de COURRIER ADRIEN", QMessageBox.ButtonRole.RejectRole)
             boite.exec()
             if boite.clickedButton() is b_attendre:
                 self._attendre_fermeture_fenetres()
@@ -523,10 +523,10 @@ class GestionnaireMiseAJour(QObject):
     def _confirmer_redemarrage(self, deja_confirme):
         if not deja_confirme:
             boite = self._boite(QMessageBox.Icon.Question, "Mise à jour prête",
-                                "Les autres fenêtres sont fermées. Redémarrer COURRIER "
+                                "Les autres fenêtres sont fermées. Redémarrer COURRIER ADRIEN "
                                 "maintenant pour installer la mise à jour ?")
             b_redemarrer = boite.addButton("Redémarrer", QMessageBox.ButtonRole.AcceptRole)
-            boite.addButton("À la fermeture de COURRIER", QMessageBox.ButtonRole.RejectRole)
+            boite.addButton("À la fermeture de COURRIER ADRIEN", QMessageBox.ButtonRole.RejectRole)
             boite.exec()
             if boite.clickedButton() is not b_redemarrer:
                 return
