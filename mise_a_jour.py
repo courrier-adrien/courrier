@@ -382,8 +382,14 @@ class GestionnaireMiseAJour(QObject):
                 and w.windowType() not in (Qt.WindowType.ToolTip, Qt.WindowType.Popup)]
 
     def redemarrer(self):
+        # Tant que l'utilisateur n'a pas confirme le redemarrage, une fermeture de
+        # COURRIER par lui-meme installe la mise a jour sans relancer COURRIER.
+        self.relancer = False
         autres = self._autres_fenetres_ouvertes()
         if autres:
+            # Cette boite se ferme AVANT que l'utilisateur s'occupe des autres fenetres :
+            # tant qu'elle est affichee, elle bloque toutes les fenetres de COURRIER
+            # (impossible alors de les fermer). On surveille ensuite leur fermeture.
             titres = "\n".join(f"  - {w.windowTitle() or 'fenêtre sans titre'}" for w in autres[:8])
             boite = QMessageBox(self.fenetre)
             boite.setIcon(QMessageBox.Icon.Warning)
@@ -391,17 +397,46 @@ class GestionnaireMiseAJour(QObject):
             boite.setText("La mise à jour est prête, mais d'autres fenêtres de COURRIER sont "
                           "encore ouvertes :\n" + titres)
             boite.setInformativeText("Terminez ou fermez-les (un mail en cours de rédaction "
-                                     "serait perdu), puis cliquez sur Réessayer.\n\n"
+                                     "serait perdu). Dès qu'elles seront toutes fermées, "
+                                     "COURRIER vous proposera de redémarrer.\n\n"
                                      "Sinon, la mise à jour s'installera quand vous "
                                      "quitterez COURRIER.")
-            b_reessayer = boite.addButton("Réessayer", QMessageBox.ButtonRole.AcceptRole)
+            b_attendre = boite.addButton("Je les ferme", QMessageBox.ButtonRole.AcceptRole)
             boite.addButton("À la fermeture de COURRIER", QMessageBox.ButtonRole.RejectRole)
             boite.exec()
-            if boite.clickedButton() is b_reessayer:
-                QTimer.singleShot(0, self.redemarrer)
-            else:
-                self.relancer = False  # l'utilisateur quittera COURRIER lui-meme
+            if boite.clickedButton() is b_attendre:
+                self._attendre_fermeture_fenetres()
             return
+        self._confirmer_redemarrage(deja_confirme=True)
+
+    def _attendre_fermeture_fenetres(self):
+        if getattr(self, "_minuterie_fenetres", None) is None:
+            self._minuterie_fenetres = QTimer(self)
+            self._minuterie_fenetres.setInterval(1000)
+            self._minuterie_fenetres.timeout.connect(self._verifier_fenetres_fermees)
+        self._minuterie_fenetres.start()
+
+    def _verifier_fenetres_fermees(self):
+        if self._autres_fenetres_ouvertes():
+            return
+        self._minuterie_fenetres.stop()
+        self._confirmer_redemarrage(deja_confirme=False)
+
+    def _confirmer_redemarrage(self, deja_confirme):
+        if not deja_confirme:
+            boite = QMessageBox(self.fenetre)
+            boite.setIcon(QMessageBox.Icon.Question)
+            boite.setWindowTitle("Mise à jour prête")
+            boite.setText("Les autres fenêtres sont fermées. Redémarrer COURRIER maintenant "
+                          "pour installer la mise à jour ?")
+            b_redemarrer = boite.addButton("Redémarrer", QMessageBox.ButtonRole.AcceptRole)
+            boite.addButton("À la fermeture de COURRIER", QMessageBox.ButtonRole.RejectRole)
+            boite.exec()
+            if boite.clickedButton() is not b_redemarrer:
+                return
+            if self._autres_fenetres_ouvertes():  # rouverte entre-temps
+                self.redemarrer()
+                return
         self.relancer = True
         # Fermeture normale (enregistrements, arret propre des connexions), puis sortie.
         self.fenetre.close()
