@@ -428,7 +428,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 19h17"
+VERSION_BUILD = "2026-10-13 20h49"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -18715,6 +18715,19 @@ def franciser_menu_web(page):
                 pass
 
 
+FICHIER_CONFIG_ORTHOGRAPHE = os.path.join(DOSSIER_APP, "config_orthographe.json")
+
+
+def soulignement_orthographe_actif():
+    """Soulignement Hunspell pendant la frappe : actif sauf si l'utilisateur
+    l'a désactivé (fenêtre Langue → Corriger → Hunspell, 13/10/2026)."""
+    try:
+        with open(FICHIER_CONFIG_ORTHOGRAPHE, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("soulignement", True))
+    except Exception:
+        return True
+
+
 def activer_orthographe(profil):
     """À appeler sur chaque profil QtWebEngine où l'on écrit. Le dossier
     des dictionnaires doit avoir été indiqué AVANT le démarrage de
@@ -18725,7 +18738,56 @@ def activer_orthographe(profil):
         print(f"[ORTHOGRAPHE] aucun dictionnaire dans {DOSSIER_DICTIONNAIRES}")
         return
     profil.setSpellCheckLanguages(langues)
-    profil.setSpellCheckEnabled(True)
+    profil.setSpellCheckEnabled(soulignement_orthographe_actif())
+
+
+def regler_soulignement_orthographe(actif):
+    """Active ou désactive le soulignement pendant la frappe, tout de suite
+    et pour les prochains lancements."""
+    from PySide6.QtWebEngineCore import QWebEngineProfile
+    try:
+        with open(FICHIER_CONFIG_ORTHOGRAPHE, "w", encoding="utf-8") as f:
+            json.dump({"soulignement": bool(actif)}, f)
+    except Exception as e:
+        print(f"[ORTHOGRAPHE] réglage non enregistré : {e}")
+    for profil in (QWebEngineProfile.defaultProfile(), PROFIL_WEB_NOMME):
+        if profil is not None:
+            activer_orthographe(profil)
+
+
+# Fenêtre de rédaction : signature (bloc du trait <hr> des modèles) et liens
+# jamais vérifiés (13/10/2026) — ni soulignement Hunspell, ni Grammalecte.
+# Attributs posés par Courrier Adrien, retirés de la copie envoyée.
+JS_ORTHOGRAPHE_REDACTION = r"""
+  function _scMarquer() {
+      var zone = document.getElementById('zone-edition');
+      if (!zone) return;
+      function marquer(el) {
+          if (el.nodeType !== 1 || el.getAttribute('spellcheck') === 'false') return;
+          el.setAttribute('spellcheck', 'false');
+          el.setAttribute('data-sc-courrier', '1');
+      }
+      zone.querySelectorAll('a').forEach(marquer);
+      zone.querySelectorAll('hr').forEach(function (hr) {
+          if (hr.parentElement && hr.parentElement !== zone) { marquer(hr.parentElement); return; }
+          for (var n = hr.nextElementSibling; n; n = n.nextElementSibling) marquer(n);
+      });
+  }
+  function _scNettoyer(racine) {
+      racine.querySelectorAll('[data-sc-courrier]').forEach(function (el) {
+          el.removeAttribute('spellcheck');
+          el.removeAttribute('data-sc-courrier');
+      });
+  }
+  _scMarquer();
+  (function () {
+      var attente = null;
+      new MutationObserver(function () {
+          clearTimeout(attente);
+          attente = setTimeout(_scMarquer, 300);
+      }).observe(document.getElementById('zone-edition'), {childList: true, subtree: true});
+  })();
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -19484,12 +19546,19 @@ class DialogueLangue(QDialog):
         layout.addWidget(titre)
         self.radio_local = QRadioButton("Cet ordinateur — gratuit, rien ne sort de l'ordinateur, "
                                         "français ↔ anglais seulement")
+        self.radio_hunspell = QRadioButton("Cet ordinateur — Hunspell : orthographe seulement, "
+                                           "soulignée pendant la frappe (gratuit)")
         self.radio_claude = QRadioButton(libelle_moteur_claude())
         self._groupe_moteur = QButtonGroup(self)
-        for r in (self.radio_local, self.radio_claude):
+        for r in (self.radio_local, self.radio_hunspell, self.radio_claude):
             self._groupe_moteur.addButton(r)
             layout.addWidget(r)
-        (self.radio_claude if precedent.get("moteur") == "claude" else self.radio_local).setChecked(True)
+        {"claude": self.radio_claude, "hunspell": self.radio_hunspell}.get(
+            precedent.get("moteur"), self.radio_local).setChecked(True)
+        from PySide6.QtWidgets import QCheckBox
+        self.chk_soulignement = QCheckBox("Souligner les fautes d'orthographe pendant la frappe")
+        self.chk_soulignement.setChecked(soulignement_orthographe_actif())
+        layout.addWidget(self.chk_soulignement)
 
         ligne_langue = QHBoxLayout()
         self.lbl_langue = QLabel("Traduire vers :")
@@ -19524,7 +19593,7 @@ class DialogueLangue(QDialog):
         boutons.addWidget(btn_annuler)
         layout.addLayout(boutons)
 
-        for r in (self.radio_traduire, self.radio_corriger, self.radio_local, self.radio_claude):
+        for r in (self.radio_traduire, self.radio_corriger, self.radio_local, self.radio_hunspell, self.radio_claude):
             r.toggled.connect(self._mettre_a_jour)
         self.combo_langue.currentTextChanged.connect(self._sur_langue)
         self._mettre_a_jour()
@@ -19540,6 +19609,13 @@ class DialogueLangue(QDialog):
             "Cet ordinateur — Grammalecte : gratuit, rien ne sort de l'ordinateur, français seulement"
             if corriger else
             "Cet ordinateur — gratuit, rien ne sort de l'ordinateur, français ↔ anglais seulement")
+        # Hunspell : correction seulement (rien à traduire).
+        self.radio_hunspell.setVisible(corriger)
+        if not corriger and self.radio_hunspell.isChecked():
+            self.radio_local.setChecked(True)
+            return  # _mettre_a_jour est rappelé par le changement de bouton
+        hunspell = corriger and self.radio_hunspell.isChecked()
+        self.chk_soulignement.setVisible(hunspell)
         claude = self.radio_claude.isChecked()
         langues = LANGUES_CLAUDE if claude else ["anglais", "français"]
         voulue = self._langue_voulue
@@ -19550,7 +19626,12 @@ class DialogueLangue(QDialog):
         self.combo_langue.blockSignals(False)
         self.lbl_langue.setVisible(not corriger)
         self.combo_langue.setVisible(not corriger)
-        if corriger and not claude:
+        if hunspell:
+            info = ("Hunspell souligne en rouge les mots mal orthographiés pendant que vous écrivez "
+                    "(français et anglais) ; clic droit sur un mot souligné pour choisir la correction. "
+                    "Orthographe seulement, gratuit, sur cet ordinateur. La signature et les liens ne sont "
+                    "pas vérifiés.")
+        elif corriger and not claude:
             info = ("Grammalecte souligne les fautes d'orthographe (en rouge) et de grammaire (en bleu) de "
                     "votre texte (pas la citation) ; cliquez sur un mot souligné pour choisir la correction.")
             if not grammalecte_installe():
@@ -19586,7 +19667,9 @@ class DialogueLangue(QDialog):
     def _lancer(self):
         self.choix = {
             "action": "corriger" if self.radio_corriger.isChecked() else "traduire",
-            "moteur": "claude" if self.radio_claude.isChecked() else "local",
+            "moteur": ("claude" if self.radio_claude.isChecked() else
+                       "hunspell" if self.radio_hunspell.isChecked() else "local"),
+            "soulignement": self.chk_soulignement.isChecked(),
             "langue": self.combo_langue.currentText() or self._langue_voulue,
         }
         self._memoriser()
@@ -20097,6 +20180,10 @@ CSS_GRAMMALECTE = r"""
 JS_GRAMMALECTE = r"""
   var _glSegments = [];
   var _glErreurs = [];
+  // Fautes "Ignorées" (13/10/2026) : gardées pour ne pas réapparaître lors
+  // des revérifications automatiques ; clé = type + texte souligné + message.
+  var _glIgnores = {}, _glReverification = null;
+  function _glCle(e, seg) { return e.t + '|' + seg.texte.slice(e.d, e.f) + '|' + e.m; }
   function _glZone() { return document.getElementById('zone-edition'); }
   function _glRetirerMarques(racine) {
       var spans = racine.querySelectorAll('span.gl-err');
@@ -20131,6 +20218,7 @@ JS_GRAMMALECTE = r"""
       for (var el = noeud.parentNode; el && el !== zone; el = el.parentNode) {
           if (el.tagName === 'BLOCKQUOTE' || el.tagName === 'STYLE' ||
               el.tagName === 'SCRIPT' || el.contentEditable === 'false') return true;
+          if (el.getAttribute && el.getAttribute('spellcheck') === 'false') return true;
       }
       return false;
   }
@@ -20202,6 +20290,7 @@ JS_GRAMMALECTE = r"""
               return x.n.isConnected ? x.n.nodeValue.replace(/[\r\n\t]/g, ' ') : '\u0000';
           }).join('');
           if (actuel !== seg.texte) { perimes++; return; }
+          parSegment[k] = parSegment[k].filter(function(e) { return !_glIgnores[_glCle(e, seg)]; });
           // Erreurs qui se chevauchent : on garde la première, puis on
           // marque de la fin vers le début pour ne pas décaler les positions.
           var liste = parSegment[k].slice().sort(function(a, b) { return a.d - b.d || b.f - a.f; });
@@ -20222,8 +20311,15 @@ JS_GRAMMALECTE = r"""
       for (var i = 1; i < spans.length; i++) spans[i].parentNode.removeChild(spans[i]);
       parent.normalize();
       _glFermerBulle();
+      // Revérification automatique (13/10/2026) : une faute corrigée peut en
+      // révéler d'autres (ex. "les chienes etaient contente" : l'accord de
+      // "contente" n'est vérifiable qu'une fois "chiennes étaient" corrigés).
+      clearTimeout(_glReverification);
+      _glReverification = setTimeout(glCollecterSegments, 250);
   }
   function _glIgnorer(id) {
+      var e = _glErreurs[id], seg = e && _glSegments[e.s];
+      if (seg) _glIgnores[_glCle(e, seg)] = true;
       var spans = _glSpans(id);
       for (var i = 0; i < spans.length; i++) _glDeballer(spans[i]);
       _glFermerBulle();
@@ -20956,6 +21052,7 @@ class FenetreRedaction(QDialog):
 {JS_TRADUCTION_DOM}
 {JS_TRADUCTION_REDACTION}
 {JS_GRAMMALECTE}
+{JS_ORTHOGRAPHE_REDACTION}
   new QWebChannel(qt.webChannelTransport, function(channel) {{
       pyBridge = channel.objects.pyBridge;
       if (document.readyState === 'complete') {{ _mesurerRenduVisuelEditeur(); }}
@@ -21043,6 +21140,7 @@ class FenetreRedaction(QDialog):
   function envoyerContenuAPython() {{
       var copie = document.getElementById('zone-edition').cloneNode(true);
       _glRetirerMarques(copie);
+      _scNettoyer(copie);
       var html = copie.innerHTML;
       if (pyBridge) pyBridge.recevoir_html_courant(html);
   }}
@@ -21087,6 +21185,13 @@ class FenetreRedaction(QDialog):
             self.webview.page().runJavaScript("trRevenirRedaction();")
             self._traduction_faite = False
             self._statut_traduction("Texte d'avant rétabli.", "#80c080")
+            return
+        if choix["action"] == "corriger" and choix["moteur"] == "hunspell":
+            regler_soulignement_orthographe(choix["soulignement"])
+            self._statut_traduction(
+                "Hunspell : fautes soulignées pendant la frappe, clic droit pour corriger."
+                if choix["soulignement"] else "Soulignement des fautes pendant la frappe désactivé.",
+                "#80c080")
             return
         if choix["action"] == "corriger" and choix["moteur"] == "local":
             self._lancer_grammalecte()
@@ -24044,7 +24149,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 19h17")
+        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 20h49")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -28853,7 +28958,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 13/10/2026 à 19h17")
+        lbl_version = QLabel("Version du 13/10/2026 à 20h49")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
