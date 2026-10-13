@@ -54,6 +54,14 @@ VOS DONNEES
   (collez ce chemin dans la barre d'adresse de l'Explorateur Windows).
   Rien n'est envoye ailleurs qu'a votre fournisseur de messagerie.
 
+MISES A JOUR
+  Au demarrage, COURRIER verifie s'il existe une version plus recente et
+  vous la propose. "Installer maintenant" la telecharge, puis COURRIER se
+  ferme et redemarre tout seul, a jour. Vos comptes, mails et reglages
+  (dossier %LOCALAPPDATA%\COURRIER) ne sont jamais touches.
+  Pour que cela fonctionne, laissez le dossier de COURRIER dans un endroit
+  ou vous pouvez ecrire (Bureau, Documents...), pas dans "Program Files".
+
 DESINSTALLATION
   Supprimez le dossier decompresse, puis le dossier %LOCALAPPDATA%\COURRIER.
   Aucune cle de registre n'est creee au lancement normal.

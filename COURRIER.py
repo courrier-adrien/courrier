@@ -419,6 +419,9 @@ class PontLecture(QObject):
 # d'autre dans le fichier ne s'en servait (_EST_FROZEN/_DOSSIER_EXE
 # n'étaient référencés nulle part ailleurs). ---
 
+# Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
+VERSION_BUILD = "2026-10-13 12h10"
+
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
 DOSSIER_APP = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "COURRIER")
@@ -428,23 +431,63 @@ DOSSIER_TELECHARGEMENTS_DEFAUT = os.path.join(os.path.expanduser("~"), "Download
 
 
 def _installer_ressources_embarquees():
-    """Copie les icones/emojis embarques (dossier 'ressources' du bundle) dans
-    DOSSIER_APP, sans ecraser ce qui existe deja."""
+    """Copie les ressources embarquees (icones, emojis, sons, dictionnaires...,
+    dossier 'ressources' du bundle) dans DOSSIER_APP.
+
+    A chaque nouvelle version (VERSION_BUILD differente de celle notee dans
+    ressources_installees.json), les fichiers deja presents sont aussi remis a
+    jour, sauf ceux que l'utilisateur a modifies depuis leur installation
+    (empreinte differente de celle notee) : ceux-la ne sont jamais ecrases.
+    Entre deux versions, seuls les fichiers manquants sont recopies."""
+    import hashlib
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     source = os.path.join(base, "ressources")
     if not os.path.isdir(source):
         return
+    chemin_manifeste = os.path.join(DOSSIER_APP, "ressources_installees.json")
+    try:
+        with open(chemin_manifeste, "r", encoding="utf-8") as f:
+            manifeste = json.load(f)
+    except Exception:
+        manifeste = {}
+    empreintes = manifeste.get("empreintes", {})
+    nouvelle_version = manifeste.get("version") != VERSION_BUILD
+
+    def empreinte(chemin):
+        h = hashlib.sha256()
+        with open(chemin, "rb") as f:
+            for bloc in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(bloc)
+        return h.hexdigest()
+
     for racine, _dossiers, fichiers in os.walk(source):
         rel = os.path.relpath(racine, source)
         dest_dir = DOSSIER_APP if rel == "." else os.path.join(DOSSIER_APP, rel)
         os.makedirs(dest_dir, exist_ok=True)
         for nom in fichiers:
+            src = os.path.join(racine, nom)
             dest = os.path.join(dest_dir, nom)
-            if not os.path.exists(dest):
-                try:
-                    shutil.copy2(os.path.join(racine, nom), dest)
-                except OSError:
-                    pass
+            cle = os.path.normpath(os.path.join(rel, nom)).replace("\\", "/")
+            try:
+                if not os.path.exists(dest):
+                    shutil.copy2(src, dest)
+                    empreintes[cle] = empreinte(src)
+                elif nouvelle_version:
+                    e_src, e_dest = empreinte(src), empreinte(dest)
+                    if e_dest == e_src:
+                        empreintes[cle] = e_src
+                    elif empreintes.get(cle) in (None, e_dest):
+                        # Fichier tel que COURRIER l'avait installe : on le met a jour.
+                        shutil.copy2(src, dest)
+                        empreintes[cle] = e_src
+            except OSError:
+                pass
+    if nouvelle_version or manifeste.get("empreintes") != empreintes:
+        try:
+            with open(chemin_manifeste, "w", encoding="utf-8") as f:
+                json.dump({"version": VERSION_BUILD, "empreintes": empreintes}, f, indent=1)
+        except OSError:
+            pass
 
 
 _installer_ressources_embarquees()
@@ -40527,6 +40570,12 @@ if __name__ == "__main__":
     fenetre = ClientMail()
     if len(COMPTES) == 1 and COMPTES[0].get("adresse") == ADRESSE_COMPTE_FACTICE:
         QTimer.singleShot(1500, fenetre.gerer_comptes)
+    # Mise a jour automatique (src/mise_a_jour.py) : verifie GitHub en arriere-plan.
+    try:
+        import mise_a_jour
+        mise_a_jour.demarrer(fenetre, VERSION_BUILD, DOSSIER_APP)
+    except Exception as _e_maj:
+        print(f"[MAJ] desactivee : {_e_maj}")
 
     # Relais des liens mailto: reçus pendant que COURRIER tourne déjà
     # (15/08/2026) : un 2e lancement de COURRIER (double-clic sur un lien
