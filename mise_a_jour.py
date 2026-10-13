@@ -126,9 +126,17 @@ class _Telechargeur(QThread):
 # dans un fichier lu au lancement suivant (message "mis a jour" ou "echec").
 SCRIPT_POWERSHELL = r'''
 param([int]$IdProcessus, [string]$Installation, [string]$Nouvelle, [string]$NomExe,
-      [string]$Resultat, [string]$Version, [int]$Relancer)
+      [string]$Resultat, [string]$Version, [int]$Relancer, [string]$Patience)
 $ErrorActionPreference = "Stop"
 function Ecrire-Resultat($texte) { Set-Content -LiteralPath $Resultat -Value $texte -Encoding UTF8 }
+
+# 0) Fenetre de patience (processus a part, pour que son animation ne se fige pas
+#    pendant les copies) : elle se ferme d'elle-meme a la fin de ce script.
+try {
+    Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$Patience`"",
+        "-IdScript", $PID, "-Relancer", $Relancer)
+} catch {}
 
 # 1) Attendre la fin de COURRIER et de tous les processus lances depuis son dossier
 #    (fenetre MAILING, moteur web QtWebEngineProcess...). Forcer apres 90 s : la
@@ -178,7 +186,85 @@ if (-not $deCote) {
         Ecrire-Resultat "ECHEC`nLa copie de la nouvelle version a échoué ($erreur). L'ancienne version a été remise en place."
     }
 }
-if ($Relancer -eq 1) { Start-Process -FilePath $exe -WorkingDirectory $Installation }
+if ($Relancer -eq 1) {
+    $nouveau = Start-Process -FilePath $exe -WorkingDirectory $Installation -PassThru
+    # La fenetre de patience reste affichee jusqu'a l'apparition de COURRIER (2 min maxi)
+    for ($i = 0; $i -lt 240; $i++) {
+        Start-Sleep -Milliseconds 500
+        $nouveau.Refresh()
+        if ($nouveau.HasExited -or $nouveau.MainWindowHandle -ne 0) { break }
+    }
+}
+'''
+
+# Fenetre de patience affichee pendant la fermeture, le remplacement et le redemarrage
+# (aux couleurs de COURRIER, barre rouge animee). Se ferme quand le script principal
+# (IdScript) est termine, c'est-a-dire une fois le nouveau COURRIER affiche.
+SCRIPT_PATIENCE = r'''
+param([int]$IdScript, [int]$Relancer)
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+$rouge = [System.Drawing.ColorTranslator]::FromHtml("#A52A2A")
+$fond = [System.Drawing.ColorTranslator]::FromHtml("#2a2a2a")
+
+$f = New-Object System.Windows.Forms.Form
+$f.Text = "Mise à jour de COURRIER"
+$f.FormBorderStyle = "None"
+$f.StartPosition = "CenterScreen"
+$f.ClientSize = New-Object System.Drawing.Size(440, 130)
+$f.BackColor = $rouge          # liseré rouge autour du panneau sombre
+$f.TopMost = $true
+$f.ShowInTaskbar = $true
+
+$panneau = New-Object System.Windows.Forms.Panel
+$panneau.BackColor = $fond
+$panneau.Location = New-Object System.Drawing.Point(2, 2)
+$panneau.Size = New-Object System.Drawing.Size(436, 126)
+$f.Controls.Add($panneau)
+
+$texte = New-Object System.Windows.Forms.Label
+$texte.ForeColor = [System.Drawing.Color]::White
+$texte.Font = New-Object System.Drawing.Font("Verdana", 10)
+$texte.TextAlign = "MiddleCenter"
+$texte.Location = New-Object System.Drawing.Point(10, 14)
+$texte.Size = New-Object System.Drawing.Size(416, 60)
+if ($Relancer -eq 1) {
+    $texte.Text = "Installation de la mise à jour de COURRIER...`nCOURRIER va redémarrer tout seul, merci de patienter."
+} else {
+    $texte.Text = "Installation de la mise à jour de COURRIER...`nMerci de patienter."
+}
+$panneau.Controls.Add($texte)
+
+$piste = New-Object System.Windows.Forms.Panel
+$piste.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1a1a1a")
+$piste.Location = New-Object System.Drawing.Point(40, 86)
+$piste.Size = New-Object System.Drawing.Size(356, 16)
+$panneau.Controls.Add($piste)
+
+$bloc = New-Object System.Windows.Forms.Panel
+$bloc.BackColor = $rouge
+$bloc.Size = New-Object System.Drawing.Size(90, 16)
+$bloc.Location = New-Object System.Drawing.Point(-90, 0)
+$piste.Controls.Add($bloc)
+
+$script:x = -90
+$script:ticks = 0
+$minuterie = New-Object System.Windows.Forms.Timer
+$minuterie.Interval = 25
+$minuterie.Add_Tick({
+    $script:x += 5
+    if ($script:x -gt 356) { $script:x = -90 }
+    $bloc.Left = $script:x
+    $script:ticks++
+    # Toutes les 0,5 s : le script principal est-il termine ? (securite : 5 min maxi)
+    if ($script:ticks % 20 -eq 0) {
+        if (-not (Get-Process -Id $IdScript -ErrorAction SilentlyContinue) -or $script:ticks -gt 12000) {
+            $minuterie.Stop()
+            $f.Close()
+        }
+    }
+})
+$f.Add_Shown({ $minuterie.Start() })
+[System.Windows.Forms.Application]::Run($f)
 '''
 
 
@@ -328,6 +414,9 @@ class GestionnaireMiseAJour(QObject):
                                             0, total_mo, self.fenetre)
         self._progression.setWindowTitle("Mise à jour de COURRIER")
         self._progression.setStyleSheet("QLabel { color: white; }" + self.style_boutons)
+        # Largeur finale des l'ouverture (sinon la boite s'elargit quand le texte
+        # "... 120 / 337 Mo" apparait)
+        self._progression.setMinimumWidth(460)
         self._progression.setWindowModality(Qt.WindowModality.NonModal)
         self._progression.setMinimumDuration(0)
         self._progression.setAutoClose(False)
@@ -445,6 +534,9 @@ class GestionnaireMiseAJour(QObject):
                 self.redemarrer()
                 return
         self.relancer = True
+        # Script lance AVANT la fermeture : sa fenetre de patience s'affiche tout de
+        # suite, pendant que COURRIER se ferme (il attend la fin du processus).
+        self._lancer_remplacement()
         # Fermeture normale (enregistrements, arret propre des connexions), puis sortie.
         self.fenetre.close()
         QApplication.instance().quit()
@@ -453,10 +545,12 @@ class GestionnaireMiseAJour(QObject):
         if not self.nouvelle:
             return
         script = os.path.join(self.dossier_travail, "installer_mise_a_jour.ps1")
+        patience = os.path.join(self.dossier_travail, "patience_mise_a_jour.ps1")
         try:
             # BOM UTF-8 : sinon Windows PowerShell 5 lit les accents du script de travers
-            with open(script, "w", encoding="utf-8-sig") as f:
-                f.write(SCRIPT_POWERSHELL)
+            for chemin, contenu in ((script, SCRIPT_POWERSHELL), (patience, SCRIPT_PATIENCE)):
+                with open(chemin, "w", encoding="utf-8-sig") as f:
+                    f.write(contenu)
             if os.path.exists(self.fichier_resultat):
                 os.remove(self.fichier_resultat)
             subprocess.Popen(
@@ -468,7 +562,8 @@ class GestionnaireMiseAJour(QObject):
                  "-NomExe", self.nom_exe,
                  "-Resultat", self.fichier_resultat,
                  "-Version", self.info["version"] if self.info else "",
-                 "-Relancer", "1" if self.relancer else "0"],
+                 "-Relancer", "1" if self.relancer else "0",
+                 "-Patience", patience],
                 creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
                 close_fds=True, cwd=self.dossier_donnees)
         except Exception as e:
