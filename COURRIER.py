@@ -420,7 +420,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 15h26"
+VERSION_BUILD = "2026-10-13 16h14"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -23320,7 +23320,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 15h26")
+        self.setWindowTitle("COURRIER ADRIEN — version du 13/10/2026 à 16h14")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -28380,9 +28380,60 @@ if (typeof module === 'object') {
             ("Dans une semaine", 7 * 24 * 60),
         ]:
             combo_report.addItem(libelle, minutes)
+        # "Heure précise" (13/10/2026, demandé par l'utilisateur) : même
+        # fonctionnement que le délai d'envoi des mails (_ouvrir_dialogue_delai,
+        # calcul dans la mise en file) — HH.MM, et si l'heure est déjà passée
+        # aujourd'hui, c'est le lendemain à cette heure-là.
+        combo_report.addItem("Heure précise", None)
         ligne_report.addWidget(lbl_report)
         ligne_report.addWidget(combo_report, 1)
         layout.addLayout(ligne_report)
+
+        from PySide6.QtWidgets import QLineEdit
+        STYLE_CHAMP_HEURE = "background:#1e1e1e; color:white; border:1px solid #555; padding:2px;"
+        conteneur_heure = QWidget()
+        ligne_heure = QHBoxLayout(conteneur_heure)
+        ligne_heure.setContentsMargins(0, 0, 0, 0)
+        champ_heure = QLineEdit("08.00")
+        champ_heure.setFixedWidth(80)
+        champ_heure.setStyleSheet(STYLE_CHAMP_HEURE)
+        lbl_fmt = QLabel("(HH.MM)")
+        lbl_fmt.setStyleSheet("color:#aaa; font-size:10px;")
+        ligne_heure.addSpacing(lbl_report.sizeHint().width() + ligne_report.spacing())
+        ligne_heure.addWidget(champ_heure)
+        ligne_heure.addWidget(lbl_fmt)
+        ligne_heure.addStretch(1)
+        conteneur_heure.setVisible(False)
+        layout.addWidget(conteneur_heure)
+
+        def _sur_choix_report(_index):
+            heure_precise = combo_report.currentData() is None
+            conteneur_heure.setVisible(heure_precise)
+            if heure_precise:
+                champ_heure.setFocus()
+                champ_heure.selectAll()
+            boite.adjustSize()
+        combo_report.currentIndexChanged.connect(_sur_choix_report)
+
+        def _date_report():
+            """Date/heure du report choisi, ou None si l'heure précise saisie
+            n'est pas valide (le champ passe alors en rouge)."""
+            maintenant = datetime.datetime.now()
+            minutes = combo_report.currentData()
+            if minutes is not None:
+                return maintenant + datetime.timedelta(minutes=minutes)
+            try:
+                h, m = map(int, champ_heure.text().strip().replace(":", ".").split("."))
+                cible = maintenant.replace(hour=h, minute=m, second=0, microsecond=0)
+            except ValueError:
+                champ_heure.setStyleSheet(STYLE_CHAMP_HEURE.replace("#555", "#ff4040"))
+                champ_heure.setFocus()
+                champ_heure.selectAll()
+                return None
+            if cible <= maintenant:
+                cible += datetime.timedelta(days=1)
+            return cible
+        champ_heure.textEdited.connect(lambda _t: champ_heure.setStyleSheet(STYLE_CHAMP_HEURE))
 
         ligne_btn = QHBoxLayout()
         ligne_btn.addStretch(1)
@@ -28414,8 +28465,9 @@ if (typeof module === 'object') {
             _fermer_popup()
 
         def _reporter():
-            minutes = combo_report.currentData()
-            nouvelle_dt = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+            nouvelle_dt = _date_report()
+            if nouvelle_dt is None:
+                return  # heure précise invalide : le pop-up reste ouvert
             ids_a_reporter = {r.get("id") for case, r in cases_rappels if case.isChecked()}
             ids_a_marquer_vu = {r.get("id") for case, r in cases_rappels if not case.isChecked()}
             tous = charger_rappels()
