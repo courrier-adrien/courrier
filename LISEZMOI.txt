@@ -31,17 +31,22 @@ TELEPHONE ET SMS (boutons TEL et SMS)
   envoie des SMS par votre telephone (avec votre forfait, un par un).
   - ANDROID UNIQUEMENT : les iPhone ne sont pas compatibles (Apple ne permet
     pas a un PC de piloter un iPhone).
-  - A faire une seule fois sur le telephone :
+  - Cliquez sur TEL : si aucun telephone n'est encore associe, COURRIER
+    propose "Associer un telephone..." et vous guide pas a pas, sans cable
+    (Android 11 et plus, telephone et PC sur le meme Wi-Fi) :
       1. Parametres > A propos du telephone > Informations sur le logiciel :
-         touchez 7 fois "Numero de version" (les "Options pour les
-         developpeurs" apparaissent dans les Parametres).
-      2. Dans "Options pour les developpeurs", activez "Debogage USB"
-         (et "Debogage sans fil" pour vous connecter en Wi-Fi).
-      3. Branchez le telephone en USB et acceptez le PC sur l'ecran du
-         telephone ("Autoriser le debogage USB").
-  - Le plus simple est le cable USB. Le Wi-Fi (Android 11 et plus,
-    telephone et PC sur le meme reseau) demande en plus un appairage par
-    code que COURRIER ne sait pas encore faire.
+         touchez 7 fois "Numero de version" (les "Options de developpement"
+         apparaissent dans les Parametres).
+      2. Options de developpement > Debogage sans fil : activez-le, cochez
+         "Toujours autoriser sur ce reseau", puis Autoriser.
+      3. Touchez le texte "Debogage sans fil" > "Associer l'appareil avec un
+         code QR" et scannez le QR code affiche par COURRIER.
+    Ensuite, un clic sur TEL suffit. Android coupe le Debogage sans fil
+    apres un redemarrage : COURRIER peut le faire rallumer tout seul avec
+    l'appli gratuite Automate (il vous le propose et vous guide).
+  - Android 10 ou plus ancien : activez le Debogage USB dans les Options de
+    developpement et branchez le telephone en USB.
+  - Le mode d'emploi (bouton AIDE) detaille tout cela.
   - Pendant un envoi de SMS, laissez le telephone allume et deverrouille :
     sinon l'envoi se met en pause (bouton REPRENDRE).
   - L'envoi automatique a ete teste avec l'appli Messages de Samsung. Avec

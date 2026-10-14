@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-13 23h28"
+VERSION_BUILD = "2026-10-14 12h03"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4129,8 +4129,15 @@ def chercher_telephone_wifi(delai=3.0):
     """Adresse "ip:port" annoncée en mDNS (_adb-tls-connect._tcp) par un
     téléphone dont le débogage sans fil est actif, ou None. Bloquant
     jusqu'à `delai` secondes : à appeler hors du fil de l'interface."""
+    trouve = chercher_service_mdns("_adb-tls-connect._tcp.local", delai)
+    return trouve[0] if trouve else None
+
+
+def chercher_service_mdns(service, delai=3.0, garder=None):
+    """(adresse "ip:port", nom d'instance) du premier appareil qui annonce
+    `service` en mDNS (et dont le nom d'instance satisfait garder(nom),
+    si donné), ou None. Bloquant jusqu'à `delai` secondes."""
     import socket, struct, time
-    service = "_adb-tls-connect._tcp.local"
     question = (struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + _requete_mdns(service)
                 + struct.pack(">HH", 12, 0x8001))
     prise = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -4159,8 +4166,10 @@ def chercher_telephone_wifi(delai=3.0):
                     type_rr, _, _, longueur = struct.unpack(">HHIH", donnees[i:i + 10])
                     i += 10
                     if type_rr == 33 and service in nom:  # SRV : le port
-                        port = struct.unpack(">HHH", donnees[i:i + 6])[2]
-                        return f"{ip_source}:{port}"
+                        instance = nom.split("." + service.split(".")[0])[0]
+                        if garder is None or garder(instance):
+                            port = struct.unpack(">HHH", donnees[i:i + 6])[2]
+                            return f"{ip_source}:{port}", instance
                     i += longueur
             except (IndexError, struct.error):
                 continue  # paquet d'un autre appareil, mal formé : ignoré
@@ -4176,24 +4185,467 @@ class _RelaisTelephone(QObject):
     fini = Signal(object)
 
 
+# Association du téléphone (14/10/2026) : avant, l'association (« adb
+# pair ») se faisait hors de COURRIER (QtScrcpy ou ligne de commande),
+# impasse pour un débutant. Tout part maintenant du clic gauche sur TÉL :
+#  - téléphone joignable : son écran s'ouvre, comme avant ;
+#  - sinon, DialogueTelephoneIntrouvable explique quoi faire selon le cas
+#    (jamais associé / débogage sans fil coupé / téléphone qui ne connaît
+#    pas cet ordinateur / USB non autorisé) et GUETTE le téléphone en
+#    arrière-plan : dès qu'il est prêt, la connexion se fait toute seule ;
+#  - « Associer un téléphone… » ouvre DialogueAssociationTelephone : QR
+#    code « WIFI:T:ADB;S:<nom>;P:<mot de passe>;; » (même méthode
+#    qu'Android Studio) que le téléphone scanne avant de s'annoncer en
+#    mDNS (_adb-tls-pairing._tcp) sous <nom> ; COURRIER lance alors « adb
+#    pair » tout seul. Repli : code à 6 chiffres. Un téléphone déjà
+#    associé qui réapparaît y est aussi reconnu et connecté.
+# Le nom du téléphone joint est retenu dans telephone_associe.json pour
+# que les messages l'appellent par son nom. Boîtes au style des autres
+# boîtes de COURRIER (fond sombre, boutons rouges, comme la mise à jour
+# automatique) : STYLE_BOITES_TELEPHONE.
+FICHIER_TELEPHONE_ASSOCIE = os.path.join(DOSSIER_APP, "telephone_associe.json")
+SERVICE_MDNS_ASSOCIATION = "_adb-tls-pairing._tcp.local"
+DUREE_GUET_TELEPHONE = 300  # secondes de recherche automatique avant d'abandonner
+COULEUR_TEL_OK = "#7fd17f"
+COULEUR_TEL_ERREUR = "#e08080"
+COULEUR_TEL_DISCRET = "#aaaaaa"
+# Surtout pas "Téléphone" : c'est le titre de la fenêtre scrcpy, cherchée
+# par son titre (_ramener_fenetre_telephone, _fermer_quand_ecran_affiche)
+TITRE_BOITES_TELEPHONE = "Connexion au téléphone"
+
+
+def _fermer_quand_ecran_affiche(dialogue, delai=15.0, minimum=0.0):
+    """Ferme `dialogue` (accept) seulement quand la fenêtre scrcpy du
+    téléphone est VISIBLE (14/10/2026, demandé : pas de vide entre la
+    fermeture de la boîte et l'apparition de l'écran). scrcpy crée sa
+    fenêtre cachée et ne la montre qu'à la première image. Au plus tard
+    après `delai` secondes (échec de scrcpy : il affiche son propre message)."""
+    import ctypes
+    debut = time.monotonic()
+
+    def _verifier():
+        if not dialogue.isVisible():
+            return
+        ecoule = time.monotonic() - debut
+        fenetre = ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE)
+        visible = bool(fenetre and ctypes.windll.user32.IsWindowVisible(fenetre))
+        if (visible and ecoule >= minimum) or ecoule > delai:
+            dialogue.accept()
+        else:
+            QTimer.singleShot(200, _verifier)
+
+    _verifier()
+
+
+def style_boites_telephone():
+    """Fond sombre, texte blanc, boutons rouges (STYLE_BOUTON est défini
+    plus bas dans le fichier : lu à l'exécution, pas à l'import)."""
+    return ("QMessageBox, QDialog, QInputDialog { background-color: #2a2a2a; } "
+            "QLabel, QCheckBox { color: white; } "
+            # Case dessinée à la main : avec le texte blanc, la coche de
+            # Windows était blanche sur fond blanc (invisible)
+            "QCheckBox::indicator { width: 14px; height: 14px; border: 2px solid #cccccc; "
+            "background-color: #2a2a2a; } "
+            "QCheckBox::indicator:checked { background-color: #A52A2A; border-color: white; } "
+            "QLineEdit, QComboBox { background-color: white; color: black; padding: 3px; "
+            "font-family: Verdana; font-size: 12px; } " + STYLE_BOUTON)
+
+
+def _boite_telephone(parent, texte, icone=None):
+    """Simple message (un bouton OK rouge) au style des boîtes de COURRIER."""
+    from PySide6.QtWidgets import QMessageBox
+    boite = QMessageBox(icone or QMessageBox.Warning, TITRE_BOITES_TELEPHONE, texte, QMessageBox.Ok, parent)
+    boite.setStyleSheet(style_boites_telephone())
+    boite.exec()
+
+
+def lire_telephone_associe():
+    """{"nom": ..., "derniere_connexion": ...} du dernier téléphone joint, ou None."""
+    try:
+        with open(FICHIER_TELEPHONE_ASSOCIE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def wifi_ordinateur():
+    """Nom (SSID) du Wi-Fi de l'ordinateur, ou "" (câble, Wi-Fi coupé...)."""
+    import subprocess, ctypes
+    try:
+        r = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, timeout=5,
+                           stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        texte = r.stdout.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}", "replace")
+    except Exception:
+        return ""
+    trouve = re.search(r"^\s*SSID\s*:\s*(.+?)\s*$", texte, re.M)  # pas BSSID : ^\s* l'exclut
+    return trouve.group(1) if trouve else ""
+
+
+def _ecrire_telephone_associe(**valeurs):
+    """Met à jour telephone_associe.json sans effacer les autres clés
+    (ex. "rallumage" : choix fait dans DialogueRallumageAuto)."""
+    donnees = lire_telephone_associe() or {}
+    donnees.update(valeurs)
+    try:
+        with open(FICHIER_TELEPHONE_ASSOCIE, "w", encoding="utf-8") as f:
+            json.dump(donnees, f, ensure_ascii=False, indent=1)
+    except OSError as exc:
+        print(f"[TELEPHONE] mémorisation impossible : {exc}")
+
+
+def _memoriser_telephone(serie):
+    """Retient le nom du téléphone joint et les Wi-Fi du téléphone et de
+    l'ordinateur à ce moment-là (pour des messages précis en cas
+    d'échec). Applique aussi le choix « ne pas oublier cet ordinateur » (voir
+    plus bas). En arrière-plan : adb peut mettre une seconde à répondre."""
+    def _travail():
+        def _shell(commande):
+            return _adb_bloquant("-s", serie, "shell", commande, delai=10, erreurs=False).strip()
+
+        # Android oublie l'autorisation d'un ordinateur resté 7 jours sans
+        # se connecter (adb_allowed_connection_time = 604800000 ms : tout
+        # était à refaire, association comprise). 0 = jamais : c'est le
+        # réglage « Désactiver le délai d'expiration des autorisations adb »
+        # des Options de développement. Uniquement si l'utilisateur l'a
+        # choisi : case de l'assistant d'association, clé
+        # "garder_autorisation" (14/10/2026, demandé : rien de modifié sur le
+        # téléphone sans l'accord de l'utilisateur). Case décochée : retour
+        # au réglage d'Android (7 jours). Pas de choix enregistré : on ne
+        # touche à rien.
+        garder = (lire_telephone_associe() or {}).get("garder_autorisation")
+        actuel = _shell("settings get global adb_allowed_connection_time")
+        if garder is True and actuel not in ("0", ""):
+            _shell("settings put global adb_allowed_connection_time 0")
+            print("[TELEPHONE] expiration de l'autorisation adb désactivée (choix de l'utilisateur)")
+        elif garder is False and actuel == "0":
+            _shell("settings delete global adb_allowed_connection_time")
+            print("[TELEPHONE] expiration de l'autorisation adb remise par défaut (7 jours)")
+        # device_name = nom choisi dans le téléphone ("Galaxy S20+ de ..."),
+        # sinon la référence technique du modèle (SM-G985F)
+        nom = ""
+        for commande in ("settings get global device_name", "getprop ro.product.model"):
+            nom = _shell(commande)
+            if nom and nom != "null":
+                break
+            nom = ""
+        if not nom:
+            return
+        # Wi-Fi du téléphone (ex. "MaBox") : peut différer de celui de
+        # l'ordinateur sur la même box (ex. "MABOX5", bande 5 GHz)
+        trouve = re.search(r'mWifiInfo SSID: "([^"]*)"', _shell("dumpsys wifi | grep -m1 mWifiInfo"))
+        # Tous les réseaux où le téléphone a été joint (maison, bureau,
+        # résidence secondaire...) : {Wi-Fi de l'ordinateur: Wi-Fi du téléphone}
+        reseaux = (lire_telephone_associe() or {}).get("reseaux", {})
+        wifi_pc = wifi_ordinateur()
+        if wifi_pc:
+            reseaux[wifi_pc] = trouve.group(1) if trouve else ""
+        _ecrire_telephone_associe(nom=nom, derniere_connexion=time.strftime("%Y-%m-%d %H:%M:%S"),
+                                  reseaux=reseaux)
+
+    _threading.Thread(target=_travail, daemon=True).start()
+
+
+def _adb_bloquant(*arguments, delai=15, erreurs=True):
+    """Sortie d'adb (stdout, + stderr si erreurs), "" si adb échoue. Bloquant."""
+    import subprocess
+    try:
+        r = subprocess.run([chemin_adb(), *arguments], capture_output=True, timeout=delai,
+                           stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        return (r.stdout + (r.stderr if erreurs else b"")).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _connexion_reussie(sortie):
+    """Sortie de « adb connect » : True si connecté."""
+    return "connected to" in sortie and "cannot" not in sortie
+
+
+def _lire_appareils(sortie):
+    """Sortie de « adb devices -l » -> ([(série, modèle), ...], un appareil
+    non autorisé ?). Un même téléphone relié en USB ET en Wi-Fi ne compte
+    qu'une fois."""
+    appareils, non_autorise = [], False
+    for ligne in sortie.splitlines()[1:]:
+        morceaux = ligne.split()
+        if len(morceaux) < 2:
+            continue
+        if morceaux[1] == "device":
+            modele = next((m[6:] for m in morceaux if m.startswith("model:")), morceaux[0])
+            if modele not in [m for _, m in appareils]:
+                appareils.append((morceaux[0], modele))
+        elif morceaux[1] == "unauthorized":
+            non_autorise = True
+    return appareils, non_autorise
+
+
+def _chercher_telephone_bloquant(delai_wifi=2.5):
+    """Un passage de recherche : série d'un téléphone joignable (déjà
+    relié, sinon trouvé en Wi-Fi puis « adb connect »), ou None. Bloquant :
+    pour les fils de fond qui guettent le téléphone."""
+    appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
+    if appareils:
+        return appareils[0][0]
+    adresse = chercher_telephone_wifi(delai_wifi)
+    if adresse and _connexion_reussie(_adb_bloquant("connect", adresse)):
+        return adresse
+    return None
+
+
+class _RelaisGuet(QObject):
+    """Ramène dans le fil de l'interface ce que trouvent les fils de fond."""
+    connecte = Signal(str)         # série du téléphone joint
+    trouve = Signal(str, str)      # service d'association : adresse, nom d'instance
+    resultat = Signal(bool, str)   # association réussie ?, sortie d'adb
+
+
+class DialogueTelephoneIntrouvable(QDialog):
+    """Le téléphone n'a pas pu être joint : explique quoi faire selon `cas`
+    ("jamais", "introuvable", "refuse", "non_autorise") et guette le
+    téléphone en arrière-plan. À la fermeture : self.serie (téléphone joint
+    entre-temps) ou self.choix == "associer". Téléphone joint : la boîte
+    appelle si_trouve(serie) (qui ouvre son écran) et ne se ferme qu'une
+    fois cet écran affiché."""
+
+    def __init__(self, parent, cas, detail="", si_trouve=None):
+        super().__init__(parent)
+        self.setWindowTitle(TITRE_BOITES_TELEPHONE)
+        self.setStyleSheet(style_boites_telephone())
+        self.serie = None
+        self.choix = None
+        self._si_trouve = si_trouve
+        self._fini = False
+        self._fin_guet = 0.0
+        self._relais = _RelaisGuet(self)
+        self._relais.connecte.connect(self._connecte)
+
+        icone = QLabel()
+        icone.setPixmap(self.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(40, 40))
+        icone.setAlignment(Qt.AlignTop)
+        texte = QLabel(self._texte(cas, detail))
+        texte.setTextFormat(Qt.RichText)
+        texte.setWordWrap(True)
+        texte.setFixedWidth(500)
+        self.lbl_statut = QLabel()
+        self.lbl_statut.setWordWrap(True)
+        self.lbl_statut.setFixedWidth(500)
+
+        colonne = QVBoxLayout()
+        colonne.addWidget(texte)
+        colonne.addSpacing(6)
+        colonne.addWidget(self.lbl_statut)
+        haut = QHBoxLayout()
+        haut.addWidget(icone)
+        haut.addSpacing(10)
+        haut.addLayout(colonne)
+
+        btn_reessayer = QPushButton("Réessayer")
+        btn_reessayer.clicked.connect(self._guetter)
+        # Téléphone connu qui ne reconnaît plus l'ordinateur : association
+        # effacée (Options de développement coupées) -> QR code, version courte
+        self.rapide = cas == "refuse" and bool(lire_telephone_associe())
+        btn_associer = QPushButton("Rescanner le QR code" if self.rapide
+                                   else "Associer un téléphone…")
+        btn_associer.clicked.connect(self._associer)
+        btn_fermer = QPushButton("Fermer")
+        btn_fermer.clicked.connect(self.reject)
+        self._boutons = (btn_reessayer, btn_associer, btn_fermer)
+        for b in self._boutons:
+            b.setAutoDefault(False)
+        (btn_associer if cas in ("jamais", "refuse") else btn_reessayer).setDefault(True)
+        boutons = QHBoxLayout()
+        boutons.addStretch()
+        boutons.addWidget(btn_reessayer)
+        boutons.addWidget(btn_associer)
+        boutons.addWidget(btn_fermer)
+
+        principal = QVBoxLayout(self)
+        principal.addLayout(haut)
+        principal.addSpacing(8)
+        principal.addLayout(boutons)
+
+        self._guetter()
+        _threading.Thread(target=self._fil_guet, daemon=True).start()
+
+    @staticmethod
+    def _texte(cas, detail):
+        reactiver = (
+            "<b>Pour le réactiver</b>, sur le téléphone :<br>"
+            "&nbsp;&nbsp;• faites glisser le haut de l'écran vers le bas et touchez la vignette "
+            "« Débogage sans fil » ;<br>"
+            "&nbsp;&nbsp;• ou bien : <i>Paramètres → Options de développement (tout en bas) → "
+            "Débogage sans fil → Activer</i>.<br>"
+            "S'il demande « Autoriser le débogage sans fil sur ce réseau ? », cochez « Toujours "
+            "autoriser sur ce réseau » puis touchez <b>Autoriser</b>.<br>"
+            f"<span style='color:{COULEUR_TEL_DISCRET}'>Pas encore de vignette ? <i>Options de "
+            "développement → Vignettes de développeur pour paramètres rapides → Débogage sans "
+            "fil</i>.</span><br>"
+            f"<span style='color:{COULEUR_TEL_DISCRET}'>Plus d'« Options de développement » dans "
+            "les Paramètres ? Certaines applis (banque, paiement…) obligent à les couper : "
+            "refaites les 7 touches sur « Numéro de version » (étape 1 de l'assistant), puis "
+            "réactivez le Débogage sans fil.</span>")
+        nouveau = ("<b>Nouveau téléphone, ou téléphone réinitialisé ?</b> Cliquez sur « Associer "
+                   "un téléphone… » : l'assistant vous guide pas à pas (une seule fois par "
+                   "téléphone).")
+        if cas == "jamais":
+            return ("<b>Aucun téléphone n'est encore associé à cet ordinateur.</b><br><br>"
+                    "Pour afficher l'écran du téléphone et envoyer des SMS, il faut d'abord "
+                    "associer le téléphone à cet ordinateur. Cela se fait <b>une seule fois</b>, "
+                    "en quelques minutes : cliquez sur « Associer un téléphone… », l'assistant "
+                    "vous guide pas à pas.<br><br>"
+                    "Téléphone déjà associé ? Son « Débogage sans fil » est sans doute coupé "
+                    "(Android le fait après un redémarrage ou un changement de Wi-Fi).<br>"
+                    + reactiver)
+        nom = (lire_telephone_associe() or {}).get("nom", "")
+        if cas == "refuse" and nom:
+            # Constaté le 14/10/2026 (Samsung, Android 13) : couper les
+            # Options de développement EFFACE l'association. Cas courant
+            # (applis de banque) : on va droit au QR code, version courte.
+            return (f"<b>Le téléphone « {html.escape(nom)} » ne reconnaît plus cet "
+                    "ordinateur.</b><br><br>"
+                    "C'est ce qui arrive quand les Options de développement ont été coupées "
+                    "(certaines applis de banque l'exigent) : Android efface alors "
+                    "l'association.<br><br>"
+                    "<b>Il suffit de rescanner le QR code</b> : 30 secondes, sans rien refaire "
+                    "d'autre.<br><br>"
+                    f"<span style='color:{COULEUR_TEL_DISCRET}'>Détail : {html.escape(detail)}</span>")
+        if cas == "refuse":
+            return ("<b>Le téléphone a été trouvé sur le Wi-Fi, mais il ne reconnaît pas cet "
+                    "ordinateur.</b><br><br>"
+                    "C'est normal pour un nouveau téléphone. Sinon, l'association a été effacée "
+                    "sur le téléphone (« Oublier » dans Débogage sans fil, ou Options de "
+                    "développement coupées puis remises, ce que demandent certaines applis de "
+                    "banque). Cliquez sur « Associer un téléphone… » : l'assistant vous guide "
+                    "pas à pas, avec un QR code à scanner.<br><br>"
+                    f"<span style='color:{COULEUR_TEL_DISCRET}'>Détail : {html.escape(detail)}</span>")
+        if cas == "non_autorise":
+            return ("<b>Le téléphone est branché en USB mais n'a pas encore autorisé cet "
+                    "ordinateur.</b><br><br>"
+                    "Sur l'écran du téléphone, touchez <b>Autoriser</b> (en cochant « Toujours "
+                    "autoriser depuis cet ordinateur »).<br>"
+                    "Rien ne s'affiche ? Débranchez puis rebranchez le câble, téléphone "
+                    "déverrouillé.")
+        associe = lire_telephone_associe() or {}
+        nom = associe.get("nom", "")
+        # Wi-Fi : on compare chaque appareil à lui-même d'une fois sur
+        # l'autre (téléphone et ordinateur peuvent avoir deux noms de Wi-Fi
+        # différents sur la même box : "MaBox" / "MABOX5")
+        # Réseaux connus : {Wi-Fi de l'ordinateur: Wi-Fi du téléphone}.
+        # Un réseau jamais vu n'est pas une erreur (nouveau lieu) : on
+        # rappelle seulement ce qu'il faut sur un réseau nouveau.
+        reseaux = associe.get("reseaux", {})
+        wifi_pc = wifi_ordinateur()
+        reseau = ""
+        if wifi_pc and reseaux and wifi_pc not in reseaux:
+            reseau = (f"<b style='color:{COULEUR_TEL_ERREUR}'>L'ordinateur est sur le Wi-Fi "
+                      f"« {html.escape(wifi_pc)} », où le téléphone n'a encore jamais été "
+                      "joint.</b> Connectez le téléphone à ce même réseau (même box), puis "
+                      "activez le Débogage sans fil : la première fois sur ce réseau, cochez "
+                      "« Toujours autoriser sur ce réseau ». Inutile de refaire "
+                      "l'association.<br><br>")
+        wifi_tel = reseaux.get(wifi_pc, "")
+        meme_wifi = (f"connecté au Wi-Fi « {html.escape(wifi_tel)} »" if wifi_tel
+                     else "sur le même Wi-Fi que l'ordinateur")
+        return (f"<b>Le téléphone{' « ' + html.escape(nom) + ' »' if nom else ''} est introuvable "
+                "sur le Wi-Fi.</b><br><br>" + reseau +
+                ("<span style='color:" + COULEUR_TEL_OK + "'>Le rallumage automatique est en "
+                 "place : si le téléphone vient de se connecter au Wi-Fi ou de redémarrer, "
+                 "patientez quelques secondes, il sera détecté tout seul.</span><br><br>"
+                 if associe.get("rallumage") == "fait" else "") +
+                "Le plus souvent, le « Débogage sans fil » s'est coupé tout seul : Android le fait "
+                "après un redémarrage du téléphone ou un changement de réseau Wi-Fi.<br><br>"
+                + reactiver + "<br><br>"
+                f"Vérifiez aussi que le téléphone est déverrouillé et {meme_wifi}. "
+                "Ou branchez-le simplement en USB.<br><br>" + nouveau)
+
+    def _guetter(self):
+        """(Re)lance la recherche automatique pour DUREE_GUET_TELEPHONE secondes."""
+        self._fin_guet = time.monotonic() + DUREE_GUET_TELEPHONE
+        self.lbl_statut.setText("Recherche du téléphone en cours… Inutile de cliquer sur "
+                                "Réessayer : dès qu'il sera prêt, il sera détecté tout seul.")
+        self.lbl_statut.setStyleSheet(f"color: {COULEUR_TEL_OK}; font-style: italic;")
+        QTimer.singleShot(DUREE_GUET_TELEPHONE * 1000 + 500, self._fin_recherche)
+
+    def _fin_recherche(self):
+        if not self._fini and time.monotonic() >= self._fin_guet:
+            self.lbl_statut.setText("Recherche arrêtée. Cliquez sur Réessayer quand le téléphone "
+                                    "est prêt.")
+            self.lbl_statut.setStyleSheet(f"color: {COULEUR_TEL_DISCRET};")
+
+    def _fil_guet(self):
+        while not self._fini:
+            if time.monotonic() > self._fin_guet:
+                time.sleep(0.5)
+                continue
+            serie = _chercher_telephone_bloquant()
+            if serie and not self._fini:
+                try:
+                    self._relais.connecte.emit(serie)
+                except RuntimeError:  # fenêtre déjà détruite
+                    pass
+                return
+            time.sleep(1)
+
+    def _connecte(self, serie):
+        if self._fini or self.serie:  # jamais deux ouvertures d'écran
+            return
+        print(f"[TELEPHONE] téléphone apparu pendant l'attente : {serie}")
+        self.serie = serie
+        if not self._si_trouve:
+            self.accept()
+            return
+        for b in self._boutons:
+            b.setEnabled(False)
+        self.lbl_statut.setText("Téléphone trouvé ! Ouverture de son écran…")
+        self.lbl_statut.setStyleSheet(f"color: {COULEUR_TEL_OK}; font-weight: bold;")
+        self._si_trouve(serie)
+        _fermer_quand_ecran_affiche(self)
+
+    def _associer(self):
+        self.choix = "associer"
+        self.reject()
+
+    def done(self, resultat):
+        self._fini = True  # arrête la recherche en arrière-plan
+        super().done(resultat)
+
+
 def connecter_telephone(parent=None, apres=None, si_echec=None):
     """S'assure qu'un téléphone est joignable par adb, puis appelle
     apres(numero_de_serie). Asynchrone (QProcess + thread) : l'interface
-    ne gèle pas pendant la recherche. En cas d'échec, une boîte de
-    dialogue explique quoi vérifier."""
+    ne gèle pas pendant la recherche. En cas d'échec,
+    DialogueTelephoneIntrouvable explique quoi faire, guette le téléphone
+    et propose l'assistant d'association."""
     from PySide6.QtCore import QProcess
-    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtWidgets import QInputDialog
     adb = chemin_adb()
 
-    def _echec(message):
-        print(f"[TELEPHONE] échec : {message}")
+    def _reussi(serie):
+        _memoriser_telephone(serie)
+        if apres:
+            apres(serie)
+
+    def _abandon():
         if si_echec:
             si_echec()
-        QMessageBox.warning(parent, "Téléphone", message)
+
+    def _echec(cas, detail=""):
+        print(f"[TELEPHONE] échec : {cas} {detail}".strip())
+        # Les deux boîtes appellent elles-mêmes _reussi (qui ouvre l'écran
+        # du téléphone) et restent affichées jusqu'à son apparition.
+        dialogue = DialogueTelephoneIntrouvable(parent, cas, detail, si_trouve=_reussi)
+        dialogue.exec()
+        serie, choix, rapide = dialogue.serie, dialogue.choix, dialogue.rapide
+        dialogue.deleteLater()
+        if not serie and choix == "associer":
+            serie = ouvrir_assistant_association(parent, si_trouve=_reussi, rapide=rapide)
+        if not serie:
+            _abandon()
 
     if not adb:
-        _echec("adb.exe introuvable : impossible de joindre le téléphone.\n\n"
-               "Il se trouve normalement dans :\n" + CHEMINS_ADB[0])
+        _boite_telephone(parent, "adb.exe introuvable : impossible de joindre le téléphone.\n\n"
+                                 "Il se trouve normalement dans :\n" + CHEMINS_ADB[0])
+        _abandon()
         return
 
     def _lancer(arguments, suite):
@@ -4207,39 +4659,48 @@ def connecter_telephone(parent=None, apres=None, si_echec=None):
 
         def _erreur(e):
             if e == QProcess.FailedToStart:
-                _echec(f"adb n'a pas pu être lancé ({e}).")
+                _boite_telephone(parent, f"adb n'a pas pu être lancé ({e}).")
+                _abandon()
 
         processus.finished.connect(_fini)
         processus.errorOccurred.connect(_erreur)
         processus.start(adb, arguments)
 
     def _apres_connect(code, sortie, adresse):
-        if "connected to" in sortie and "cannot" not in sortie:
+        if _connexion_reussie(sortie):
             print(f"[TELEPHONE] connecté en Wi-Fi : {adresse}")
-            if apres:
-                apres(adresse)
+            _reussi(adresse)
         else:
-            _echec(f"Le téléphone a été trouvé ({adresse}) mais refuse la connexion.\n\n"
-                   f"{sortie.strip()}\n\nSi c'est un nouveau téléphone ou si l'appairage a été "
-                   f"effacé, il faut l'appairer à nouveau (une seule fois, avec QtScrcpy ou "
-                   f"« adb pair »).")
+            _echec("refuse", f"{adresse} : {sortie.strip()}")
 
     def _apres_recherche(adresse):
-        if not adresse:
-            _echec("Aucun téléphone trouvé.\n\nVérifiez que :\n"
-                   "  • le téléphone est sur le même Wi-Fi que l'ordinateur ;\n"
-                   "  • « Débogage sans fil » est activé (Options pour les développeurs) ;\n"
-                   "  • le téléphone est déverrouillé.\n\n"
-                   "Ou branchez-le simplement en USB.")
-            return
-        _lancer(["connect", adresse], lambda c, s: _apres_connect(c, s, adresse))
+        if adresse:
+            _lancer(["connect", adresse], lambda c, s: _apres_connect(c, s, adresse))
+        else:
+            _echec("introuvable" if lire_telephone_associe() else "jamais")
 
     def _apres_liste(code, sortie):
-        appareils = [l.split()[0] for l in sortie.splitlines()[1:]
-                     if l.strip().endswith("device")]
-        if appareils:
-            if apres:
-                apres(appareils[0])
+        appareils, non_autorise = _lire_appareils(sortie)
+        if len(appareils) == 1:
+            _reussi(appareils[0][0])
+            return
+        if len(appareils) > 1:
+            noms = [m.replace("_", " ") for _, m in appareils]
+            choix = QInputDialog(parent)
+            choix.setWindowTitle(TITRE_BOITES_TELEPHONE)
+            choix.setLabelText("Plusieurs téléphones sont reliés. Lequel utiliser ?")
+            choix.setComboBoxItems(noms)
+            choix.setOkButtonText("Utiliser ce téléphone")
+            choix.setCancelButtonText("Annuler")
+            choix.setStyleSheet(style_boites_telephone())
+            if choix.exec() == QDialog.Accepted:
+                _reussi(appareils[noms.index(choix.textValue())][0])
+            else:
+                _abandon()
+            choix.deleteLater()
+            return
+        if non_autorise:
+            _echec("non_autorise")
             return
         print("[TELEPHONE] aucun téléphone relié, recherche en Wi-Fi…")
         relais = _RelaisTelephone(parent)
@@ -4252,7 +4713,699 @@ def connecter_telephone(parent=None, apres=None, si_echec=None):
         _threading.Thread(target=lambda: relais.fini.emit(chercher_telephone_wifi()),
                           daemon=True).start()
 
-    _lancer(["devices"], _apres_liste)
+    _lancer(["devices", "-l"], _apres_liste)
+
+
+def _image_qrcode(texte, taille=260):
+    """QPixmap noir sur blanc du QR code de `texte` (module qrcode, dessiné
+    par Qt : Pillow n'est pas nécessaire)."""
+    import qrcode
+    from PySide6.QtGui import QImage, QPainter
+    qr = qrcode.QRCode(border=3, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(texte)
+    qr.make(fit=True)
+    matrice = qr.get_matrix()  # bordure blanche comprise
+    pas = max(1, taille // len(matrice))
+    image = QImage(len(matrice) * pas, len(matrice) * pas, QImage.Format_RGB32)
+    image.fill(QColor("white"))
+    peintre = QPainter(image)
+    for y, ligne in enumerate(matrice):
+        for x, noir in enumerate(ligne):
+            if noir:
+                peintre.fillRect(x * pas, y * pas, pas, pas, QColor("black"))
+    peintre.end()
+    return QPixmap.fromImage(image)
+
+
+class DialogueAssociationTelephone(QDialog):
+    """Assistant d'association d'un téléphone Android (débogage sans fil,
+    Android 11 ou plus récent) : explications pas à pas, QR code à
+    scanner, ou code à 6 chiffres. Reconnaît aussi un téléphone déjà
+    associé qui devient joignable. self.serie est rempli si tout a marché."""
+
+    ETAPES = (
+        f"<p style='color:{COULEUR_TEL_OK}'>Téléphone déjà associé ? Inutile de recommencer : "
+        "activez simplement son « Débogage sans fil » (étape 2), il sera détecté tout seul.</p>"
+        "<p><b>1. Une seule fois : faire apparaître les « Options de développement »</b><br>"
+        "Sur le téléphone : <i>Paramètres → À propos du téléphone → Informations sur le "
+        "logiciel</i>, puis touchez <b>7 fois de suite</b> « Numéro de version » (le code du "
+        "téléphone est demandé). Le message « Mode développeur activé » apparaît.<br>"
+        f"<span style='color:{COULEUR_TEL_DISCRET}'>Pas trouvé ? Le chemin change selon la "
+        "marque. Dans Paramètres, touchez la <b>loupe</b> et tapez <b>version</b> : touchez "
+        "le résultat « Numéro de version » (« Numéro de build » sur Pixel, « Version MIUI » ou "
+        "« Version de HyperOS » sur Xiaomi), puis les 7 touches.</span></p>"
+        "<p><b>2. Activer le débogage sans fil</b><br>"
+        "Le téléphone doit être sur le <b>même Wi-Fi</b> que cet ordinateur. "
+        "<i>Paramètres → Options de développement</i> (tout en bas de la liste) → "
+        "<b>Débogage sans fil</b> → activez l'interrupteur → cochez « Toujours autoriser sur "
+        "ce réseau » → <b>Autoriser</b>.</p>"
+        "<p><b>3. Scanner le code</b><br>"
+        "Touchez le <u>texte</u> « Débogage sans fil » (pas l'interrupteur) → "
+        "<b>Associer l'appareil avec un code QR</b>, et visez le code ci-contre. "
+        "C'est tout : COURRIER s'occupe du reste.</p>"
+        "<p><b>Astuce, fortement conseillée</b> : Android coupe le débogage sans fil après un "
+        "redémarrage du téléphone. Pour le rallumer en un geste, ajoutez sa vignette au volet "
+        "rapide : <i>Options de développement → Vignettes de développeur pour paramètres "
+        "rapides</i> → activez <b>Débogage sans fil</b>. Ensuite : faites glisser le haut de "
+        "l'écran vers le bas et touchez la vignette.</p>"
+        f"<p style='color:{COULEUR_TEL_DISCRET}'>Android 10 ou plus ancien : le débogage sans "
+        "fil n'existe pas, branchez le téléphone en USB.</p>"
+    )
+    # Version courte : téléphone déjà associé une fois, association effacée
+    # (Options de développement coupées pour une appli de banque, etc.)
+    ETAPES_RAPIDES = (
+        "<p><b>Rescanner le QR code</b> (le téléphone a déjà été associé : inutile de tout "
+        "refaire)</p>"
+        "<p><b>1.</b> Sur le téléphone : <i>Paramètres → Options de développement</i> (tout en "
+        "bas) → activez <b>Débogage sans fil</b> si ce n'est pas fait, puis <b>Autoriser</b>.</p>"
+        "<p><b>2.</b> Touchez le <u>texte</u> « Débogage sans fil » (pas l'interrupteur) → "
+        "<b>Associer l'appareil avec un code QR</b>, et visez le code ci-contre.</p>"
+        f"<p style='color:{COULEUR_TEL_DISCRET}'>Plus d'« Options de développement » dans les "
+        "Paramètres ? Refaites les 7 touches sur « Numéro de version » (loupe des Paramètres : "
+        "tapez <b>version</b>).</p>"
+        "<p><a href='#' style='color:#e08080'>Afficher toutes les explications</a></p>"
+    )
+
+    def __init__(self, parent=None, si_trouve=None, rapide=False):
+        super().__init__(parent)
+        import secrets, string
+        self.setWindowTitle("Rescanner le QR code" if rapide else "Associer un téléphone Android")
+        self.setStyleSheet(style_boites_telephone())
+        self.serie = None
+        self._si_trouve = si_trouve  # appelée avec la série : ouvre l'écran du téléphone
+        self._fini = False
+        self._en_cours = False        # « adb pair » lancé, en attente
+        self._adresse_code = None     # téléphone vu en attente d'un code à 6 chiffres
+        self._code_en_attente = None  # code tapé avant que le téléphone soit vu
+        alphabet = string.ascii_letters + string.digits
+        self._nom_qr = "courrier-" + "".join(secrets.choice(alphabet) for _ in range(6))
+        self._mdp_qr = "".join(secrets.choice(alphabet) for _ in range(10))
+        self._relais = _RelaisGuet(self)
+        self._relais.trouve.connect(self._service_trouve)
+        self._relais.resultat.connect(self._resultat_association)
+        self._relais.connecte.connect(self._connecte)
+
+        etapes = QLabel(self.ETAPES_RAPIDES if rapide else self.ETAPES)
+        etapes.linkActivated.connect(lambda _lien: etapes.setText(self.ETAPES))
+        etapes.setTextFormat(Qt.RichText)
+        etapes.setWordWrap(True)
+        etapes.setMinimumWidth(450)
+        etapes.setAlignment(Qt.AlignTop)
+
+        self.lbl_qr = QLabel()
+        self.lbl_qr.setAlignment(Qt.AlignCenter)
+        try:
+            self.lbl_qr.setPixmap(_image_qrcode(f"WIFI:T:ADB;S:{self._nom_qr};P:{self._mdp_qr};;"))
+        except ImportError:
+            self.lbl_qr.setText("(QR code indisponible :\nmodule « qrcode » absent.\n"
+                                "Utilisez le code à 6 chiffres ci-dessous.)")
+        self.lbl_statut = QLabel()
+        self.lbl_statut.setWordWrap(True)
+        self.lbl_statut.setAlignment(Qt.AlignCenter)
+        self.lbl_statut.setFixedWidth(280)
+        self._statut("En attente du téléphone…", COULEUR_TEL_DISCRET)
+        colonne_qr = QVBoxLayout()
+        colonne_qr.addWidget(self.lbl_qr)
+        colonne_qr.addWidget(self.lbl_statut)
+        colonne_qr.addStretch()
+
+        haut = QHBoxLayout()
+        haut.addWidget(etapes, 1)
+        haut.addSpacing(12)
+        haut.addLayout(colonne_qr)
+
+        lbl_code = QLabel("Le téléphone n'arrive pas à scanner ? Au lieu du QR code, choisissez "
+                          "plutôt "
+                          "« Associer l'appareil avec un code d'association », puis tapez ici "
+                          "le code à 6 chiffres affiché :")
+        lbl_code.setWordWrap(True)
+        self.champ_code = QLineEdit()
+        self.champ_code.setMaxLength(6)
+        self.champ_code.setPlaceholderText("123456")
+        self.champ_code.setFixedWidth(90)
+        self.champ_code.returnPressed.connect(self._clic_code)
+        btn_code = QPushButton("Associer avec ce code")
+        btn_code.setAutoDefault(False)
+        btn_code.clicked.connect(self._clic_code)
+        ligne_code = QHBoxLayout()
+        ligne_code.addWidget(self.champ_code)
+        ligne_code.addWidget(btn_code)
+        ligne_code.addStretch()
+
+        # Oubli automatique au bout de 7 jours (14/10/2026) : choix visible
+        # de l'utilisateur, appliqué à chaque connexion (_memoriser_telephone)
+        from PySide6.QtWidgets import QCheckBox
+        # Décochée par défaut (14/10/2026, demandé) : COURRIER prévient
+        # alors la veille de l'oubli (verifier_rappel_7_jours).
+        self.case_garder = QCheckBox("Ne pas oublier cet ordinateur au bout de 7 jours")
+        self.case_garder.setChecked(
+            (lire_telephone_associe() or {}).get("garder_autorisation") is True)
+        lbl_garder = QLabel(
+            "Android oublie normalement un ordinateur resté 7 jours sans se connecter au "
+            "téléphone : il faudrait alors refaire l'association. Case décochée, COURRIER "
+            "vous prévient la veille : il suffit alors de relier le téléphone une fois. "
+            "Ne cochez pas si cet ordinateur n'est pas le vôtre ou s'il est partagé. Pour "
+            "retirer l'accès plus tard, sur le téléphone : Débogage sans fil → Appareils "
+            "associés → Oublier (à faire aussi avant de vendre, donner ou faire réparer cet "
+            "ordinateur).")
+        lbl_garder.setWordWrap(True)
+        lbl_garder.setStyleSheet(f"color: {COULEUR_TEL_DISCRET};")
+
+        self.btn_fermer = QPushButton("Fermer")
+        self.btn_fermer.setAutoDefault(False)
+        self.btn_fermer.clicked.connect(lambda: self.accept() if self.serie else self.reject())
+        bas = QHBoxLayout()
+        bas.addStretch()
+        bas.addWidget(self.btn_fermer)
+
+        principal = QVBoxLayout(self)
+        principal.addLayout(haut)
+        principal.addWidget(lbl_code)
+        principal.addLayout(ligne_code)
+        principal.addSpacing(6)
+        principal.addWidget(self.case_garder)
+        principal.addWidget(lbl_garder)
+        principal.addLayout(bas)
+
+        _threading.Thread(target=self._surveiller, daemon=True).start()
+
+    def done(self, resultat):
+        self._fini = True  # arrête la recherche en arrière-plan
+        super().done(resultat)
+
+    def _statut(self, texte, couleur=None):
+        self.lbl_statut.setText(texte)
+        self.lbl_statut.setStyleSheet(f"color: {couleur};" if couleur else "")
+
+    def _emettre(self, signal, *valeurs):
+        if not self._fini:
+            try:
+                signal.emit(*valeurs)
+            except RuntimeError:  # fenêtre déjà détruite
+                pass
+
+    def _surveiller(self):
+        """Fil de fond : guette un téléphone prêt à s'associer (QR code
+        scanné ou écran du code ouvert), et à défaut un téléphone déjà
+        associé qui devient joignable."""
+        while not self._fini:
+            if self._en_cours:
+                time.sleep(0.5)
+                continue
+            trouve = chercher_service_mdns(SERVICE_MDNS_ASSOCIATION, 2.0)
+            if trouve:
+                self._emettre(self._relais.trouve, *trouve)
+                time.sleep(1)
+            elif not self.serie and not self._en_cours:
+                serie = _chercher_telephone_bloquant(1.5)
+                if serie:
+                    self._emettre(self._relais.connecte, serie)
+
+    def _service_trouve(self, adresse, instance):
+        if self._en_cours or self._fini:
+            return
+        if instance == self._nom_qr:  # notre QR code vient d'être scanné
+            self._associer(adresse, self._mdp_qr)
+        else:  # écran « code d'association » ouvert sur le téléphone
+            self._adresse_code = adresse
+            if self._code_en_attente:
+                self._associer(adresse, self._code_en_attente)
+            else:
+                self._statut("Téléphone prêt : tapez ci-dessous le code à 6 chiffres qu'il affiche.",
+                             COULEUR_TEL_OK)
+
+    def _clic_code(self):
+        code = re.sub(r"\D", "", self.champ_code.text())
+        if len(code) != 6:
+            self._statut("Le code doit faire 6 chiffres.", COULEUR_TEL_ERREUR)
+            return
+        if self._adresse_code:
+            self._associer(self._adresse_code, code)
+        else:
+            self._code_en_attente = code
+            self._statut("Recherche du téléphone… (laissez l'écran du code ouvert sur le téléphone)",
+                         COULEUR_TEL_DISCRET)
+
+    def _associer(self, adresse, mot_de_passe):
+        self._en_cours = True
+        self._statut("Téléphone trouvé, association en cours…", COULEUR_TEL_OK)
+        print(f"[TELEPHONE] association avec {adresse}")
+
+        def _travail():
+            sortie = _adb_bloquant("pair", adresse, mot_de_passe, delai=30).strip()
+            self._emettre(self._relais.resultat, "Successfully paired" in sortie, sortie)
+
+        _threading.Thread(target=_travail, daemon=True).start()
+
+    def _resultat_association(self, reussi, sortie):
+        print(f"[TELEPHONE] adb pair : {sortie}")
+        self._adresse_code = self._code_en_attente = None
+        if not reussi:
+            self._en_cours = False
+            self._statut(f"L'association a échoué. Recommencez l'étape 3 (pour le code à 6 "
+                         f"chiffres, vérifiez-le). Le téléphone doit être sur le Wi-Fi de la "
+                         f"maison, pas sur un Wi-Fi « invité » ni en 4G/5G.\n\n"
+                         f"Détail : {sortie or 'pas de réponse'}",
+                         COULEUR_TEL_ERREUR)
+            return
+        self._statut("Association réussie ! Connexion au téléphone…", COULEUR_TEL_OK)
+        # La connexion elle-même est faite par _surveiller : le téléphone
+        # met un instant à s'annoncer pour la connexion.
+        self.serie = None
+        self._en_cours = False
+        QTimer.singleShot(30000, self._connexion_lente)
+
+    def _connexion_lente(self):
+        if not self.serie and not self._fini and not self._en_cours:
+            self._statut("Le téléphone est associé, mais pas encore joignable. Vérifiez que le "
+                         "« Débogage sans fil » est toujours activé : il sera détecté tout seul.",
+                         COULEUR_TEL_ERREUR)
+
+    def _connecte(self, serie):
+        if self._fini or self.serie:
+            return
+        self.serie = serie
+        # Avant _si_trouve : _memoriser_telephone appliquera ce choix
+        _ecrire_telephone_associe(garder_autorisation=self.case_garder.isChecked())
+        nom = ""
+        for s, modele in _lire_appareils(_adb_bloquant("devices", "-l", delai=5))[0]:
+            if s == serie:
+                nom = f" « {modele.replace('_', ' ')} »"
+        self._statut(f"C'est fait : le téléphone{nom} est relié à cet ordinateur.\n"
+                     "Inutile de recommencer à l'avenir.\n\nOuverture de son écran…", COULEUR_TEL_OK)
+        self.btn_fermer.setEnabled(False)
+        if self._si_trouve:
+            self._si_trouve(serie)
+            # Laisse lire le message au moins 3 s, et ne ferme qu'une fois
+            # l'écran du téléphone affiché (pas de vide entre les deux)
+            _fermer_quand_ecran_affiche(self, minimum=3.0)
+        else:
+            QTimer.singleShot(3000, self.accept)
+
+
+def ouvrir_assistant_association(parent=None, si_trouve=None, rapide=False):
+    """Ouvre l'assistant ; renvoie la série du téléphone joint, ou None.
+    si_trouve(serie) est appelée dès la connexion (ouvre l'écran du
+    téléphone), l'assistant restant affiché jusqu'à son apparition."""
+    dialogue = DialogueAssociationTelephone(parent, si_trouve=si_trouve, rapide=rapide)
+    serie = dialogue.serie if dialogue.exec() == QDialog.Accepted else None
+    dialogue.deleteLater()
+    return serie
+
+
+# --- Rallumage automatique du Débogage sans fil (14/10/2026) ---
+# Android coupe le Débogage sans fil dès que le téléphone quitte le Wi-Fi
+# (et au redémarrage). Solution retenue avec l'auteur après essais
+# (MacroDroid écarté : sa version gratuite s'arrête si on ne regarde pas
+# une pub tous les 3 jours) : l'appli gratuite Automate (LlamaLab, Play
+# Store) avec un flow de 10 blocs (numéros d'Automate), testé le 14/10/2026
+# sur Samsung S20+ / Android 13, redémarrage compris (chemins vérifiés
+# dans le journal d'Automate) :
+#   1 début → 6 « Wi-Fi connected? » (Immediately, sans nom de réseau :
+#   pas besoin de la localisation) → YES → 3 « System setting get » Global
+#   development_settings_enabled → dev → 7 idem "adb_wifi_enabled" → adb →
+#   4 « If » (dev = 1 || dev = "1") && !(adb = 1 || adb = "1") && tente != 1
+#   → YES → 10 tente = 1 → 5 « System setting set » Global
+#   "adb_wifi_enabled" = 1 → 8 « Delay » 30 s (Inexact, Awake device) →
+#   retour au 6. 6 NO → 9 tente = 0 → 8. 4 NO → 11 tente =
+#   (adb = 1 || adb = "1") ? 0 : tente → 8.
+# « tente » = une seule tentative par connexion Wi-Fi : sur un réseau non
+# marqué « Toujours autoriser », Android refuse (remet adb_wifi_enabled à
+# 0) et affiche « Autoriser le débogage sans fil sur ce réseau ? » ; sans
+# elle, la question reviendrait à chaque vérification. Remise à 0 quand le
+# Wi-Fi tombe, ou quand le débogage est constaté allumé (réseau de
+# confiance : on pourra donc le rallumer après un redémarrage).
+# Vérification toutes les 30 s plutôt qu'attente d'un changement du Wi-Fi
+# (« When changed ») : après un redémarrage, Automate REPREND la règle au
+# bloc où elle attendait (« Resumed after restart »), pas au début ; avec
+# le Wi-Fi déjà connecté, aucun changement ne venait et rien ne se
+# rallumait (constaté le 14/10/2026). Automate : Settings → « Run on
+# system startup » coché, sinon la règle ne reprend pas du tout.
+# Le flow ne rallume rien quand les Options de développement sont coupées
+# (applis de banque), et Android ne rallume en silence que sur les Wi-Fi
+# « Toujours autoriser sur ce réseau ». Automate a besoin de
+# WRITE_SECURE_SETTINGS, accordée par adb (pm grant) sur clic de
+# l'utilisateur. Le .flo (357 octets, exporté du téléphone de l'auteur) est
+# embarqué ici en base64 (aucun fichier à livrer dans la build) et importé
+# par l'activité FlowImportActivity d'Automate via une adresse
+# content://media (fichier déposé dans Téléchargements). Choix de
+# l'utilisateur dans telephone_associe.json, clé "rallumage" : "fait",
+# "jamais" ou "plus_tard:AAAA-MM-JJ" (reproposé le lendemain).
+PAQUET_AUTOMATE = "com.llamalab.automate"
+NOM_FICHIER_FLOW = "Débogage sans fil auto (COURRIER).flo"
+DOSSIER_FLOW_TELEPHONE = "/sdcard/Download"
+FLOW_AUTOMATE_B64 = (
+    "TEFGbAByFgrgEAIAAPQRDA8i3BEGABjcEQ4PLsQQCAAk6A8UHzLeEQoAMKwQEA08AyAA0AE/8AAAAAAAANAB"
+    "QD4AAAAAAADKAUAAAAAAAAAA1AEQYWRiX3dpZmlfZW5hYmxlZNQBATHQAT/wAAAAAAAAzAEFdGVudGXoDxYf"
+    "Pg/wAfoBkAL0AcwBA2FkYtABP/AAAAAAAAD0ASvUAQEx0AEAAAAAAAAAAB8f3gHeAfoBkAL0AcwBA2RldtAB"
+    "P/AAAAAAAAD0AT/UAQExjAL6AZAC9AEr0AE/8AAAAAAAAPQBK9QBATGOAh/QAT/wAAAAAAAAEcoBQAAAAAAA"
+    "AADUARBhZGJfd2lmaV9lbmFibGVkKxHKAUAAAAAAAAAA1AEcZGV2ZWxvcG1lbnRfc2V0dGluZ3NfZW5hYmxl"
+    "ZD/oDxIfJg/QAQAAAAAAAAAAHxEAAAAAAAAAAAAAAAAABQkNAwcPYQsh")
+
+
+def _etat_automate(serie):
+    """(Automate installé ?, permission WRITE_SECURE_SETTINGS accordée ?)
+    sur le profil principal. Bloquant. « --user 0 » obligatoire : sur
+    Samsung, le Dossier sécurisé (profil 150) est interdit à adb."""
+    installe = f"package:{PAQUET_AUTOMATE}" in _adb_bloquant(
+        "-s", serie, "shell", f"pm list packages --user 0 {PAQUET_AUTOMATE}", delai=10)
+    autorise = False
+    if installe:
+        for ligne in _adb_bloquant("-s", serie, "shell", f"dumpsys package {PAQUET_AUTOMATE}",
+                                   delai=15).splitlines():
+            # "granted=true" seul = profil principal ; ", userId=150" = Dossier sécurisé
+            if "WRITE_SECURE_SETTINGS: granted=true" in ligne and \
+                    ("userId=" not in ligne or "userId=0" in ligne):
+                autorise = True
+                break
+    return installe, autorise
+
+
+def _chemin_shell(chemin):
+    """Chemin entre apostrophes pour le shell du téléphone."""
+    return "'" + chemin.replace("'", "'\\''") + "'"
+
+
+class _RelaisRallumage(QObject):
+    etat = Signal(bool, bool)   # Automate installé ?, autorisé ?
+    envoi = Signal(str, str)    # adresse content:// du flow (ou ""), message d'erreur
+
+
+class DialogueRallumageAuto(QDialog):
+    """Met en place, étape par étape et à la main de l'utilisateur, le
+    rallumage automatique du Débogage sans fil par Automate (voir plus haut)."""
+
+    EXPLICATION = (
+        "<p><b>Ne plus avoir à rallumer le Débogage sans fil à la main</b></p>"
+        "<p>Android coupe le Débogage sans fil dès que le téléphone quitte le Wi-Fi ou "
+        "redémarre. COURRIER peut le faire <b>rallumer tout seul</b> quand le téléphone "
+        "revient sur un Wi-Fi, grâce à <b>Automate</b> : une appli gratuite, sans limite de "
+        "durée (éditeur LlamaLab, Play Store).</p>"
+        "<p><b>Pourquoi c'est la solution la plus sûre :</b><br>"
+        "&nbsp;• dès que vous partez, le Débogage sans fil reste coupé comme Android le "
+        "prévoit : rien n'est ouvert hors de chez vous ;<br>"
+        "&nbsp;• il ne se rallume sans rien demander que sur les Wi-Fi où vous avez coché "
+        "« Toujours autoriser sur ce réseau » ; ailleurs, Android vous demande la "
+        "permission, une seule fois par connexion (touchez « Refuser » si vous ne "
+        "voulez pas) ;<br>"
+        "&nbsp;• il ne se rallume jamais quand les Options de développement sont coupées "
+        "(certaines applis de banque l'exigent) ;<br>"
+        "&nbsp;• la règle ne fait rien d'autre, et n'a besoin ni de votre position, ni de "
+        "vos contacts, ni de vos messages ;<br>"
+        "&nbsp;• vous validez chaque étape vous-même, et tout se défait en désinstallant "
+        "Automate.</p>"
+    )
+    CONSIGNES_IMPORT = (
+        "<b>Sur le téléphone</b> (Automate est en anglais) :<br>"
+        "1. Touchez <b>IMPORT</b>.<br>"
+        "2. Ouvrez la règle « Débogage sans fil auto (COURRIER) » si elle ne s'ouvre pas "
+        "toute seule, puis touchez <b>START</b>.<br>"
+        "3. Automate propose des autorisations. Acceptez <i>afficher des notifications</i>, "
+        "<i>modify system settings</i>, <i>ignore app hibernation</i> (puis désactivez "
+        "« Suppr. autoris. si appli. inutilisée ») et <i>ignore battery optimizations</i>.<br>"
+        "&nbsp;&nbsp;&nbsp;Pour <i>accéder à la position en arrière-plan</i>, touchez "
+        "<b>NEVER</b> : la règle n'en a pas besoin.<br>"
+        "4. Le bouton <b>STOP (1)</b> indique que la règle tourne.<br>"
+        "5. Pour qu'elle reparte après un redémarrage : menu <b>☰</b> d'Automate → "
+        "<b>Settings</b> → tout en bas, cochez <b>Run on system startup</b>. Automate "
+        "affiche un avertissement général (un flow mal fait pourrait bloquer le téléphone "
+        "au démarrage) : il ne concerne pas cette règle, qui ne fait que rallumer le "
+        "Débogage sans fil. Touchez <b>ENABLE</b>."
+    )
+
+    def __init__(self, parent, serie):
+        super().__init__(parent)
+        self.setWindowTitle("Rallumage automatique du Débogage sans fil")
+        self.setStyleSheet(style_boites_telephone())
+        self.serie = serie
+        self._fini = False
+        self._installe = self._autorise = False
+        self._uri_flow = ""
+        self._relais = _RelaisRallumage(self)
+        self._relais.etat.connect(self._maj_etat)
+        self._relais.envoi.connect(self._flow_envoye)
+
+        explication = QLabel(self.EXPLICATION)
+        explication.setTextFormat(Qt.RichText)
+        explication.setWordWrap(True)
+        explication.setFixedWidth(620)
+
+        def _etape(numero, texte):
+            marque = QLabel(f"{numero}.")
+            marque.setFixedWidth(28)
+            marque.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+            libelle = QLabel(texte)
+            libelle.setTextFormat(Qt.RichText)
+            libelle.setWordWrap(True)
+            return marque, libelle
+
+        self.marque1, lib1 = _etape(1, "<b>Installer Automate</b> (gratuit) : sur le téléphone, "
+                                       "vérifiez que l'éditeur est <b>LlamaLab</b> et touchez "
+                                       "<b>Installer</b>.")
+        self.btn_installer = QPushButton("Ouvrir le Play Store sur le téléphone")
+        self.btn_installer.clicked.connect(self._ouvrir_play_store)
+        self.marque2, lib2 = _etape(2, "<b>Autoriser Automate à rallumer le Débogage sans "
+                                       "fil.</b> Cette autorisation (« modifier les paramètres "
+                                       "sécurisés ») ne peut être donnée que depuis "
+                                       "l'ordinateur ; elle disparaît si Automate est "
+                                       "désinstallé.")
+        self.btn_autoriser = QPushButton("Donner l'autorisation")
+        self.btn_autoriser.clicked.connect(self._autoriser)
+        self.marque3, lib3 = _etape(3, "<b>Installer la règle dans Automate.</b>")
+        self.btn_envoyer = QPushButton("Envoyer la règle au téléphone")
+        self.btn_envoyer.clicked.connect(self._envoyer_flow)
+        self.lbl_consignes = QLabel()
+        self.lbl_consignes.setTextFormat(Qt.RichText)
+        self.lbl_consignes.setWordWrap(True)
+        self.lbl_consignes.hide()
+
+        grille = QVBoxLayout()
+        for marque, libelle, bouton in ((self.marque1, lib1, self.btn_installer),
+                                        (self.marque2, lib2, self.btn_autoriser),
+                                        (self.marque3, lib3, self.btn_envoyer)):
+            bouton.setAutoDefault(False)
+            ligne = QHBoxLayout()
+            ligne.addWidget(marque)
+            ligne.addWidget(libelle, 1)
+            ligne.addWidget(bouton)
+            grille.addLayout(ligne)
+        grille.addWidget(self.lbl_consignes)
+
+        self.btn_fait = QPushButton("C'est fait")
+        self.btn_fait.clicked.connect(self._termine)
+        self.btn_fait.hide()
+        btn_deja = QPushButton("C'est déjà en place")
+        btn_deja.clicked.connect(self._termine)
+        btn_plus_tard = QPushButton("Plus tard")
+        btn_plus_tard.clicked.connect(self._plus_tard)
+        btn_jamais = QPushButton("Ne plus proposer")
+        btn_jamais.clicked.connect(self._jamais)
+        boutons = QHBoxLayout()
+        boutons.addWidget(btn_deja)
+        boutons.addStretch()
+        for b in (self.btn_fait, btn_plus_tard, btn_jamais):
+            boutons.addWidget(b)
+        for b in (self.btn_fait, btn_deja, btn_plus_tard, btn_jamais):
+            b.setAutoDefault(False)
+
+        principal = QVBoxLayout(self)
+        principal.addWidget(explication)
+        principal.addSpacing(6)
+        principal.addLayout(grille)
+        principal.addSpacing(8)
+        principal.addLayout(boutons)
+
+        self._maj_etat(False, False)
+        _threading.Thread(target=self._surveiller, daemon=True).start()
+
+    def showEvent(self, evenement):
+        super().showEvent(evenement)
+        # Passer devant la fenêtre de l'écran du téléphone (scrcpy)
+        self.raise_()
+        self.activateWindow()
+
+    def done(self, resultat):
+        self._fini = True
+        super().done(resultat)
+
+    def _surveiller(self):
+        """Fil de fond : suit l'installation et l'autorisation d'Automate."""
+        while not self._fini:
+            etat = _etat_automate(self.serie)
+            if self._fini:
+                return
+            try:
+                self._relais.etat.emit(*etat)
+            except RuntimeError:
+                return
+            time.sleep(2)
+
+    def _maj_etat(self, installe, autorise):
+        self._installe, self._autorise = installe, autorise
+        for marque, fait, numero in ((self.marque1, installe, 1), (self.marque2, autorise, 2)):
+            marque.setText("✔" if fait else f"{numero}.")
+            marque.setStyleSheet(f"color: {COULEUR_TEL_OK}; font-weight: bold;" if fait else "")
+        self.btn_installer.setEnabled(not installe)
+        self.btn_installer.setText("Installé" if installe else "Ouvrir le Play Store sur le téléphone")
+        self.btn_autoriser.setEnabled(installe and not autorise)
+        self.btn_autoriser.setText("Autorisé" if autorise else "Donner l'autorisation")
+        self.btn_envoyer.setEnabled(installe and autorise)
+
+    def _shell(self, commande, delai=15):
+        return _adb_bloquant("-s", self.serie, "shell", commande, delai=delai)
+
+    def _ouvrir_play_store(self):
+        def _travail():
+            self._shell("input keyevent KEYCODE_WAKEUP")
+            self._shell(f"am start --user 0 -a android.intent.action.VIEW -p com.android.vending "
+                        f"-d market://details?id={PAQUET_AUTOMATE}")
+        _threading.Thread(target=_travail, daemon=True).start()
+
+    def _autoriser(self):
+        self.btn_autoriser.setEnabled(False)
+        print("[TELEPHONE] autorisation WRITE_SECURE_SETTINGS accordée à Automate (clic utilisateur)")
+        _threading.Thread(target=lambda: self._shell(
+            f"pm grant --user 0 {PAQUET_AUTOMATE} android.permission.WRITE_SECURE_SETTINGS"),
+            daemon=True).start()
+
+    def _envoyer_flow(self):
+        import base64, tempfile
+        self.btn_envoyer.setEnabled(False)
+        self.btn_envoyer.setText("Envoi…")
+
+        def _travail():
+            uri, erreur = "", ""
+            local = os.path.join(tempfile.gettempdir(), "courrier_debogage_sans_fil.flo")
+            distant = f"{DOSSIER_FLOW_TELEPHONE}/{NOM_FICHIER_FLOW}"
+            try:
+                with open(local, "wb") as f:
+                    f.write(base64.b64decode(FLOW_AUTOMATE_B64))
+                _adb_bloquant("-s", self.serie, "push", local, distant, delai=20)
+                # Référencé par Android (comme les photos des MMS) : Automate
+                # ne peut lire qu'un fichier qui a une adresse content://
+                reel = self._shell(f"readlink -f {_chemin_shell(distant)}").strip()
+                self._shell(f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+                            f"-d {_chemin_shell('file://' + reel)}")
+                for _ in range(10):
+                    time.sleep(0.5)
+                    trouve = re.search(r"_id=(\d+)", self._shell(
+                        "content query --uri content://media/external/downloads --projection _id "
+                        f"--where \"_data='{reel}'\""))
+                    if trouve:
+                        uri = f"content://media/external/downloads/{trouve.group(1)}"
+                        break
+                if uri:
+                    self._shell("input keyevent KEYCODE_WAKEUP")
+                    self._shell(f"am start --user 0 -a android.intent.action.VIEW "
+                                f"-t application/vnd.com.llamalab.automate.flow -d {uri} "
+                                f"--grant-read-uri-permission -n {PAQUET_AUTOMATE}/.FlowImportActivity")
+                else:
+                    erreur = (f"La règle est dans les Téléchargements du téléphone, mais Automate "
+                              f"n'a pas pu l'ouvrir tout seul. Sur le téléphone : appli « Mes "
+                              f"fichiers » → Téléchargements → touchez « {NOM_FICHIER_FLOW} ».")
+            except Exception as exc:
+                erreur = f"Envoi impossible : {exc}"
+            finally:
+                try:
+                    os.remove(local)
+                except OSError:
+                    pass
+            try:
+                self._relais.envoi.emit(uri, erreur)
+            except RuntimeError:
+                pass
+
+        _threading.Thread(target=_travail, daemon=True).start()
+
+    def _flow_envoye(self, uri, erreur):
+        self._uri_flow = uri
+        self.btn_envoyer.setText("Renvoyer la règle")
+        self.btn_envoyer.setEnabled(True)
+        consignes = self.CONSIGNES_IMPORT
+        if erreur:
+            consignes = f"<span style='color:{COULEUR_TEL_ERREUR}'>{html.escape(erreur)}</span><br><br>" \
+                        + consignes
+        self.lbl_consignes.setText(consignes)
+        self.lbl_consignes.show()
+        self.btn_fait.show()
+        self.btn_fait.setDefault(True)
+        self.adjustSize()
+
+    def _termine(self):
+        _ecrire_telephone_associe(rallumage="fait")
+        print("[TELEPHONE] rallumage automatique en place")
+        if self._uri_flow:  # la règle est importée : on retire le fichier des Téléchargements
+            uri = self._uri_flow
+            _threading.Thread(target=lambda: self._shell(f"content delete --uri {uri}"),
+                              daemon=True).start()
+        self.accept()
+
+    def _plus_tard(self):
+        _ecrire_telephone_associe(rallumage="plus_tard:" + time.strftime("%Y-%m-%d"))
+        self.reject()
+
+    def _jamais(self):
+        _ecrire_telephone_associe(rallumage="jamais")
+        self.reject()
+
+
+# Rappel avant l'oubli au bout de 7 jours (14/10/2026, demandé) : quand
+# la case « Ne pas oublier cet ordinateur » n'est pas cochée, Android
+# retire l'autorisation de l'ordinateur 7 jours après la dernière
+# connexion (adb_allowed_connection_time). Le 6e jour, COURRIER propose
+# de relier le téléphone : une connexion suffit à repartir pour 7 jours.
+# Vérifié au lancement puis toutes les heures, au plus une fois par jour
+# (clé "rappel_7_jours" = date du dernier rappel).
+DELAI_RAPPEL_7_JOURS = 6 * 24 * 3600  # secondes depuis la dernière connexion
+DELAI_OUBLI_ANDROID = 7 * 24 * 3600
+
+
+def verifier_rappel_7_jours(fenetre):
+    import datetime as _dt
+    associe = lire_telephone_associe() or {}
+    if not associe.get("nom") or associe.get("garder_autorisation") is True:
+        return
+    aujourdhui = time.strftime("%Y-%m-%d")
+    if associe.get("rappel_7_jours") == aujourdhui:
+        return
+    try:
+        derniere = _dt.datetime.strptime(associe.get("derniere_connexion", ""), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return
+    ecoule = (_dt.datetime.now() - derniere).total_seconds()
+    if not DELAI_RAPPEL_7_JOURS <= ecoule < DELAI_OUBLI_ANDROID:
+        return  # trop tôt, ou déjà oublié (TÉL proposera alors de rescanner le QR code)
+    _ecrire_telephone_associe(rappel_7_jours=aujourdhui)
+    echeance = derniere + _dt.timedelta(seconds=DELAI_OUBLI_ANDROID)
+    from PySide6.QtWidgets import QMessageBox
+    boite = QMessageBox(QMessageBox.Information, TITRE_BOITES_TELEPHONE,
+                        f"Le téléphone « {associe['nom']} » n'a pas été relié à COURRIER depuis "
+                        f"6 jours.\n\n"
+                        f"Le {echeance.strftime('%d/%m à %H:%M')}, Android oubliera cet "
+                        f"ordinateur, et il faudra rescanner le QR code.\n\n"
+                        f"Pour l'éviter, il suffit de relier le téléphone une fois maintenant "
+                        f"(Débogage sans fil activé, même Wi-Fi que l'ordinateur) : Android "
+                        f"repartira pour 7 jours.",
+                        QMessageBox.NoButton, fenetre)
+    boite.setStyleSheet(style_boites_telephone())
+    b_relier = boite.addButton("Relier maintenant", QMessageBox.AcceptRole)
+    boite.addButton("Plus tard", QMessageBox.RejectRole)
+    boite.exec()
+    if boite.clickedButton() is b_relier:
+        print("[TELEPHONE] rappel 7 jours : liaison demandée")
+        connecter_telephone(fenetre, lambda _serie: _boite_telephone(
+            fenetre, "Le téléphone est relié : Android repart pour 7 jours.", QMessageBox.Information))
+
+
+def proposer_rallumage_auto(parent, serie):
+    """Propose DialogueRallumageAuto après une connexion réussie, sauf si
+    c'est déjà fait, refusé pour toujours, ou remis à plus tard aujourd'hui."""
+    choix = (lire_telephone_associe() or {}).get("rallumage", "")
+    if choix in ("fait", "jamais") or choix == "plus_tard:" + time.strftime("%Y-%m-%d"):
+        return
+    dialogue = DialogueRallumageAuto(parent, serie)
+    dialogue.exec()
+    dialogue.deleteLater()
 
 
 def _ramener_fenetre_telephone(serie):
@@ -4277,12 +5430,11 @@ def afficher_ecran_telephone(serie, parent=None):
     réglages que le navigateur : 2 Mbps, 1080, sans reverse connection,
     sans le son), ou ramène au premier plan celle déjà ouverte."""
     import subprocess
-    from PySide6.QtWidgets import QMessageBox
     global _processus_scrcpy
     if _ramener_fenetre_telephone(serie):
         return
     if not os.path.isfile(CHEMIN_SCRCPY):
-        QMessageBox.warning(parent, "Téléphone", f"scrcpy introuvable :\n{CHEMIN_SCRCPY}")
+        _boite_telephone(parent, f"scrcpy introuvable :\n{CHEMIN_SCRCPY}")
         return
     print(f"[TELEPHONE] ouverture de l'écran de {serie}")
     journal = open(CHEMIN_JOURNAL_SCRCPY, "w", encoding="utf-8", errors="replace")
@@ -4306,9 +5458,8 @@ def afficher_ecran_telephone(serie, parent=None):
             except OSError:
                 fin = ""
             print(f"[TELEPHONE] scrcpy s'est arrêté : {fin}")
-            QMessageBox.warning(parent, "Téléphone",
-                                "L'écran du téléphone n'a pas pu s'ouvrir.\n\n"
-                                "Si QtScrcpy est ouvert, fermez-le puis recommencez.\n\n" + fin)
+            _boite_telephone(parent, "L'écran du téléphone n'a pas pu s'ouvrir.\n\n"
+                                     "Si QtScrcpy est ouvert, fermez-le puis recommencez.\n\n" + fin)
 
     QTimer.singleShot(5000, _verifier)
 
@@ -24094,7 +25245,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 13/10/2026 23h28")
+        self.setWindowTitle("COURRIER ADRIEN — 14/10/2026 12h03")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -24822,9 +25973,18 @@ class ClientMail(QMainWindow):
             def _connecte(serie):
                 _retablir()
                 afficher_ecran_telephone(serie, self)
+                # Une fois l'écran du téléphone affiché : proposer (une
+                # fois) le rallumage automatique du Débogage sans fil
+                QTimer.singleShot(6000, lambda: proposer_rallumage_auto(self, serie))
             connecter_telephone(self, _connecte, si_echec=_retablir)
         btn_tel.clicked.connect(_ouvrir_telephone)
         layout_haut.addWidget(btn_tel)
+        # Rappel la veille de l'oubli de l'ordinateur par Android (7 jours) :
+        # 1 min après le lancement, puis toutes les heures
+        self._minuterie_rappel_tel = QTimer(self)
+        self._minuterie_rappel_tel.timeout.connect(lambda: verifier_rappel_7_jours(self))
+        self._minuterie_rappel_tel.start(3600 * 1000)
+        QTimer.singleShot(60 * 1000, lambda: verifier_rappel_7_jours(self))
         layout_haut.addSpacing(3)
 
         # SMS (07/10/2026) : envoi de SMS par le téléphone relié (DialogueSMS)
@@ -28937,7 +30097,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 13/10/2026 à 23h28")
+        lbl_version = QLabel("Version du 14/10/2026 à 12h03")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 

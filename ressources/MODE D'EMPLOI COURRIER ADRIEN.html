@@ -88,11 +88,23 @@
     table { display: block; overflow-x: auto; }
   }
   @media print {
-    body { background: #fff; color: #000; }
-    nav { display: none; }
-    section { background: #fff; border-color: #ccc; break-inside: avoid-page; }
+    body { background: #fff; color: #000; font-size: 13px; }
+    .page { display: block; padding: 16px 0 0; }
+    /* Sommaire en tête (sans la case de recherche), puis le texte à la page suivante */
+    nav { position: static; max-height: none; background: #fff; border-color: #ccc; break-after: page; }
+    nav b { color: var(--brique); font-size: 18px; }
+    nav ol { font-size: 14px; columns: 2; }
+    nav a { color: #000; }
+    .recherche { display: none; }
+    section { background: #fff; border-color: #ccc; padding: 2px 18px 10px; margin-bottom: 14px; }
+    h2, h3 { break-after: avoid; }
+    tr, li, .note, .attention { break-inside: avoid; }
     h2 { color: var(--brique); } h3 { color: #000; }
+    a { color: var(--brique); }
+    th { background: #eee; color: #000; }
+    kbd, code { background: #f0f0f0; color: #000; border-color: #999; }
     .note, .attention { background: #f4f4f4; }
+    .note b, .attention b { color: var(--brique); }
   }
 </style>
 </head>
@@ -414,18 +426,52 @@
   <h2>19. Téléphone : TÉL et SMS</h2>
   <p><span class="btn">TÉL</span> affiche l'écran de votre téléphone sur le PC ; vous pouvez le piloter à la souris. <span class="btn">SMS</span> envoie des SMS par votre téléphone, avec votre forfait, un par un.</p>
   <div class="attention"><b>Android uniquement.</b> Les iPhone ne sont pas compatibles, car Apple ne permet pas à un PC de piloter un iPhone.</div>
-  <h3>Préparation, une seule fois, sur le téléphone</h3>
+  <h3>Relier le téléphone à l'ordinateur (une seule fois)</h3>
+  <p>Il suffit de cliquer sur <span class="btn">TÉL</span>. Si aucun téléphone n'est encore associé, Courrier Adrien l'explique et propose <b>Associer un téléphone…</b> : un assistant vous guide pas à pas, <b>sans câble et sans ligne de commande</b> (Android 11 et plus).</p>
   <ol>
-    <li><b>Paramètres › À propos du téléphone › Informations sur le logiciel</b> : touchez 7 fois « Numéro de version ». Le menu « Options pour les développeurs » apparaît.</li>
-    <li>Dans les <b>Options pour les développeurs</b>, activez le <b>Débogage USB</b>.</li>
-    <li>Branchez le téléphone en USB et acceptez le PC sur l'écran du téléphone (« Autoriser le débogage USB »).</li>
-    <li><b>Le mieux</b> est d'associer votre téléphone et votre ordinateur (Android 11 et plus), pour vous passer du câble :
-      <ul>
-        <li>dans les <b>Options pour les développeurs</b>, activez le <b>Débogage sans fil</b>, entrez dans ce menu et touchez <b>« Associer l'appareil avec un code d'association »</b>. Le téléphone affiche une adresse (par exemple <code>192.168.1.20:37000</code>) et un code à 6 chiffres ;</li>
-        <li>Courrier Adrien ne sait pas encore faire cette association lui-même. Faites-la <b>une seule fois</b> avec QtScrcpy, ou avec l'outil <code>adb</code> fourni : ouvrez une invite de commandes dans le dossier <code>%LOCALAPPDATA%\COURRIER\scrcpy</code>, tapez <code>adb pair</code> suivi de l'adresse affichée, puis saisissez le code.</li>
-      </ul>
-      Ensuite, Courrier Adrien se connecte à votre téléphone <b>en 1 clic</b>, sans câble, dès que le Débogage sans fil est activé et que l'ordinateur et le téléphone sont sur le <b>même réseau Wi-Fi</b>.</li>
+    <li><b>Faire apparaître les « Options de développement »</b> : sur le téléphone, <i>Paramètres › À propos du téléphone › Informations sur le logiciel</i>, puis touchez <b>7 fois de suite</b> « Numéro de version ». Le message « Mode développeur activé » apparaît.<br>
+      <small>Pas trouvé ? Le chemin change selon la marque : dans les Paramètres, touchez la loupe et tapez <b>version</b> (« Numéro de build » sur Pixel, « Version MIUI » ou « Version de HyperOS » sur Xiaomi).</small></li>
+    <li><b>Activer le Débogage sans fil</b> : le téléphone doit être sur le <b>même Wi-Fi</b> que l'ordinateur. <i>Paramètres › Options de développement</i> (tout en bas) › <b>Débogage sans fil</b> › activez l'interrupteur, cochez « Toujours autoriser sur ce réseau », puis touchez <b>Autoriser</b>.</li>
+    <li><b>Scanner le QR code</b> : touchez le <u>texte</u> « Débogage sans fil » (pas l'interrupteur) › <b>Associer l'appareil avec un code QR</b>, et visez le QR code affiché par Courrier Adrien. C'est tout : l'association se fait toute seule, puis l'écran du téléphone s'ouvre sur l'ordinateur.<br>
+      <small>Le téléphone n'arrive pas à scanner ? Choisissez « Associer l'appareil avec un code d'association » et tapez dans l'assistant le code à 6 chiffres affiché par le téléphone.</small></li>
   </ol>
+  <p>Ensuite, un <b>clic sur TÉL</b> suffit, tant que le Débogage sans fil est activé et que l'ordinateur et le téléphone sont sur le même Wi-Fi. Courrier Adrien retient aussi le nom de votre téléphone et les Wi-Fi où il a été relié (maison, bureau…).</p>
+  <h3>L'oubli au bout de 7 jours</h3>
+  <p>Vous avez le choix de désactiver l'oubli automatique de l'autorisation, qu'Android applique normalement au bout de 7 jours sans connexion. Le choix se fait dans l'assistant d'association, avec la case <b>« Ne pas oublier cet ordinateur au bout de 7 jours »</b> :</p>
+  <ul>
+    <li><b>Si vous cochez la case</b>, tout sera désormais automatique.</li>
+    <li><b>Si vous ne la cochez pas</b>, un rappel vous le signalera le 6<sup>e</sup> jour. Il suffit alors de cliquer sur <b>Relier maintenant</b> (Débogage sans fil activé, même Wi-Fi que l'ordinateur) : Android repart pour 7 jours.</li>
+    <li><b>Si l'association est perdue au bout du 7<sup>e</sup> jour</b>, il faudra vous réassocier : un clic sur TÉL propose alors de rescanner le QR code.</li>
+  </ul>
+  <p><small>Ne cochez pas la case si cet ordinateur n'est pas le vôtre ou s'il est partagé. Pour retirer l'accès plus tard, sur le téléphone : <i>Débogage sans fil › Appareils associés › Oublier</i>. Faites-le aussi avant de vendre, donner ou faire réparer cet ordinateur.</small></p>
+  <p><small>Android 10 ou plus ancien : le débogage sans fil n'existe pas. Activez le <b>Débogage USB</b> dans les Options de développement, branchez le téléphone et touchez <b>Autoriser</b> sur son écran.</small></p>
+
+  <h3>Si le téléphone n'est pas trouvé</h3>
+  <p>Courrier Adrien affiche une fenêtre qui explique la cause probable et <b>continue de chercher le téléphone pendant 5 minutes</b> : inutile de cliquer sur Réessayer, la connexion se fait toute seule dès qu'il est prêt.</p>
+  <ul>
+    <li><b>Le Débogage sans fil s'est coupé</b> (le cas le plus fréquent) : Android le fait après un redémarrage ou un changement de Wi-Fi. Rallumez-le : faites glisser le haut de l'écran vers le bas et touchez la vignette « Débogage sans fil », ou passez par <i>Paramètres › Options de développement</i>.</li>
+    <li><b>L'ordinateur est sur un Wi-Fi où le téléphone n'a jamais été relié</b> : connectez le téléphone à ce même réseau, puis activez le Débogage sans fil en cochant « Toujours autoriser sur ce réseau ». Inutile de refaire l'association.</li>
+    <li><b>Le téléphone ne reconnaît plus l'ordinateur</b> : c'est ce qui arrive quand les Options de développement ont été coupées (certaines applis de banque l'exigent), car Android efface alors l'association. Cliquez sur <b>Rescanner le QR code</b> : 30 secondes suffisent.</li>
+    <li><b>Téléphone branché en USB mais pas autorisé</b> : touchez <b>Autoriser</b> sur son écran, en cochant « Toujours autoriser depuis cet ordinateur ».</li>
+  </ul>
+  <div class="note"><b>Astuce, fortement conseillée :</b> ajoutez la vignette du Débogage sans fil au volet rapide, pour le rallumer d'un geste. <i>Options de développement › Vignettes de développeur pour paramètres rapides</i> › activez <b>Débogage sans fil</b>.</div>
+
+  <h3>Rallumage automatique du Débogage sans fil (facultatif)</h3>
+  <p>Pour ne plus avoir à le rallumer à la main, Courrier Adrien vous propose, après une première connexion réussie, de le faire <b>rallumer tout seul</b> quand le téléphone revient sur un Wi-Fi. Il s'appuie pour cela sur <b>Automate</b>, une appli gratuite et sans limite de durée (éditeur LlamaLab, Play Store). Une fenêtre vous guide en trois étapes, chacune avec son bouton :</p>
+  <ol>
+    <li><b>Installer Automate</b> : le Play Store s'ouvre sur le téléphone. Vérifiez que l'éditeur est LlamaLab, puis touchez Installer.</li>
+    <li><b>Donner l'autorisation</b> de rallumer le Débogage sans fil. Elle ne peut être donnée que depuis l'ordinateur, et disparaît si Automate est désinstallé.</li>
+    <li><b>Envoyer la règle au téléphone</b>, puis suivre les consignes affichées. Dans Automate, touchez IMPORT puis START, acceptez les autorisations proposées (touchez NEVER pour la position : la règle n'en a pas besoin), et cochez <b>Run on system startup</b> dans les Settings d'Automate pour qu'elle reparte après un redémarrage.</li>
+  </ol>
+  <p><b>Pourquoi c'est sûr :</b></p>
+  <ul>
+    <li><b>hors de chez vous, le Débogage sans fil reste coupé, comme Android le prévoit ;</b></li>
+    <li><b>il ne se rallume sans rien demander que sur les Wi-Fi marqués « Toujours autoriser sur ce réseau ». Ailleurs, Android vous demande la permission, une seule fois par connexion ;</b></li>
+    <li><b>il ne se rallume jamais quand les Options de développement sont coupées ;</b></li>
+    <li><b>la règle ne fait rien d'autre, et n'a besoin ni de votre position, ni de vos contacts, ni de vos messages. Tout se défait en désinstallant Automate.</b></li>
+  </ul>
+  <p>Vous pouvez aussi choisir <b>Plus tard</b> (Courrier Adrien le reproposera le lendemain), <b>Ne plus proposer</b>, ou <b>C'est déjà en place</b>.</p>
+
   <h3>Envoyer des SMS</h3>
   <ul>
     <li>Choisissez les destinataires : dans le carnet (dossier entier ou contacts sélectionnés), ou depuis un fichier CSV ou Excel. Vous pouvez joindre des photos.</li>
