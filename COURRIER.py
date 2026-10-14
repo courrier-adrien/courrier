@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-14 12h37"
+VERSION_BUILD = "2026-10-14 14h49"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -23850,7 +23850,7 @@ class GestionnaireModeles(QDialog):
                 padding: 4px 6px; font-family: Verdana; font-size: 11px;
             }
             QLabel { color: #aaaaaa; font-family: Verdana; font-size: 11px; }
-        """ + STYLE_BOUTON)
+        """ + STYLE_BOUTON + STYLE_SCROLLBAR)  # ascenseurs rouges des listes déroulantes (14/10/2026)
 
         self.donnees = charger_modeles()  # {adresse: {"nouveau": html, "reponse": html}}
         self._editeur_deja_cree = False
@@ -23890,6 +23890,11 @@ class GestionnaireModeles(QDialog):
         for nom_affiche, adresse in self._comptes_affiches:
             self.combo_compte.addItem(nom_affiche, adresse)
         self.combo_compte.setFixedWidth(160)
+        # Tous les comptes visibles d'un coup (14/10/2026, remonté par
+        # l'utilisateur) : avec seulement quelques comptes de plus que les 10
+        # lignes par défaut, l'ascenseur occupait presque toute sa hauteur et
+        # ne pouvait quasiment pas être glissé. Plus d'ascenseur du tout.
+        self.combo_compte.setMaxVisibleItems(max(10, self.combo_compte.count()))
         self.combo_compte.currentIndexChanged.connect(self._sur_changement_compte)
         lay_compte.addWidget(self.combo_compte)
         barre_haut.addWidget(bloc_compte)
@@ -25245,7 +25250,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 14/10/2026 12h37")
+        self.setWindowTitle("COURRIER ADRIEN — 14/10/2026 14h49")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -30097,7 +30102,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 14/10/2026 à 12h37")
+        lbl_version = QLabel("Version du 14/10/2026 à 14h49")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
