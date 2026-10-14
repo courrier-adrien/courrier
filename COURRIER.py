@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-14 12h03"
+VERSION_BUILD = "2026-10-14 12h37"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -25245,7 +25245,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 14/10/2026 12h03")
+        self.setWindowTitle("COURRIER ADRIEN — 14/10/2026 12h37")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -30097,7 +30097,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 14/10/2026 à 12h03")
+        lbl_version = QLabel("Version du 14/10/2026 à 12h37")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -35633,6 +35633,37 @@ if (typeof module === 'object') {
         if (corpsMail) corpsMail.style.display = 'none';
         var btnCorps = document.getElementById('__btn_corps_pj__');
         if (btnCorps) btnCorps.style.display = 'inline-flex';
+        if (window.__pjAjusterViewer) window.__pjAjusterViewer();
+    }};
+    // Bloc PJ déplié + viewer de PJ ouvert (14/10/2026, bug remonté par
+    // l'utilisateur avec 40 PJ) : le bloc PJ est sticky dès qu'un viewer est
+    // affiché ; déplié, il occupait tout l'écran et masquait le viewer, et
+    // la hauteur du __doc_viewer__ (figée à sa création) ne suivait pas le
+    // dépliage/repliage — texte coupé sous le bloc, ou grand vide en bas.
+    // Ici : liste dépliée plafonnée à 40 % de la fenêtre (avec son propre
+    // ascenseur) tant qu'un viewer est ouvert, hauteur du __doc_viewer__
+    // recalculée, et retour en haut de page.
+    window.__pjAjusterViewer = function() {{
+        var viewer = document.getElementById('__doc_viewer__')
+                  || document.getElementById('__pdf_viewer__')
+                  || document.getElementById('__img_viewer__');
+        var conteneurPj = document.getElementById('__pj_items__');
+        if (conteneurPj && conteneurPj.dataset.deplie === '1') {{
+            conteneurPj.style.maxHeight = viewer
+                ? Math.round(window.innerHeight * 0.4) + 'px' : 'none';
+            conteneurPj.style.overflowY = viewer ? 'auto' : 'hidden';
+        }}
+        if (!viewer) return;
+        var blocPj  = document.getElementById('__bloc_pj__');
+        var bandeau = document.body.querySelector('div');
+        var docViewer = document.getElementById('__doc_viewer__');
+        if (docViewer) {{
+            var h = 0;
+            if (bandeau) h += bandeau.offsetHeight;
+            if (blocPj)  h += blocPj.offsetHeight;
+            docViewer.style.height = Math.max(200, window.innerHeight - h - 10) + 'px';
+        }}
+        window.scrollTo(0, 0);
     }};
     var existing = document.getElementById('__bloc_pj__');
     if (existing) existing.remove();
@@ -35679,10 +35710,14 @@ if (typeof module === 'object') {
             var deplie = false;
             window.__pjBasculerRepli = function() {{
                 deplie = !deplie;
+                conteneurPj.dataset.deplie = deplie ? '1' : '0';
                 conteneurPj.style.maxHeight = deplie ? 'none' : (hauteurRepliee + 'px');
+                conteneurPj.style.overflowY = 'hidden';
+                if (!deplie) conteneurPj.scrollTop = 0;
                 repliTexte.textContent = deplie
                     ? 'Réduire'
                     : 'Afficher les {len(pjs)} pièces jointes';
+                if (window.__pjAjusterViewer) window.__pjAjusterViewer();
             }};
             conteneurPj.style.overflow = 'hidden';
             conteneurPj.style.maxHeight = hauteurRepliee + 'px';
@@ -38680,6 +38715,9 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
     document.body.style.padding = '';
     document.documentElement.style.maxWidth = '';
     document.documentElement.style.width = '';
+    // Liste des PJ dépliée : retire le plafond posé tant que le viewer
+    // était ouvert (cf. __pjAjusterViewer)
+    if (window.__pjAjusterViewer) window.__pjAjusterViewer();
 })();"""
         try:
             self.webview.page().runJavaScript(js)
