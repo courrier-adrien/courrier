@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-15 18h57"
+VERSION_BUILD = "2026-10-15 21h24"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4519,12 +4519,22 @@ def _etat_porte_modem():
     Bloquant (appelé dans un fil de fond)."""
     if not modem_wifi_active():
         return None
-    appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
+    # Ne réveille JAMAIS adb (15/10/2026, philosophie de COURRIER : rien de
+    # connecté sans validation ; un « adb devices » démarrait le serveur adb,
+    # qui se reconnectait tout seul au téléphone). adb n'est interrogé que
+    # s'il tourne déjà (démarré après une validation : TÉL, SMS...).
     ssid = wifi_ordinateur()
     sur_point_acces = bool(ssid) and ssid in (lire_telephone_associe() or {}).get("points_acces", [])
-    par_porte = [s for s, _m in appareils if s.endswith(f":{PORT_ADB_MODEM}")]
-    if par_porte:  # joint par la porte : elle est ouverte
-        return ("point_acces_ouverte", ssid, par_porte[0]) if sur_point_acces else None
+    appareils = _lire_appareils(_adb_bloquant("devices", "-l"))[0] if serveur_adb_actif() else []
+    if sur_point_acces:
+        par_porte = [s for s, _m in appareils if s.endswith(f":{PORT_ADB_MODEM}")]
+        if par_porte:  # déjà joint par la porte : elle est ouverte
+            return ("point_acces_ouverte", ssid, par_porte[0])
+        passerelle = passerelle_ordinateur()
+        if passerelle and _porte_repond(passerelle):  # simple test réseau, sans adb
+            return ("point_acces_ouverte", ssid, f"{passerelle}:{PORT_ADB_MODEM}")
+        return ("point_acces_fermee", ssid, None)
+    appareils = [(s, m) for s, m in appareils if not s.endswith(f":{PORT_ADB_MODEM}")]
     if appareils:
         serie = appareils[0][0]
         if _adb_bloquant("-s", serie, "shell", "getprop service.adb.tcp.port",
@@ -4535,12 +4545,41 @@ def _etat_porte_modem():
         boot = _adb_bloquant("-s", serie, "shell", "cat /proc/sys/kernel/random/boot_id",
                              delai=10).strip() or "inconnu"
         return ("fermee", serie, boot)
-    if sur_point_acces:
-        serie = _essayer_passerelle()
-        if serie:
-            return ("point_acces_ouverte", ssid, serie)
-        return ("point_acces_fermee", ssid, None)
     return None
+
+
+def serveur_adb_actif():
+    """Le serveur adb tourne-t-il déjà ? (test de son port 5037, sans le démarrer)"""
+    import socket
+    with socket.socket() as prise:
+        prise.settimeout(0.5)
+        return prise.connect_ex(("127.0.0.1", 5037)) == 0
+
+
+def _porte_repond(passerelle):
+    """La porte 5555 du téléphone (mode modem) répond-elle ? Simple test
+    réseau, sans adb (rien n'est démarré ni connecté)."""
+    import socket
+    with socket.socket() as prise:
+        prise.settimeout(1.5)
+        return prise.connect_ex((passerelle, PORT_ADB_MODEM)) == 0
+
+
+def usb_android_branche():
+    """Un téléphone Android (Débogage USB activé) est-il branché ? Demandé à
+    Windows (interface « ADB Interface » de ses pilotes), sans adb."""
+    import subprocess
+    try:
+        r = subprocess.run(["wmic", "path", "Win32_PnPEntity", "where",
+                            "Name like '%ADB Interface%'", "get", "Name"],
+                           capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        return False
+    sortie = r.stdout
+    texte = sortie.decode("utf-16", "replace") if sortie[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else sortie.decode("cp1252", "replace")
+    return "adb interface" in texte.lower()
 
 
 class _RelaisCable(QObject):
@@ -4618,17 +4657,12 @@ class DialogueCableModem(QDialog):
                 pass
 
     def _guetter_cable(self):
-        deja_signale = False
+        # Demandé à Windows, sans adb : adb ne démarre qu'après le clic sur
+        # « Rouvrir la porte » (rien de connecté sans validation)
         while not self._fini:
-            sortie = _adb_bloquant("devices", "-l")
-            appareils, non_autorise = _lire_appareils(sortie)
-            branches = [s for s, _m in appareils if not s.endswith(f":{PORT_ADB_MODEM}")]
-            if branches:
-                self._emettre("branche", branches[0])
+            if usb_android_branche():
+                self._emettre("branche")
                 return
-            if non_autorise and not deja_signale:
-                deja_signale = True
-                self._emettre("non_autorise")
             time.sleep(1.5)
 
     def _evenement(self, cas, serie):
@@ -4636,7 +4670,6 @@ class DialogueCableModem(QDialog):
             self._statut("Téléphone branché : touchez « Autoriser » sur son écran (en cochant "
                          "« Toujours autoriser depuis cet ordinateur »).", COULEUR_TEL_OK, animee=True)
         elif cas == "branche":
-            self._serie = serie
             self._statut("Téléphone branché. Rouvrir la porte du mode modem Wi-Fi maintenant ? Le "
                          "téléphone pourra ensuite s'afficher sans câble, jusqu'à son prochain "
                          "redémarrage.", COULEUR_TEL_OK)
@@ -4660,8 +4693,25 @@ class DialogueCableModem(QDialog):
         self.btn_ouvrir.hide()
         self.btn_fermer.setEnabled(False)
         self._statut("Ouverture de la porte du mode modem Wi-Fi (quelques secondes)…", animee=True)
-        serie = self._serie
+
         def _travail():
+            # Validé par l'utilisateur : maintenant seulement, adb démarre et
+            # rejoint le téléphone par le câble (au plus 30 s, le temps de
+            # toucher « Autoriser » sur le téléphone si besoin)
+            serie, signale, fin = None, False, time.monotonic() + 30
+            while not self._fini and time.monotonic() < fin:
+                appareils, non_autorise = _lire_appareils(_adb_bloquant("devices", "-l"))
+                branches = [s for s, _m in appareils if not s.endswith(f":{PORT_ADB_MODEM}")]
+                if branches:
+                    serie = branches[0]
+                    break
+                if non_autorise and not signale:
+                    signale = True
+                    self._emettre("non_autorise")
+                time.sleep(1.5)
+            if not serie:
+                self._emettre("ouverte", "")
+                return
             ouverte = _ouvrir_porte_modem(serie)
             # Porte ouverte : passer par le point d'accès plutôt que par le
             # câble, pour que l'écran survive au débranchement
@@ -4727,9 +4777,10 @@ def surveiller_porte_modem(fenetre):
             boite.exec()
             etat_global["fenetre"] = False
             if boite.clickedButton() is b_afficher:
-                attente_telephone(fenetre, "Ouverture de l'écran du téléphone…")
-                afficher_ecran_telephone(etat[2], fenetre)
-                attente_telephone_fermer(apres_ecran=True)
+                # Validé : maintenant seulement adb démarre, rejoint le
+                # téléphone (par la passerelle) et ouvre l'écran, en un clic
+                connecter_telephone(fenetre, afficher_puis_proposer(fenetre),
+                                    attendre_ecran=True)
             return
         if etat[0] == "point_acces_fermee":
             if etat_global["point_acces_averti"] == ssid_actuel:
@@ -4741,9 +4792,10 @@ def surveiller_porte_modem(fenetre):
             serie_ecran = dialogue.serie_ecran
             dialogue.deleteLater()
             etat_global["fenetre"] = False
-            if serie_ecran:
+            if serie_ecran and verifier_code_telephone(fenetre):
                 # Porte rouverte à la demande de l'utilisateur : il veut voir
                 # son téléphone (15/10/2026, demandé) -> écran ouvert aussitôt
+                # (après le code de protection s'il est activé)
                 cable = not serie_ecran.endswith(f":{PORT_ADB_MODEM}")
                 attente_telephone(fenetre, "Ouverture de l'écran du téléphone…"
                                   + (" Gardez le câble branché." if cable else
@@ -4805,6 +4857,149 @@ def surveiller_porte_modem(fenetre):
             etat_global["en_cours"] = False
 
     _threading.Thread(target=_travail, daemon=True).start()
+
+
+# --- Proposition d'afficher le téléphone à la maison (15/10/2026) ---
+# Téléphone et ordinateur sur le même Wi-Fi (Débogage sans fil allumé,
+# par exemple par le rallumage automatique) : COURRIER PROPOSE d'afficher
+# l'écran, il ne l'affiche jamais de lui-même (philosophie de COURRIER :
+# rien de connecté sans validation). Détection par simple écoute du Wi-Fi
+# (annonce mDNS du téléphone), SANS connexion ; la connexion ne se fait
+# que sur « Afficher l'écran ». Proposé au lancement de COURRIER, puis au
+# retour du téléphone chaque fois qu'une session a été coupée par son
+# départ (adb arrêté après ~1 min d'absence : _arreter_adb_si_inutilise).
+# Plus de délai de 15 min (15/10/2026, demandé) : après un « Pas
+# maintenant », pas de nouvelle question tant que COURRIER reste ouvert
+# (un téléphone endormi, qui ne s'annonce plus, ne déclenche donc pas de
+# questions à répétition) ; jamais si l'écran est déjà affiché.
+# « Ne plus demander » (clé "proposer_ecran_maison" = false) se défait
+# dans ⚙ › Réglages (case à cocher du menu).
+
+
+def proposition_maison_active():
+    return (lire_telephone_associe() or {}).get("proposer_ecran_maison", True) is not False
+
+
+def _telephone_sur_le_wifi():
+    """Le téléphone est-il sur le même Wi-Fi, Débogage sans fil allumé ?
+    Déjà relié en Wi-Fi par adb (hors porte 5555 du mode modem), ou
+    simplement annoncé sur le Wi-Fi (écoute mDNS, sans connexion).
+    adb n'est interrogé que s'il tourne déjà (ne pas le réveiller : il se
+    reconnecterait tout seul). Bloquant (fil de fond)."""
+    if serveur_adb_actif():
+        appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
+        if any((":" in s or "._adb-tls" in s) and not s.endswith(f":{PORT_ADB_MODEM}")
+               for s, _m in appareils):
+            return True
+    return bool(chercher_telephone_wifi(1.5))
+
+
+_proposition_maison = {"en_cours": False, "deja_proposee": False, "absent_depuis": None,
+                       "session_coupee": False}
+
+
+def surveiller_telephone_maison(fenetre):
+    """Toutes les 30 s (minuterie de la fenêtre principale)."""
+    etat = _proposition_maison
+    if etat["en_cours"] or not lire_telephone_associe():
+        return
+    etat["en_cours"] = True
+    relais = _RelaisTelephone(fenetre)
+
+    def _resultat(resultat):
+        relais.deleteLater()
+        etat["en_cours"] = False
+        present, relie = resultat
+        maintenant = time.monotonic()
+        if not present:
+            if etat["absent_depuis"] is None:
+                etat["absent_depuis"] = maintenant
+            elif not relie and maintenant - etat["absent_depuis"] >= DELAI_ARRET_ADB_ABSENCE:
+                if _arreter_adb_si_inutilise():
+                    etat["session_coupee"] = True  # au retour : redemander
+            return
+        etat["absent_depuis"] = None
+        retour = etat["session_coupee"]
+        etat["session_coupee"] = False
+        if etat["deja_proposee"] and not retour:
+            return
+        import ctypes
+        if not proposition_maison_active() or _surveillance_porte["fenetre"] \
+                or _attente_telephone is not None \
+                or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE):
+            etat["deja_proposee"] = True
+            return
+        etat["deja_proposee"] = True
+        from PySide6.QtWidgets import QMessageBox
+        nom = (lire_telephone_associe() or {}).get("nom", "")
+        nom = f" « {nom} »" if nom else ""
+        _surveillance_porte["fenetre"] = True  # pas deux fenêtres du téléphone à la fois
+        boite = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
+                            f"Votre téléphone{nom} est sur le même Wi-Fi que l'ordinateur.\n\n"
+                            f"Afficher son écran ?\n\n"
+                            f"(« Ne plus demander » : vous pourrez changer d'avis à tout moment "
+                            f"avec la roue dentée ⚙ à droite de TÉL › Réglages.)",
+                            QMessageBox.NoButton, fenetre)
+        boite.setStyleSheet(style_boites_telephone())
+        boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        b_afficher = boite.addButton("Afficher l'écran", QMessageBox.AcceptRole)
+        boite.addButton("Pas maintenant", QMessageBox.RejectRole)
+        b_jamais = boite.addButton("Ne plus demander", QMessageBox.DestructiveRole)
+        boite.exec()
+        _surveillance_porte["fenetre"] = False
+        if boite.clickedButton() is b_jamais:
+            _ecrire_telephone_associe(proposer_ecran_maison=False)
+            print("[TELEPHONE] proposition d'afficher le téléphone à la maison : désactivée")
+        elif boite.clickedButton() is b_afficher:
+            connecter_telephone(fenetre, afficher_puis_proposer(fenetre),
+                                attendre_ecran=True)
+
+    relais.fini.connect(_resultat)
+
+    def _travail():
+        try:
+            present = _telephone_sur_le_wifi()
+            # Liaison adb encore active (câble, porte du mode modem, Wi-Fi) :
+            # le téléphone n'est pas « parti », on n'arrête rien
+            relie = serveur_adb_actif() and bool(_lire_appareils(_adb_bloquant("devices", "-l"))[0])
+        except Exception as exc:
+            print(f"[TELEPHONE] surveillance du téléphone à la maison : {exc}")
+            present, relie = False, True
+        try:
+            relais.fini.emit((present, relie))
+        except RuntimeError:
+            etat["en_cours"] = False
+
+    _threading.Thread(target=_travail, daemon=True).start()
+
+
+# Point 2 (15/10/2026, demandé) : quand le téléphone est parti (plus annoncé
+# sur le Wi-Fi, plus aucune liaison adb) depuis environ une minute, COURRIER
+# arrête adb, qui sinon se reconnectait tout seul au retour du téléphone
+# (et remettait à zéro, à l'insu de l'utilisateur, le compteur de 7 jours
+# d'Android). Au retour, plus rien ne se reconnecte : COURRIER propose
+# d'afficher l'écran (après 15 min d'absence) ou attend un clic sur TÉL.
+DELAI_ARRET_ADB_ABSENCE = 50  # secondes : deux vérifications de suite (une annonce manquée ne suffit pas)
+
+
+def envoi_sms_en_cours():
+    return any(t.isRunning() for t in list(ThreadEnvoiSMS.instances))
+
+
+def _arreter_adb_si_inutilise():
+    """Arrête le serveur adb, sauf s'il sert encore : écran du téléphone
+    affiché, envoi de SMS en cours, fenêtre du téléphone ouverte."""
+    import ctypes
+    if not serveur_adb_actif() or envoi_sms_en_cours() \
+            or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE) \
+            or _attente_telephone is not None or _surveillance_porte["fenetre"] \
+            or QApplication.activeModalWidget() is not None:
+        return False
+    print("[TELEPHONE] téléphone parti : arrêt du serveur adb")
+    # En arrière-plan : « adb kill-server » peut attendre quelques secondes,
+    # COURRIER ne doit pas se figer pendant ce temps (15/10/2026)
+    _threading.Thread(target=arreter_liaison_telephone, daemon=True).start()
+    return True
 
 
 class _RelaisModem(QObject):
@@ -5132,6 +5327,265 @@ class DialogueTelephoneIntrouvable(QDialog):
         super().done(resultat)
 
 
+# --- Protection de l'affichage du téléphone par un code (15/10/2026) ---
+# Quelqu'un qui utilise l'ordinateur en l'absence de l'utilisateur pourrait
+# afficher l'écran du téléphone (en direct, téléphone déverrouillé : ses
+# messages...) ou envoyer des SMS. COURRIER PROPOSE donc un code propre à
+# COURRIER, demandé chaque fois qu'on veut ouvrir la fenêtre du téléphone
+# (TÉL, « Afficher l'écran », SMS) ; pas demandé si elle est déjà ouverte
+# (choix de l'auteur : à l'utilisateur de la fermer en s'absentant).
+# Code stocké haché (PBKDF2-SHA256 + sel) dans telephone_associe.json, clé
+# "code_tel". « Code oublié ? » = rescanner le QR code (preuve qu'on a le
+# téléphone en main, déverrouillé), puis nouveau code. Proposition une
+# fois après une connexion : Activer / Pas maintenant (au prochain
+# lancement) / Ne plus demander (clé "proposer_code" = false), réversible
+# dans ⚙ › Réglages › Protection par code.
+_code_propose_cette_session = {"fait": False}
+
+
+def _hacher_code(code, sel):
+    import hashlib
+    return hashlib.pbkdf2_hmac("sha256", code.encode("utf-8"), bytes.fromhex(sel), 200_000).hex()
+
+
+def code_telephone_actif():
+    return bool((lire_telephone_associe() or {}).get("code_tel"))
+
+
+def _code_correct(code):
+    import hmac
+    enregistre = (lire_telephone_associe() or {}).get("code_tel") or {}
+    if not enregistre.get("sel"):
+        return False
+    return hmac.compare_digest(_hacher_code(code, enregistre["sel"]), enregistre.get("hash", ""))
+
+
+def _enregistrer_code(code):
+    import secrets
+    sel = secrets.token_hex(16)
+    _ecrire_telephone_associe(code_tel={"sel": sel, "hash": _hacher_code(code, sel)})
+    print("[TELEPHONE] code de protection enregistré")
+
+
+class DialogueCodeTelephone(QDialog):
+    """Saisie du code : mode "creer" (deux fois) ou "verifier"."""
+
+    def __init__(self, parent, mode, message=""):
+        super().__init__(parent)
+        self.setWindowTitle(TITRE_BOITES_TELEPHONE)
+        self.setStyleSheet(style_boites_telephone())
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setProperty("centrer_ecran", True)
+        self.mode = mode
+        self.oubli = False
+        self._essais = 0
+        texte = QLabel(message or ("Choisissez un code pour protéger l'affichage du téléphone et "
+                                   "l'envoi de SMS (au moins 4 caractères). Il vous sera demandé "
+                                   "chaque fois que vous voudrez afficher le téléphone."
+                                   if mode == "creer" else
+                                   "Code de protection du téléphone :"))
+        texte.setWordWrap(True)
+        texte.setFixedWidth(380)
+        self.champ = QLineEdit()
+        self.champ.setEchoMode(QLineEdit.Password)
+        self.champ2 = QLineEdit()
+        self.champ2.setEchoMode(QLineEdit.Password)
+        self.champ2.setPlaceholderText("Retapez le code")
+        self.lbl_erreur = QLabel()
+        self.lbl_erreur.setStyleSheet(f"color: {COULEUR_TEL_ERREUR};")
+        self.lbl_erreur.setWordWrap(True)
+        btn_ok = QPushButton("OK")
+        btn_ok.clicked.connect(self._valider)
+        btn_annuler = QPushButton("Annuler")
+        btn_annuler.clicked.connect(self.reject)
+        boutons = QHBoxLayout()
+        if mode == "verifier":
+            btn_oubli = QPushButton("Code oublié ?")
+            btn_oubli.setAutoDefault(False)
+            btn_oubli.clicked.connect(self._oublie)
+            boutons.addWidget(btn_oubli)
+        boutons.addStretch()
+        boutons.addWidget(btn_ok)
+        boutons.addWidget(btn_annuler)
+        btn_ok.setDefault(True)
+        principal = QVBoxLayout(self)
+        principal.addWidget(texte)
+        principal.addWidget(self.champ)
+        if mode == "creer":
+            principal.addWidget(self.champ2)
+        principal.addWidget(self.lbl_erreur)
+        principal.addLayout(boutons)
+
+    def showEvent(self, evenement):
+        super().showEvent(evenement)
+        self.raise_()
+        self.activateWindow()
+        self.champ.setFocus()
+
+    def _valider(self):
+        code = self.champ.text()
+        if self.mode == "creer":
+            if len(code) < 4:
+                self.lbl_erreur.setText("Au moins 4 caractères.")
+            elif code != self.champ2.text():
+                self.lbl_erreur.setText("Les deux codes sont différents.")
+            else:
+                _enregistrer_code(code)
+                self.accept()
+            return
+        if _code_correct(code):
+            self.accept()
+            return
+        self._essais += 1
+        self.champ.clear()
+        self.lbl_erreur.setText("Code incorrect." if self._essais < 3 else
+                                "Code incorrect. En cas d'oubli : « Code oublié ? ».")
+        print("[TELEPHONE] code de protection incorrect")
+
+    def _oublie(self):
+        self.oubli = True
+        self.reject()
+
+
+def verifier_code_telephone(parent):
+    """True si on peut ouvrir la fenêtre du téléphone : pas de protection,
+    fenêtre déjà ouverte, ou bon code saisi (éventuellement après « Code
+    oublié ? » = rescanner le QR code puis nouveau code)."""
+    import ctypes
+    if not code_telephone_actif() or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE):
+        return True
+    dialogue = DialogueCodeTelephone(parent, "verifier")
+    ok = dialogue.exec() == QDialog.Accepted
+    oubli = dialogue.oubli
+    dialogue.deleteLater()
+    if ok:
+        return True
+    if not oubli:
+        return False
+    _boite_telephone(parent, "Pour choisir un nouveau code, il faut rescanner le QR code avec le "
+                             "téléphone : cela prouve que vous l'avez en main.\n\nL'assistant va "
+                             "s'ouvrir.", None)
+    serie = ouvrir_assistant_association(parent, rapide=True)
+    if not serie:
+        return False
+    print("[TELEPHONE] code oublié : téléphone réassocié, nouveau code")
+    nouveau = DialogueCodeTelephone(parent, "creer",
+                                    "Téléphone réassocié. Choisissez votre nouveau code (au moins "
+                                    "4 caractères).")
+    cree = nouveau.exec() == QDialog.Accepted
+    nouveau.deleteLater()
+    return cree
+
+
+class DialogueProtectionCode(QDialog):
+    """⚙ › Réglages › Protection par code : activer, changer, désactiver."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Protection par code")
+        self.setStyleSheet(style_boites_telephone())
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setProperty("centrer_ecran", True)
+        texte = QLabel(
+            "<p><b>Protéger l'affichage du téléphone et l'envoi de SMS par un code</b></p>"
+            "<p>Si quelqu'un utilise cet ordinateur en votre absence, il pourrait afficher "
+            "l'écran de votre téléphone (en direct, s'il est déverrouillé : vos messages, à qui "
+            "vous écrivez…) ou envoyer des SMS à votre place.</p>"
+            "<p>Avec la protection, ce code (propre à Courrier Adrien) est demandé chaque fois "
+            "que vous voulez ouvrir la fenêtre du téléphone ou envoyer des SMS. Il n'est pas "
+            "demandé si la fenêtre du téléphone est déjà ouverte : <b>fermez-la avant de vous "
+            "absenter</b>.</p>"
+            "<p style='color:#aaaaaa'>Code oublié : il faudra rescanner le QR code avec le "
+            "téléphone, preuve que vous l'avez en main.</p>")
+        texte.setTextFormat(Qt.RichText)
+        texte.setWordWrap(True)
+        texte.setFixedWidth(500)
+        self.lbl_etat = QLabel()
+        self.btn_activer = QPushButton()
+        self.btn_activer.clicked.connect(self._activer_ou_changer)
+        self.btn_desactiver = QPushButton("Désactiver la protection")
+        self.btn_desactiver.clicked.connect(self._desactiver)
+        btn_fermer = QPushButton("Fermer")
+        btn_fermer.clicked.connect(self.accept)
+        for b in (self.btn_activer, self.btn_desactiver, btn_fermer):
+            b.setAutoDefault(False)
+        boutons = QHBoxLayout()
+        boutons.addWidget(self.btn_activer)
+        boutons.addWidget(self.btn_desactiver)
+        boutons.addStretch()
+        boutons.addWidget(btn_fermer)
+        principal = QVBoxLayout(self)
+        principal.addWidget(texte)
+        principal.addWidget(self.lbl_etat)
+        principal.addLayout(boutons)
+        self._maj()
+
+    def _maj(self):
+        actif = code_telephone_actif()
+        self.lbl_etat.setText("Protection : ACTIVÉE" if actif else "Protection : désactivée")
+        self.lbl_etat.setStyleSheet(f"color: {COULEUR_TEL_OK if actif else COULEUR_TEL_DISCRET}; "
+                                    "font-weight: bold;")
+        self.btn_activer.setText("Changer le code…" if actif else "Activer (choisir un code)…")
+        self.btn_desactiver.setVisible(actif)
+
+    def _code_actuel_ok(self, message):
+        dialogue = DialogueCodeTelephone(self, "verifier", message)
+        ok = dialogue.exec() == QDialog.Accepted
+        dialogue.deleteLater()
+        return ok
+
+    def _activer_ou_changer(self):
+        if code_telephone_actif() and not self._code_actuel_ok("Code actuel :"):
+            return
+        dialogue = DialogueCodeTelephone(self, "creer")
+        dialogue.exec()
+        dialogue.deleteLater()
+        self._maj()
+
+    def _desactiver(self):
+        if not self._code_actuel_ok("Pour désactiver la protection, tapez le code actuel :"):
+            return
+        _ecrire_telephone_associe(code_tel=None)
+        print("[TELEPHONE] protection par code désactivée")
+        self._maj()
+
+
+def proposer_code_telephone(parent):
+    """Proposition de la protection par code, une seule fois : « Activer la
+    protection » ou « Ne plus demander » (réversible dans ⚙). Renvoie True
+    si la fenêtre a été affichée."""
+    associe = lire_telephone_associe() or {}
+    if associe.get("code_tel") or associe.get("proposer_code") is False \
+            or _code_propose_cette_session["fait"]:
+        return False
+    _code_propose_cette_session["fait"] = True
+    from PySide6.QtWidgets import QMessageBox
+    boite = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
+                        "Protéger l'affichage du téléphone et l'envoi de SMS par un code ?\n\n"
+                        "Si quelqu'un utilise cet ordinateur en votre absence, il pourrait voir "
+                        "l'écran de votre téléphone en direct (vos messages, vos conversations) "
+                        "ou envoyer des SMS à votre place.\n\n"
+                        "(« Ne plus demander » : vous pourrez l'activer à tout moment avec la "
+                        "roue dentée ⚙ à droite de TÉL › Réglages.)",
+                        QMessageBox.NoButton, parent)
+    boite.setStyleSheet(style_boites_telephone())
+    boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    # Deux choix seulement (15/10/2026, demandé) : la décision est binaire
+    # et réversible par ⚙ ; « Plus tard » ne servait qu'à reposer la
+    # question à chaque lancement. Fermer la fenêtre = « Ne plus demander ».
+    b_activer = boite.addButton("Activer la protection", QMessageBox.AcceptRole)
+    boite.addButton("Ne plus demander", QMessageBox.RejectRole)
+    boite.exec()
+    if boite.clickedButton() is not b_activer:
+        _ecrire_telephone_associe(proposer_code=False)
+    else:
+        dialogue = DialogueCodeTelephone(parent, "creer")
+        dialogue.exec()
+        dialogue.deleteLater()
+    return True
+
+
 class _FenetreAttenteTelephone(QDialog):
     """Petite fenêtre « ça travaille » pendant la recherche du téléphone
     (15/10/2026, demandé, comme pour la mise à jour) : texte de l'étape en
@@ -5272,6 +5726,12 @@ def connecter_telephone(parent=None, apres=None, si_echec=None, attendre_ecran=F
     if not adb:
         _boite_telephone(parent, "adb.exe introuvable : impossible de joindre le téléphone.\n\n"
                                  "Il se trouve normalement dans :\n" + CHEMINS_ADB[0])
+        _abandon()
+        return
+    # Protection par code (15/10/2026) : demandée AVANT toute connexion
+    # quand on veut ouvrir la fenêtre du téléphone (TÉL, « Afficher
+    # l'écran », SMS) ; pas si elle est déjà ouverte
+    if attendre_ecran and not verifier_code_telephone(parent):
         _abandon()
         return
     attente_telephone(parent, "Recherche du téléphone…")
@@ -6047,10 +6507,22 @@ def verifier_rappel_7_jours(fenetre):
             fenetre, "Le téléphone est relié : Android repart pour 7 jours.", QMessageBox.Information))
 
 
+def afficher_puis_proposer(fenetre):
+    """apres() pour connecter_telephone : ouvre l'écran du téléphone, puis
+    (6 s après) les propositions de réglages (code, rallumage, modem)."""
+    def _apres(serie):
+        afficher_ecran_telephone(serie, fenetre)
+        QTimer.singleShot(6000, lambda: proposer_reglages_telephone(fenetre, serie))
+    return _apres
+
+
 def proposer_reglages_telephone(parent, serie):
     """Après une connexion réussie par TÉL : propose, une fois chacun et
     jamais les deux d'affilée, le rallumage automatique puis le mode modem
     Wi-Fi (15/10/2026). Les deux restent accessibles par le ▾ de TÉL."""
+    # D'abord la protection par code (15/10/2026), la plus importante
+    if proposer_code_telephone(parent):
+        return
     associe = lire_telephone_associe() or {}
     choix = associe.get("rallumage", "")
     if not (choix in ("fait", "jamais") or choix == "plus_tard:" + time.strftime("%Y-%m-%d")):
@@ -6073,6 +6545,64 @@ def proposer_rallumage_auto(parent, serie):
     dialogue = DialogueRallumageAuto(parent, serie)
     dialogue.exec()
     dialogue.deleteLater()
+
+
+def arreter_liaison_telephone():
+    """À la fermeture de COURRIER (15/10/2026, demandé : philosophie de
+    COURRIER, rien ne doit rester relié au téléphone sans validation) :
+    ferme l'écran du téléphone ouvert par COURRIER, puis arrête le serveur
+    adb, qui sinon restait actif jusqu'au redémarrage de l'ordinateur et se
+    reconnectait tout seul au téléphone. Attention : coupe aussi une
+    liaison adb utilisée au même moment par un autre programme
+    (NAVIGATEUR, QtScrcpy...)."""
+    import subprocess
+    global _processus_scrcpy
+    if _processus_scrcpy is not None and _processus_scrcpy.poll() is None:
+        # Retirer l'alerte du téléphone avant de couper adb
+        serie = _serie_ecran_affiche["serie"]
+        _serie_ecran_affiche["serie"] = None
+        if alerte_telephone_active():
+            _retirer_alerte_ecran(serie)
+        try:
+            _processus_scrcpy.terminate()
+            _processus_scrcpy.wait(timeout=3)
+        except Exception:
+            pass
+    _processus_scrcpy = None
+    adb = chemin_adb()
+    if adb and serveur_adb_actif():
+        try:
+            subprocess.run([adb, "kill-server"], capture_output=True, timeout=3,
+                           stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+            print("[TELEPHONE] serveur adb arrêté")
+        except Exception as exc:
+            # « adb kill-server » peut rester bloqué quand le téléphone vient
+            # de disparaître (constaté le 15/10/2026) : on arrête alors
+            # directement NOTRE adb (celui de DOSSIER_SCRCPY), pas ceux des
+            # autres programmes
+            print(f"[TELEPHONE] adb kill-server sans réponse ({exc}) : arrêt direct")
+            _tuer_notre_adb(adb)
+
+
+def _tuer_notre_adb(adb):
+    """Arrête le ou les processus adb.exe lancés depuis ce chemin précis."""
+    import subprocess
+    try:
+        r = subprocess.run(["wmic", "process", "where", "name='adb.exe'", "get",
+                            "ProcessId,ExecutablePath", "/format:csv"],
+                           capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        sortie = r.stdout.decode("utf-16", "replace") if r.stdout[:2] == b"\xff\xfe" \
+            else r.stdout.decode("cp1252", "replace")
+        for ligne in sortie.splitlines():
+            morceaux = ligne.strip().split(",")
+            if len(morceaux) >= 3 and os.path.normcase(morceaux[1]) == os.path.normcase(adb):
+                subprocess.run(["taskkill", "/F", "/PID", morceaux[2]], capture_output=True,
+                               timeout=10, stdin=subprocess.DEVNULL,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+                print(f"[TELEPHONE] adb arrêté directement (processus {morceaux[2]})")
+    except Exception as exc:
+        print(f"[TELEPHONE] arrêt direct d'adb impossible : {exc}")
 
 
 def _ramener_fenetre_telephone(serie):
@@ -6175,6 +6705,52 @@ def _centrer_fenetre_telephone_a_l_ouverture(processus, marge=8):
     QTimer.singleShot(250, essayer)
 
 
+# Alerte sur le téléphone (15/10/2026, demandé) : tant que son écran est
+# affiché sur l'ordinateur, une notification « Courrier Adrien — L'écran de
+# ce téléphone est affiché sur l'ordinateur » est posée dans son volet
+# (rangée sous « Shell » : notification d'adb, importance normale imposée
+# par Android, donc pas de bandeau ; vibration écartée : elle suit le
+# réglage « vibration au toucher », souvent coupé). Retirée à la fermeture
+# de l'écran (« mise en sommeil » : Android ne permet pas de la supprimer
+# depuis adb). Activée par défaut, clé "alerte_ecran_tel", case dans ⚙.
+CLE_NOTIFICATION_ALERTE = "0|com.android.shell|2020|courrier_ecran|2000"
+_serie_ecran_affiche = {"serie": None}
+
+
+def alerte_telephone_active():
+    return (lire_telephone_associe() or {}).get("alerte_ecran_tel", True) is not False
+
+
+def _retirer_alerte_ecran(serie):
+    if serie:
+        _adb_bloquant("-s", serie, "shell",
+                      f"cmd notification snooze --for 31536000000 '{CLE_NOTIFICATION_ALERTE}'", delai=8)
+
+
+def _alerte_ecran_affiche(serie, processus):
+    """Pose l'alerte sur le téléphone, puis la retire quand la fenêtre de
+    l'écran du téléphone (processus scrcpy) se ferme."""
+    _serie_ecran_affiche["serie"] = serie
+    if not alerte_telephone_active():
+        return
+
+    def _travail():
+        # Réveiller d'abord l'alerte mise en sommeil à la fermeture
+        # précédente : sinon la nouvelle, de même clé, resterait endormie
+        # (la commande affiche une erreur de permission mais agit bien)
+        _adb_bloquant("-s", serie, "shell",
+                      f"cmd notification unsnooze '{CLE_NOTIFICATION_ALERTE}'", delai=8)
+        _adb_bloquant("-s", serie, "shell",
+                      "cmd notification post -S bigtext -t 'Courrier Adrien' courrier_ecran "
+                      "\"L’écran de ce téléphone est affiché sur l’ordinateur.\"", delai=10)
+        processus.wait()
+        if _serie_ecran_affiche["serie"] == serie:
+            _serie_ecran_affiche["serie"] = None
+            _retirer_alerte_ecran(serie)  # sans effet si le téléphone n'est plus joignable
+
+    _threading.Thread(target=_travail, daemon=True).start()
+
+
 def afficher_ecran_telephone(serie, parent=None):
     """Ouvre l'écran du téléphone `serie` dans une fenêtre scrcpy (mêmes
     réglages que le navigateur : 2 Mbps, 1080, sans reverse connection,
@@ -6198,6 +6774,7 @@ def afficher_ecran_telephone(serie, parent=None):
     journal.close()  # le processus garde sa propre copie du descripteur
     processus = _processus_scrcpy
     _centrer_fenetre_telephone_a_l_ouverture(processus)
+    _alerte_ecran_affiche(serie, processus)
 
     def _verifier():
         # scrcpy mort dans les premières secondes = échec : on montre la
@@ -6441,10 +7018,14 @@ class ThreadEnvoiSMS(QThread):
     signal_fini = Signal(str)
     signal_countdown = Signal(int)
     signal_pause_forcee = Signal(str)     # téléphone verrouillé, écran inattendu...
+    # Envois créés (15/10/2026) : adb n'est jamais arrêté pendant un envoi
+    # (voir envoi_sms_en_cours / surveiller_telephone_maison)
+    instances = __import__("weakref").WeakSet()
 
     def __init__(self, serie, destinataires, message, intervalle, index_debut=0,
                  images_sources=(), images_pretes=(), photo_debut=0):
         super().__init__()
+        ThreadEnvoiSMS.instances.add(self)
         self.serie = serie
         self.destinataires = destinataires
         self.message = message
@@ -26022,7 +26603,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 18h57")
+        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 21h24")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -26786,7 +27367,17 @@ class ClientMail(QMainWindow):
             menu.addAction("   Associer un téléphone (ou rescanner le QR code)…", _associer)
             menu.addAction("   Réglage du rallumage automatique…",
                            lambda: connecter_telephone(self, lambda s: DialogueRallumageAuto(self, s).exec()))
+            menu.addAction("   Protection par code…", lambda: DialogueProtectionCode(self).exec())
             menu.addAction("   Réglage du mode modem Wi-Fi…", lambda: DialogueModemWifi(self).exec())
+            # Case à cocher : défait un « Ne plus demander » (15/10/2026)
+            proposer = menu.addAction("   Proposer d'afficher le téléphone quand il est sur le même Wi-Fi")
+            proposer.setCheckable(True)
+            proposer.setChecked(proposition_maison_active())
+            proposer.toggled.connect(lambda coche: _ecrire_telephone_associe(proposer_ecran_maison=coche))
+            alerte = menu.addAction("   Alerte sur le téléphone quand son écran est affiché ici")
+            alerte.setCheckable(True)
+            alerte.setChecked(alerte_telephone_active())
+            alerte.toggled.connect(lambda coche: _ecrire_telephone_associe(alerte_ecran_tel=coche))
             menu.exec(btn_tel_menu.mapToGlobal(btn_tel_menu.rect().bottomLeft()))
         btn_tel_menu.clicked.connect(_menu_telephone)
         layout_haut.addWidget(btn_tel_menu)
@@ -26794,6 +27385,8 @@ class ClientMail(QMainWindow):
         # propose de la rouvrir après un redémarrage du téléphone, toutes les 30 s
         self._minuterie_porte_modem = QTimer(self)
         self._minuterie_porte_modem.timeout.connect(lambda: surveiller_porte_modem(self))
+        # ... et proposition d'afficher le téléphone quand il est sur le même Wi-Fi
+        self._minuterie_porte_modem.timeout.connect(lambda: surveiller_telephone_maison(self))
         self._minuterie_porte_modem.start(30 * 1000)
         # Rappel la veille de l'oubli de l'ordinateur par Android (7 jours) :
         # 1 min après le lancement, puis toutes les heures
@@ -30913,7 +31506,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 15/10/2026 à 18h57")
+        lbl_version = QLabel("Version du 15/10/2026 à 21h24")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -42893,6 +43486,12 @@ __JS_TRADUCTION__
 
 
     def closeEvent(self, event):
+        # Téléphone : fermer son écran et arrêter adb (15/10/2026, voir
+        # arreter_liaison_telephone)
+        try:
+            arreter_liaison_telephone()
+        except Exception as exc:
+            print(f"[TELEPHONE] fermeture : {exc}")
         # Arrêter IDLE immédiatement
         if self.idle_thread:
             self.idle_thread.stop()
