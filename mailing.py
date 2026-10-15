@@ -117,7 +117,8 @@ def lire_classeur(chemin):
 def connexion_smtp(compte):
     if not compte.get("ssl_direct", False):
         serveur = smtplib.SMTP("127.0.0.1", 1587)
-    elif compte.get("smtp_starttls", False):
+    elif compte.get("smtp_starttls", False) or compte.get("smtp_port") == 587:
+        # Port 587 = toujours STARTTLS, même pour un compte saisi à la main.
         host = compte.get("smtp_host", "")
         port = compte.get("smtp_port", 587)
         serveur = smtplib.SMTP(host, port)

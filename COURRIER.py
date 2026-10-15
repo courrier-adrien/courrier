@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-14 14h49"
+VERSION_BUILD = "2026-10-15 09h32"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -2817,13 +2817,16 @@ def connexion_smtp(compte):
     """Ouvre et retourne une connexion SMTP selon le type du compte :
     - ssl_direct=False (o2switch via stunnel) : SMTP sur 127.0.0.1:1587
     - ssl_direct=True  (Free/Orange/Gmail...) : SMTP_SSL sur le serveur réel port 465,
-      ou SMTP + STARTTLS sur port 587 si smtp_starttls=True dans le compte.
+      ou SMTP + STARTTLS si smtp_starttls=True dans le compte ou si le port est 587.
     Retourne un objet smtplib déjà connecté et authentifié (sans le 'with')."""
     import smtplib
     if compte.get("ssl_direct", False):
         host = compte.get("smtp_host", compte["imap_host"].replace("imap.", "smtp."))
         port = compte.get("smtp_port", 465)
-        if compte.get("smtp_starttls", False):
+        # Port 587 = toujours STARTTLS (14/10/2026) : un compte saisi à la main
+        # (fournisseur hors préréglages, ex. Infomaniak) était enregistré avec
+        # smtp_starttls=False, et SMTP_SSL sur 587 échouait systématiquement.
+        if compte.get("smtp_starttls", False) or port == 587:
             serveur = smtplib.SMTP(host, port)
             serveur.ehlo()
             # context=CONTEXTE_SSL (01/09/2026) : même raison que connexion_imap
@@ -25250,7 +25253,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 14/10/2026 14h49")
+        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 09h32")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -30102,7 +30105,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 14/10/2026 à 14h49")
+        lbl_version = QLabel("Version du 15/10/2026 à 09h32")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -41285,7 +41288,13 @@ __JS_TRADUCTION__
         ligne_fournisseur = QHBoxLayout()
         ligne_fournisseur.addWidget(QLabel("Fournisseur :"))
         combo_fournisseur = QComboBox()
-        combo_fournisseur.addItems(["o2switch (stunnel)", "Free", "Orange", "Gmail", "Outlook / Hotmail", "Yahoo", "iCloud", "SFR", "Laposte.net", "Autre (manuel)"])
+        # Ordre alphabétique (14/10/2026), "Autre (manuel)" toujours en
+        # dernier ; o2switch reste présélectionné comme avant.
+        combo_fournisseur.addItems(["Free", "Gmail", "iCloud", "Infomaniak (ik.me)", "Laposte.net", "o2switch (stunnel)", "Orange", "Outlook / Hotmail", "SFR", "Yahoo", "Autre (manuel)"])
+        combo_fournisseur.setCurrentText("o2switch (stunnel)")
+        # Tous les fournisseurs visibles d'un coup, sans ascenseur — comme
+        # la liste des comptes des modèles.
+        combo_fournisseur.setMaxVisibleItems(combo_fournisseur.count())
         combo_fournisseur.setFixedWidth(180)
         ligne_fournisseur.addWidget(combo_fournisseur)
         ligne_fournisseur.addStretch(1)
@@ -41464,6 +41473,16 @@ __JS_TRADUCTION__
                 "smtp_host": "smtp.laposte.net", "smtp_port": 587,
                 "ssl_direct": True, "smtp_starttls": True,
             },
+            # Infomaniak (14/10/2026) : adresses ik.me (my kSuite) et domaines
+            # hébergés chez Infomaniak — un seul serveur pour IMAP et SMTP.
+            # SMTP 587 STARTTLS : réglage recommandé par la page de
+            # configuration Infomaniak (465 SSL fonctionne aussi). Mot de
+            # passe = celui généré par Infomaniak pour l'appareil.
+            "Infomaniak (ik.me)": {
+                "imap_host": "mail.infomaniak.com", "imap_port": 993,
+                "smtp_host": "mail.infomaniak.com", "smtp_port": 587,
+                "ssl_direct": True, "smtp_starttls": True,
+            },
         }
 
         def appliquer_preset(fournisseur):
@@ -41517,6 +41536,8 @@ __JS_TRADUCTION__
                         combo_fournisseur.setCurrentText("SFR")
                     elif "laposte" in imap_h:
                         combo_fournisseur.setCurrentText("Laposte.net")
+                    elif "infomaniak" in imap_h:
+                        combo_fournisseur.setCurrentText("Infomaniak (ik.me)")
                     else:
                         combo_fournisseur.setCurrentText("Autre (manuel)")
                 _maj_visibilite_oauth()
