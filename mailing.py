@@ -9,7 +9,7 @@ from email.header import Header
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QSpinBox, QFileDialog, QTextEdit,
-    QComboBox, QProgressBar, QFrame, QMessageBox, QInputDialog
+    QComboBox, QProgressBar, QFrame, QMessageBox, QInputDialog, QScrollArea
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QFont, QColor, QPalette
@@ -215,12 +215,16 @@ class FenetreMailing(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MAILING")
-        self.setMinimumSize(800, 700)
+        # Minimum réduit (15/10/2026) : à 150 % sur un écran 1080p, 700 px
+        # logiques dépassaient la hauteur utile et les boutons du bas
+        # passaient sous la barre des tâches.
+        self.setMinimumSize(600, 340)
         self.setStyleSheet(STYLE)
         self.thread_envoi = None
         self.destinataires = []
         self.corps_html = ""
         self._init_ui()
+        self._ajuster_a_l_ecran()
         self._charger_comptes()
         self._verifier_progression()
 
@@ -233,10 +237,22 @@ class FenetreMailing(QMainWindow):
             pass
 
     def _init_ui(self):
+        # Contenu dans une zone défilante (invisible quand tout tient) ;
+        # CONSOLE / FERMER restent hors défilement, toujours visibles.
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(20, 15, 20, 15)
+        layout_central = QVBoxLayout(central)
+        layout_central.setContentsMargins(0, 0, 0, 10)
+        layout_central.setSpacing(0)
+        self.zone_defilante = QScrollArea()
+        self.zone_defilante.setWidgetResizable(True)
+        self.zone_defilante.setFrameShape(QFrame.Shape.NoFrame)
+        self.zone_defilante.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.contenu = QWidget()
+        self.zone_defilante.setWidget(self.contenu)
+        layout_central.addWidget(self.zone_defilante, 1)
+        layout = QVBoxLayout(self.contenu)
+        layout.setContentsMargins(20, 15, 20, 5)
         layout.setSpacing(10)
 
         # Titre
@@ -367,12 +383,13 @@ class FenetreMailing(QMainWindow):
         layout.addWidget(log_lbl)
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMinimumHeight(200)
+        self.log.setMinimumHeight(110)
         self.log.setStyleSheet("background-color: #1a1a1a; color: #cccccc; border: 1px solid #444; font-family: Verdana; font-size: 14px;")
         layout.addWidget(self.log)
 
         # Boutons CONSOLE / FERMER (style global de l'appli, pas d'override)
         h_bas = QHBoxLayout()
+        h_bas.setContentsMargins(20, 0, 20, 0)
         h_bas.addStretch(1)
         btn_console = QPushButton("CONSOLE")
         btn_console.clicked.connect(self._basculer_console)
@@ -381,7 +398,105 @@ class FenetreMailing(QMainWindow):
         btn_fermer = QPushButton("FERMER")
         btn_fermer.clicked.connect(self.close)
         h_bas.addWidget(btn_fermer)
-        layout.addLayout(h_bas)
+        layout_central.addLayout(h_bas)
+
+    def _ajuster_a_l_ecran(self):
+        """Taille initiale bornée à la zone utile de l'écran (hors barre des
+        tâches), fenêtre centrée. Utile à 150 % ou plus : si le contenu ne
+        tient pas, la zone défilante prend le relais."""
+        ecran = self.screen() or QApplication.primaryScreen()
+        if ecran is None:
+            self.resize(800, 760)
+            return
+        dispo = ecran.availableGeometry()
+        cadre = 40  # barre de titre + bordures (logique), avant affichage
+        voulu_h = self.contenu.sizeHint().height() + 50  # + ligne CONSOLE / FERMER
+        largeur = min(max(800, self.contenu.sizeHint().width() + 20), dispo.width() - 20)
+        hauteur = min(max(voulu_h, 700), dispo.height() - cadre)
+        self.resize(largeur, hauteur)
+        self.move(dispo.x() + (dispo.width() - largeur) // 2,
+                  dispo.y() + max(0, (dispo.height() - cadre - hauteur) // 2))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_recentree", False):
+            self._recentree = True
+            QTimer.singleShot(0, self._recentrer_avec_cadre)
+
+    def _recentrer_avec_cadre(self):
+        """Une fois affichée, réduit si besoin et centre la fenêtre dans la
+        zone utile de l'écran. Sous Windows, mesures prises directement à
+        Windows (pixels physiques) : à 150 % avec la barre des tâches en
+        haut, Qt renvoie une zone utile dont le coin haut-gauche n'est pas
+        mis à l'échelle (124 au lieu de 83), d'où une fenêtre trop basse
+        (remonté le 15/10/2026)."""
+        if sys.platform == "win32":
+            try:
+                self._recentrer_windows()
+                return
+            except Exception:
+                pass
+        ecran = self.screen() or QApplication.primaryScreen()
+        if ecran is None:
+            return
+        dispo = ecran.availableGeometry()
+        marge = 8
+        cadre_h = self.frameGeometry().height() - self.geometry().height()
+        cadre_l = self.frameGeometry().width() - self.geometry().width()
+        hauteur = min(self.height(), dispo.height() - cadre_h - 2 * marge)
+        largeur = min(self.width(), dispo.width() - cadre_l - 2 * marge)
+        if (largeur, hauteur) != (self.width(), self.height()):
+            self.resize(largeur, hauteur)
+        total_h = hauteur + cadre_h
+        total_l = largeur + cadre_l
+        self.move(dispo.x() + max(0, (dispo.width() - total_l) // 2),
+                  dispo.y() + max(0, (dispo.height() - total_h) // 2))
+
+    def _recentrer_windows(self):
+        import ctypes, math
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        hwnd = wintypes.HWND(int(self.winId()))
+
+        def rectangles():
+            # Rectangle Windows + rectangle visible (sans bordures invisibles)
+            r = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(r))
+            v = wintypes.RECT()
+            if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                    hwnd, 9, ctypes.byref(v), ctypes.sizeof(v)) != 0:
+                v = r
+            return r, v
+
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 2), ctypes.byref(info))
+        zone = info.rcWork
+        zone_l = zone.right - zone.left
+        zone_h = zone.bottom - zone.top
+        dpr = self.devicePixelRatioF() or 1.0
+        marge = round(8 * dpr)
+
+        r, v = rectangles()
+        trop_h = (v.bottom - v.top) - (zone_h - 2 * marge)
+        trop_l = (v.right - v.left) - (zone_l - 2 * marge)
+        if trop_h > 0 or trop_l > 0:
+            self.resize(self.width() - max(0, math.ceil(trop_l / dpr)),
+                        self.height() - max(0, math.ceil(trop_h / dpr)))
+            QApplication.processEvents()
+            r, v = rectangles()
+
+        vis_l = v.right - v.left
+        vis_h = v.bottom - v.top
+        x = zone.left + max(0, (zone_l - vis_l) // 2) - (v.left - r.left)
+        y = zone.top + max(0, (zone_h - vis_h) // 2) - (v.top - r.top)
+        # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+        user32.SetWindowPos(hwnd, None, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010)
 
     def _charger_comptes(self):
         comptes = charger_comptes()

@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-15 10h05"
+VERSION_BUILD = "2026-10-15 18h57"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4259,6 +4259,11 @@ def _boite_telephone(parent, texte, icone=None):
     from PySide6.QtWidgets import QMessageBox
     boite = QMessageBox(icone or QMessageBox.Warning, TITRE_BOITES_TELEPHONE, texte, QMessageBox.Ok, parent)
     boite.setStyleSheet(style_boites_telephone())
+    boite.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
+    # Toujours au premier plan (15/10/2026) : ouverte par une minuterie
+    # pendant que COURRIER est en arrière-plan, Windows la laissait cachée
+    # derrière les autres fenêtres (seule l'icône clignotait)
+    boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)
     boite.exec()
 
 
@@ -4392,7 +4397,510 @@ def _chercher_telephone_bloquant(delai_wifi=2.5):
     adresse = chercher_telephone_wifi(delai_wifi)
     if adresse and _connexion_reussie(_adb_bloquant("connect", adresse)):
         return adresse
+    return _essayer_passerelle()
+
+
+# --- Mode modem Wi-Fi (point d'accès) (15/10/2026) ---
+# Quand le téléphone sert de point d'accès Wi-Fi à l'ordinateur, Android
+# refuse le Débogage sans fil (le téléphone n'est connecté à aucun Wi-Fi :
+# c'est lui qui le diffuse). Seule voie : l'ancien mode « adb tcpip » (port
+# 5555), ouvert à l'avance pendant une connexion normale (Wi-Fi de la
+# maison ou câble USB) et qui dure jusqu'au redémarrage du téléphone ;
+# « Débogage USB » doit rester activé (sinon Android arrête adb quand le
+# Débogage sans fil se coupe). En mode modem, le téléphone est la
+# passerelle de l'ordinateur : COURRIER essaie alors <passerelle>:5555.
+# Testé le 15/10/2026 (S20+, Android 13, point d'accès « Wifiprive2 »,
+# passerelle 10.220.75.72). Option désactivée par défaut, clé
+# "modem_wifi" de telephone_associe.json : jusqu'au redémarrage, la porte
+# 5555 reste ouverte sur TOUS les réseaux (seuls les ordinateurs déjà
+# autorisés passent). L'essai de la passerelle, lui, est toujours fait
+# (sans risque : sur une box, la connexion est simplement refusée).
+PORT_ADB_MODEM = 5555
+
+
+def passerelle_ordinateur():
+    """Adresse IPv4 de la passerelle par défaut de l'ordinateur (celle de
+    plus petite métrique), ou ""."""
+    import subprocess, ctypes
+    try:
+        r = subprocess.run(["route", "print", "-4", "0.0.0.0"], capture_output=True, timeout=5,
+                           stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        texte = r.stdout.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}", "replace")
+    except Exception:
+        return ""
+    routes = re.findall(r"^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+\S+\s+(\d+)\s*$",
+                        texte, re.M)
+    return min(routes, key=lambda r: int(r[1]))[0] if routes else ""
+
+
+def _etats_adb():
+    """{série: état} d'après « adb devices » (device, offline, unauthorized...)."""
+    etats = {}
+    for ligne in _adb_bloquant("devices").splitlines()[1:]:
+        morceaux = ligne.split()
+        if len(morceaux) >= 2:
+            etats[morceaux[0]] = morceaux[1]
+    return etats
+
+
+def _essayer_passerelle():
+    """Mode modem Wi-Fi : série "<passerelle>:5555" si le téléphone y
+    répond (porte ouverte et ordinateur autorisé), sinon None. Bloquant."""
+    passerelle = passerelle_ordinateur()
+    if not passerelle:
+        return None
+    adresse = f"{passerelle}:{PORT_ADB_MODEM}"
+    _adb_bloquant("connect", adresse, delai=6)
+    if _etats_adb().get(adresse) == "device":
+        print(f"[TELEPHONE] joint en mode modem Wi-Fi : {adresse}")
+        # Retenir ce Wi-Fi comme point d'accès du téléphone (surveillance de
+        # la porte : surveiller_porte_modem)
+        ssid = wifi_ordinateur()
+        points = (lire_telephone_associe() or {}).get("points_acces", [])
+        if ssid and ssid not in points:
+            _ecrire_telephone_associe(points_acces=points + [ssid])
+        return adresse
+    _adb_bloquant("disconnect", adresse, delai=5)  # refusé, hors ligne ou non autorisé
     return None
+
+
+def modem_wifi_active():
+    return (lire_telephone_associe() or {}).get("modem_wifi") is True
+
+
+def _ouvrir_porte_modem(serie):
+    """Ouvre la porte 5555 si elle ne l'est pas (une fois par redémarrage
+    du téléphone), puis attend que le téléphone revienne : adb redémarre
+    sur le téléphone, la connexion est coupée quelques secondes. Renvoie
+    la série à utiliser ensuite (peut changer), ou None. Bloquant."""
+    if serie.endswith(f":{PORT_ADB_MODEM}"):
+        return serie  # déjà joint par la porte
+    port = _adb_bloquant("-s", serie, "shell", "getprop service.adb.tcp.port", delai=10).strip()
+    if port == str(PORT_ADB_MODEM):
+        return serie
+    modele = next((m for s, m in _lire_appareils(_adb_bloquant("devices", "-l"))[0] if s == serie), "")
+    print(f"[TELEPHONE] ouverture de la porte du mode modem Wi-Fi ({serie})")
+    _adb_bloquant("-s", serie, "tcpip", str(PORT_ADB_MODEM), delai=15)
+    fin = time.monotonic() + 20
+    while time.monotonic() < fin:
+        time.sleep(1.5)
+        appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
+        for s, m in appareils:
+            if s == serie:
+                return s
+        for s, m in appareils:
+            if m == modele:
+                return s
+    return _chercher_telephone_bloquant()
+
+
+def _refermer_porte_modem():
+    """Referme la porte 5555 (adb repasse en mode USB sur le téléphone).
+    Renvoie un message pour l'utilisateur. Bloquant."""
+    appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
+    if not appareils:
+        return ("Le téléphone n'est pas joignable en ce moment : impossible de refermer la "
+                "porte. Elle se refermera de toute façon au prochain redémarrage du téléphone.")
+    serie = appareils[0][0]
+    _adb_bloquant("-s", serie, "usb", delai=15)
+    print(f"[TELEPHONE] porte du mode modem Wi-Fi refermée ({serie})")
+    return ("La porte du mode modem Wi-Fi est refermée. Le téléphone peut mettre quelques "
+            "secondes à se reconnecter normalement.")
+
+
+def _etat_porte_modem():
+    """Surveillance de la porte du mode modem Wi-Fi (option cochée) :
+    ("fermee", série, boot_id) si le téléphone est joignable (maison,
+    câble) mais la porte fermée (il a redémarré) ; ("point_acces_fermee",
+    ssid, None) si l'ordinateur est sur le point d'accès du téléphone mais
+    la porte fermée ; ("point_acces_ouverte", ssid, série) si l'ordinateur
+    est sur le point d'accès du téléphone et la porte ouverte (proposer
+    d'afficher l'écran) ; None sinon (rien à proposer).
+    Bloquant (appelé dans un fil de fond)."""
+    if not modem_wifi_active():
+        return None
+    appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
+    ssid = wifi_ordinateur()
+    sur_point_acces = bool(ssid) and ssid in (lire_telephone_associe() or {}).get("points_acces", [])
+    par_porte = [s for s, _m in appareils if s.endswith(f":{PORT_ADB_MODEM}")]
+    if par_porte:  # joint par la porte : elle est ouverte
+        return ("point_acces_ouverte", ssid, par_porte[0]) if sur_point_acces else None
+    if appareils:
+        serie = appareils[0][0]
+        if _adb_bloquant("-s", serie, "shell", "getprop service.adb.tcp.port",
+                         delai=10).strip() == str(PORT_ADB_MODEM):
+            return None
+        # Identifiant qui change à chaque démarrage du téléphone (une seule
+        # proposition par redémarrage)
+        boot = _adb_bloquant("-s", serie, "shell", "cat /proc/sys/kernel/random/boot_id",
+                             delai=10).strip() or "inconnu"
+        return ("fermee", serie, boot)
+    if sur_point_acces:
+        serie = _essayer_passerelle()
+        if serie:
+            return ("point_acces_ouverte", ssid, serie)
+        return ("point_acces_fermee", ssid, None)
+    return None
+
+
+class _RelaisCable(QObject):
+    evenement = Signal(str, str)   # ("branche" | "non_autorise" | "ouverte", série)
+
+
+class DialogueCableModem(QDialog):
+    """Point d'accès du téléphone, porte du mode modem fermée (le téléphone
+    a redémarré) : demande de brancher le câble USB, GUETTE son branchement
+    en direct (15/10/2026, demandé : l'attente était « aveugle », jusqu'à
+    30 s), puis propose de rouvrir la porte dans la même fenêtre."""
+
+    def __init__(self, parent, nom):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QProgressBar
+        self.setWindowTitle(TITRE_BOITES_TELEPHONE)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setStyleSheet(style_boites_telephone()
+                           + "QProgressBar { border: 1px solid #5a5a5a; background-color: #1a1a1a; "
+                             "height: 12px; } QProgressBar::chunk { background-color: #A52A2A; }")
+        self.setProperty("centrer_ecran", True)
+        self._fini = False
+        self._serie = None
+        self.serie_ecran = None  # porte rouverte : série par laquelle ouvrir l'écran
+        texte = QLabel(f"L'ordinateur est relié au point d'accès de votre téléphone{nom}, mais la "
+                       f"porte du mode modem Wi-Fi est fermée : le téléphone a sans doute "
+                       f"redémarré.\n\nPour la rouvrir, branchez une fois le téléphone avec son "
+                       f"câble USB (Débogage USB activé).")
+        texte.setWordWrap(True)
+        texte.setFixedWidth(460)
+        self.lbl_statut = QLabel()
+        self.lbl_statut.setWordWrap(True)
+        self.lbl_statut.setFixedWidth(460)
+        self.barre = QProgressBar()
+        self.barre.setTextVisible(False)
+        self.btn_ouvrir = QPushButton("Rouvrir la porte")
+        self.btn_ouvrir.clicked.connect(self._ouvrir)
+        self.btn_ouvrir.hide()
+        self.btn_fermer = QPushButton("Pas maintenant")
+        self.btn_fermer.clicked.connect(self.reject)
+        for b in (self.btn_ouvrir, self.btn_fermer):
+            b.setAutoDefault(False)
+        boutons = QHBoxLayout()
+        boutons.addStretch()
+        boutons.addWidget(self.btn_ouvrir)
+        boutons.addWidget(self.btn_fermer)
+        principal = QVBoxLayout(self)
+        principal.addWidget(texte)
+        principal.addSpacing(6)
+        principal.addWidget(self.lbl_statut)
+        principal.addWidget(self.barre)
+        principal.addLayout(boutons)
+        self._relais = _RelaisCable(self)
+        self._relais.evenement.connect(self._evenement)
+        self._statut("En attente du câble USB…", animee=True)
+        _threading.Thread(target=self._guetter_cable, daemon=True).start()
+
+    def _statut(self, texte, couleur=None, animee=False):
+        self.lbl_statut.setText(texte)
+        self.lbl_statut.setStyleSheet(f"color: {couleur};" if couleur else "")
+        self.barre.setRange(0, 0)  # 0..0 : barre animée « en cours »
+        self.barre.setVisible(animee)  # rien en cours : pas de barre
+        self.adjustSize()
+
+    def done(self, resultat):
+        self._fini = True
+        super().done(resultat)
+
+    def _emettre(self, cas, serie=""):
+        if not self._fini:
+            try:
+                self._relais.evenement.emit(cas, serie)
+            except RuntimeError:
+                pass
+
+    def _guetter_cable(self):
+        deja_signale = False
+        while not self._fini:
+            sortie = _adb_bloquant("devices", "-l")
+            appareils, non_autorise = _lire_appareils(sortie)
+            branches = [s for s, _m in appareils if not s.endswith(f":{PORT_ADB_MODEM}")]
+            if branches:
+                self._emettre("branche", branches[0])
+                return
+            if non_autorise and not deja_signale:
+                deja_signale = True
+                self._emettre("non_autorise")
+            time.sleep(1.5)
+
+    def _evenement(self, cas, serie):
+        if cas == "non_autorise":
+            self._statut("Téléphone branché : touchez « Autoriser » sur son écran (en cochant "
+                         "« Toujours autoriser depuis cet ordinateur »).", COULEUR_TEL_OK, animee=True)
+        elif cas == "branche":
+            self._serie = serie
+            self._statut("Téléphone branché. Rouvrir la porte du mode modem Wi-Fi maintenant ? Le "
+                         "téléphone pourra ensuite s'afficher sans câble, jusqu'à son prochain "
+                         "redémarrage.", COULEUR_TEL_OK)
+            self.btn_ouvrir.show()
+            self.btn_ouvrir.setDefault(True)
+            self.raise_()
+        elif cas == "ouverte":
+            self.btn_fermer.setEnabled(True)
+            self.btn_fermer.setText("Fermer")
+            if serie:
+                # Rejoint par le point d'accès (_essayer_passerelle) : l'écran
+                # ne se fermera pas au débranchement du câble ; sinon par le câble
+                self.serie_ecran = serie
+                self.accept()
+            else:
+                self._statut("La porte n'a pas pu être rouverte : le téléphone ne répond plus. "
+                             "Vérifiez le câble, puis réessayez avec le bouton TÉL.",
+                             COULEUR_TEL_ERREUR)
+
+    def _ouvrir(self):
+        self.btn_ouvrir.hide()
+        self.btn_fermer.setEnabled(False)
+        self._statut("Ouverture de la porte du mode modem Wi-Fi (quelques secondes)…", animee=True)
+        serie = self._serie
+        def _travail():
+            ouverte = _ouvrir_porte_modem(serie)
+            # Porte ouverte : passer par le point d'accès plutôt que par le
+            # câble, pour que l'écran survive au débranchement
+            self._emettre("ouverte", (ouverte and (_essayer_passerelle() or ouverte)) or "")
+        _threading.Thread(target=_travail, daemon=True).start()
+
+
+class _RelaisSurveillancePorte(QObject):
+    etat = Signal(object)
+
+
+_surveillance_porte = {"en_cours": False, "fenetre": False, "point_acces_averti": "",
+                       "point_acces_propose": ""}
+
+
+def surveiller_porte_modem(fenetre):
+    """Toutes les 30 s (minuterie de la fenêtre principale) : propose, par
+    une fenêtre à valider, de rouvrir la porte du mode modem Wi-Fi quand le
+    téléphone a redémarré (15/10/2026, demandé : réouvertures automatiques
+    seulement après validation). Une seule proposition par redémarrage du
+    téléphone (clé "porte_refusee_boot") ; en point d'accès sans porte, un
+    seul avertissement par connexion à ce point d'accès."""
+    etat_global = _surveillance_porte
+    if etat_global["en_cours"] or etat_global["fenetre"] or not modem_wifi_active():
+        return
+    etat_global["en_cours"] = True
+    relais = _RelaisSurveillancePorte(fenetre)
+
+    def _resultat(etat):
+        relais.deleteLater()
+        etat_global["en_cours"] = False
+        ssid_actuel = etat[1] if etat and etat[0].startswith("point_acces") else ""
+        for cle in ("point_acces_averti", "point_acces_propose"):
+            if etat_global[cle] != ssid_actuel:
+                etat_global[cle] = ""  # quitté le point d'accès : on pourra reproposer
+        if not etat:
+            return
+        from PySide6.QtWidgets import QMessageBox
+        nom = (lire_telephone_associe() or {}).get("nom", "")
+        nom = f" « {nom} »" if nom else ""
+        if etat[0] == "point_acces_ouverte":
+            # Ordinateur sur le point d'accès du téléphone, porte ouverte :
+            # proposer d'afficher l'écran (15/10/2026, demandé), une fois par
+            # connexion au point d'accès, jamais si l'écran est déjà affiché
+            import ctypes
+            # Pas de « Ne plus proposer » (15/10/2026, demandé) : sans moyen
+            # visible de revenir en arrière, c'était une source d'erreur ;
+            # la fenêtre ne vient qu'une fois par connexion au point d'accès
+            if etat_global["point_acces_propose"] == ssid_actuel \
+                    or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE):
+                etat_global["point_acces_propose"] = ssid_actuel
+                return
+            etat_global["point_acces_propose"] = ssid_actuel
+            etat_global["fenetre"] = True
+            boite = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
+                                f"L'ordinateur est relié au point d'accès de votre téléphone{nom}."
+                                f"\n\nAfficher l'écran du téléphone ?",
+                                QMessageBox.NoButton, fenetre)
+            boite.setStyleSheet(style_boites_telephone())
+            boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            b_afficher = boite.addButton("Afficher l'écran", QMessageBox.AcceptRole)
+            boite.addButton("Pas maintenant", QMessageBox.RejectRole)
+            boite.exec()
+            etat_global["fenetre"] = False
+            if boite.clickedButton() is b_afficher:
+                attente_telephone(fenetre, "Ouverture de l'écran du téléphone…")
+                afficher_ecran_telephone(etat[2], fenetre)
+                attente_telephone_fermer(apres_ecran=True)
+            return
+        if etat[0] == "point_acces_fermee":
+            if etat_global["point_acces_averti"] == ssid_actuel:
+                return
+            etat_global["point_acces_averti"] = ssid_actuel
+            etat_global["fenetre"] = True
+            dialogue = DialogueCableModem(fenetre, nom)
+            dialogue.exec()
+            serie_ecran = dialogue.serie_ecran
+            dialogue.deleteLater()
+            etat_global["fenetre"] = False
+            if serie_ecran:
+                # Porte rouverte à la demande de l'utilisateur : il veut voir
+                # son téléphone (15/10/2026, demandé) -> écran ouvert aussitôt
+                cable = not serie_ecran.endswith(f":{PORT_ADB_MODEM}")
+                attente_telephone(fenetre, "Ouverture de l'écran du téléphone…"
+                                  + (" Gardez le câble branché." if cable else
+                                     " Vous pouvez débrancher le câble."))
+                afficher_ecran_telephone(serie_ecran, fenetre)
+                attente_telephone_fermer(apres_ecran=True)
+            return
+        _cas, serie, boot = etat
+        if boot and (lire_telephone_associe() or {}).get("porte_refusee_boot") == boot:
+            return
+        etat_global["fenetre"] = True
+        boite = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
+                            f"Votre téléphone{nom} a redémarré : la porte du mode modem Wi-Fi "
+                            f"est fermée.\n\nLa rouvrir maintenant ? Le téléphone pourra ensuite "
+                            f"s'afficher sur l'ordinateur quand il sert de point d'accès, "
+                            f"jusqu'à son prochain redémarrage.\n\n(Si l'écran du téléphone est "
+                            f"affiché, il se fermera quelques secondes.)",
+                            QMessageBox.NoButton, fenetre)
+        boite.setStyleSheet(style_boites_telephone())
+        boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        b_ouvrir = boite.addButton("Rouvrir la porte", QMessageBox.AcceptRole)
+        boite.addButton("Pas maintenant", QMessageBox.RejectRole)
+        boite.exec()
+        if boite.clickedButton() is not b_ouvrir:
+            _ecrire_telephone_associe(porte_refusee_boot=boot)
+            etat_global["fenetre"] = False
+            return
+        attente_telephone(fenetre, "Ouverture de la porte du mode modem Wi-Fi (quelques secondes)…")
+        relais_ouverture = _RelaisTelephone(fenetre)
+
+        def _ouverte(nouvelle_serie):
+            relais_ouverture.deleteLater()
+            attente_telephone_fermer()
+            etat_global["fenetre"] = False
+            _boite_telephone(fenetre,
+                             "C'est prêt : quand le téléphone servira de point d'accès Wi-Fi, "
+                             "le bouton TÉL l'affichera sans câble, jusqu'à son prochain "
+                             "redémarrage.\n\nSi le câble USB est branché, vous pouvez le "
+                             "débrancher." if nouvelle_serie else
+                             "La porte n'a pas pu être rouverte : le téléphone ne répond plus. "
+                             "Réessayez avec le bouton TÉL.",
+                             QMessageBox.Information if nouvelle_serie else None)
+
+        relais_ouverture.fini.connect(_ouverte)
+        _threading.Thread(target=lambda: relais_ouverture.fini.emit(_ouvrir_porte_modem(serie)),
+                          daemon=True).start()
+
+    relais.etat.connect(_resultat)
+
+    def _travail():
+        try:
+            etat = _etat_porte_modem()
+        except Exception as exc:
+            print(f"[TELEPHONE] surveillance de la porte : {exc}")
+            etat = None
+        try:
+            relais.etat.emit(etat)
+        except RuntimeError:
+            etat_global["en_cours"] = False
+
+    _threading.Thread(target=_travail, daemon=True).start()
+
+
+class _RelaisModem(QObject):
+    fini = Signal(str)
+
+
+class DialogueModemWifi(QDialog):
+    """Option « voir le téléphone quand il sert de modem Wi-Fi »."""
+
+    EXPLICATION = (
+        "<p><b>Voir le téléphone quand il sert de modem Wi-Fi (point d'accès)</b></p>"
+        "<p>Quand le téléphone partage sa connexion en Wi-Fi, Android coupe le Débogage sans "
+        "fil. COURRIER peut alors passer par une autre « porte » d'Android, qu'il ouvre "
+        "lui-même pendant une connexion normale.</p>"
+        "<p><b>Conditions :</b><br>"
+        "&nbsp;• <b>Débogage USB</b> activé dans les Options de développement ;<br>"
+        "&nbsp;• avoir relié le téléphone <b>une fois depuis son dernier redémarrage</b>, sur "
+        "le Wi-Fi de la maison ou par câble USB : COURRIER ouvre alors la porte (l'écran du "
+        "téléphone peut se couper quelques secondes à ce moment-là, c'est normal).<br>"
+        "En partage de connexion <b>par câble USB</b>, rien de tout cela n'est nécessaire : "
+        "le câble suffit (avec le Débogage USB).</p>"
+        "<p><b>Sécurité :</b> jusqu'au prochain redémarrage du téléphone, cette porte reste "
+        "ouverte sur tous les réseaux (café, hôtel…). Seuls les ordinateurs que vous avez "
+        "déjà autorisés peuvent l'utiliser : un inconnu ne ferait qu'afficher une demande "
+        "d'autorisation sur votre écran (touchez « Refuser »). Pour la refermer : redémarrez "
+        "le téléphone, ou utilisez le bouton ci-dessous.</p>"
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QCheckBox
+        self.setWindowTitle("Mode modem Wi-Fi")
+        # Toujours au premier plan : proposée juste après l'ouverture de
+        # l'écran du téléphone, Windows la laissait derrière la fenêtre
+        # scrcpy (raise_/activateWindow ignorés pour un autre programme)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setStyleSheet(style_boites_telephone())
+        texte = QLabel(self.EXPLICATION)
+        texte.setTextFormat(Qt.RichText)
+        texte.setWordWrap(True)
+        texte.setFixedWidth(560)
+        self.case = QCheckBox("Ouvrir cette porte automatiquement (mode modem Wi-Fi)")
+        self.case.setChecked(modem_wifi_active())
+        self.lbl_statut = QLabel()
+        self.lbl_statut.setWordWrap(True)
+        self.lbl_statut.setFixedWidth(560)
+        self.btn_refermer = QPushButton("Refermer la porte maintenant")
+        self.btn_refermer.clicked.connect(self._refermer)
+        btn_ok = QPushButton("OK")
+        btn_ok.clicked.connect(self._valider)
+        btn_annuler = QPushButton("Annuler")
+        btn_annuler.clicked.connect(self.reject)
+        for b in (self.btn_refermer, btn_ok, btn_annuler):
+            b.setAutoDefault(False)
+        btn_ok.setDefault(True)
+        boutons = QHBoxLayout()
+        boutons.addWidget(self.btn_refermer)
+        boutons.addStretch()
+        boutons.addWidget(btn_ok)
+        boutons.addWidget(btn_annuler)
+        principal = QVBoxLayout(self)
+        principal.addWidget(texte)
+        principal.addWidget(self.case)
+        principal.addWidget(self.lbl_statut)
+        principal.addLayout(boutons)
+        self._relais = _RelaisModem(self)
+        self._relais.fini.connect(self._refermee)
+
+    def showEvent(self, evenement):
+        super().showEvent(evenement)
+        self.raise_()  # devant la fenêtre de l'écran du téléphone (scrcpy)
+        self.activateWindow()
+
+    def _valider(self):
+        _ecrire_telephone_associe(modem_wifi=self.case.isChecked())
+        print(f"[TELEPHONE] option mode modem Wi-Fi : {self.case.isChecked()}")
+        self.accept()
+
+    def _refermer(self):
+        self.btn_refermer.setEnabled(False)
+        self.lbl_statut.setText("Fermeture en cours…")
+
+        def _travail():
+            message = _refermer_porte_modem()
+            try:
+                self._relais.fini.emit(message)
+            except RuntimeError:
+                pass
+        _threading.Thread(target=_travail, daemon=True).start()
+
+    def _refermee(self, message):
+        if self.case.isChecked():
+            message += (" Option toujours cochée : COURRIER la rouvrira à la prochaine "
+                        "connexion. Décochez-la pour qu'elle reste fermée.")
+        self.lbl_statut.setText(message)
+        self.btn_refermer.setEnabled(True)
 
 
 class _RelaisGuet(QObject):
@@ -4414,6 +4922,7 @@ class DialogueTelephoneIntrouvable(QDialog):
         super().__init__(parent)
         self.setWindowTitle(TITRE_BOITES_TELEPHONE)
         self.setStyleSheet(style_boites_telephone())
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         self.serie = None
         self.choix = None
         self._si_trouve = si_trouve
@@ -4450,9 +4959,12 @@ class DialogueTelephoneIntrouvable(QDialog):
         btn_associer = QPushButton("Rescanner le QR code" if self.rapide
                                    else "Associer un téléphone…")
         btn_associer.clicked.connect(self._associer)
+        btn_modem = QPushButton("Mode modem…")
+        btn_modem.setToolTip("Voir le téléphone quand il sert de modem Wi-Fi (point d'accès)")
+        btn_modem.clicked.connect(lambda: DialogueModemWifi(self).exec())
         btn_fermer = QPushButton("Fermer")
         btn_fermer.clicked.connect(self.reject)
-        self._boutons = (btn_reessayer, btn_associer, btn_fermer)
+        self._boutons = (btn_reessayer, btn_associer, btn_modem, btn_fermer)
         for b in self._boutons:
             b.setAutoDefault(False)
         (btn_associer if cas in ("jamais", "refuse") else btn_reessayer).setDefault(True)
@@ -4460,6 +4972,7 @@ class DialogueTelephoneIntrouvable(QDialog):
         boutons.addStretch()
         boutons.addWidget(btn_reessayer)
         boutons.addWidget(btn_associer)
+        boutons.addWidget(btn_modem)
         boutons.addWidget(btn_fermer)
 
         principal = QVBoxLayout(self)
@@ -4559,7 +5072,13 @@ class DialogueTelephoneIntrouvable(QDialog):
                 "après un redémarrage du téléphone ou un changement de réseau Wi-Fi.<br><br>"
                 + reactiver + "<br><br>"
                 f"Vérifiez aussi que le téléphone est déverrouillé et {meme_wifi}. "
-                "Ou branchez-le simplement en USB.<br><br>" + nouveau)
+                "Ou branchez-le simplement en USB.<br><br>"
+                "<b>Le téléphone sert de modem Wi-Fi (point d'accès) ?</b> "
+                + ("Il a sans doute redémarré depuis la dernière connexion : reliez-le une "
+                   "fois par câble USB ou sur le Wi-Fi de la maison, COURRIER rouvrira la "
+                   "porte du mode modem.<br><br>" if modem_wifi_active() else
+                   "Voir le bouton « Mode modem… ».<br><br>")
+                + nouveau)
 
     def _guetter(self):
         """(Re)lance la recherche automatique pour DUREE_GUET_TELEPHONE secondes."""
@@ -4613,27 +5132,132 @@ class DialogueTelephoneIntrouvable(QDialog):
         super().done(resultat)
 
 
-def connecter_telephone(parent=None, apres=None, si_echec=None):
+class _FenetreAttenteTelephone(QDialog):
+    """Petite fenêtre « ça travaille » pendant la recherche du téléphone
+    (15/10/2026, demandé, comme pour la mise à jour) : texte de l'étape en
+    cours et barre qui avance d'elle-même, de plus en plus lentement, sans
+    jamais finir tant que ce n'est pas terminé (progression factice : la
+    durée réelle n'est pas connue à l'avance)."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QProgressBar
+        self.setWindowTitle(TITRE_BOITES_TELEPHONE)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setStyleSheet(style_boites_telephone()
+                           + "QProgressBar { border: 1px solid #5a5a5a; background-color: #1a1a1a; "
+                             "height: 12px; } QProgressBar::chunk { background-color: #A52A2A; }")
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
+        self.lbl = QLabel()
+        self.lbl.setWordWrap(True)
+        self.lbl.setFixedWidth(380)
+        self.barre = QProgressBar()
+        self.barre.setRange(0, 1000)
+        self.barre.setTextVisible(False)
+        disposition = QVBoxLayout(self)
+        disposition.addWidget(self.lbl)
+        disposition.addWidget(self.barre)
+        self._valeur = 0.0
+        self._minuterie = QTimer(self)
+        self._minuterie.timeout.connect(self._avancer)
+        self._minuterie.start(100)
+
+    def _avancer(self):
+        self._valeur += (950 - self._valeur) * 0.03
+        self.barre.setValue(int(self._valeur))
+
+    def terminer(self):
+        self._minuterie.stop()
+        self.barre.setValue(1000)
+
+
+_attente_telephone = None
+
+
+def attente_telephone(parent, texte):
+    """Affiche (ou met à jour) la fenêtre d'attente avec le texte de l'étape."""
+    global _attente_telephone
+    if _attente_telephone is None:
+        _attente_telephone = _FenetreAttenteTelephone(parent)
+        _attente_telephone.lbl.setText(texte)
+        _attente_telephone.adjustSize()
+        _attente_telephone.show()
+        return
+    attente_telephone_etape(texte)
+
+
+def attente_telephone_etape(texte):
+    """Change le texte de l'étape, seulement si la fenêtre est affichée.
+    adjustSize : un texte plus long (2 lignes) était coupé (15/10/2026)."""
+    if _attente_telephone is not None:
+        _attente_telephone.lbl.setText(texte)
+        _attente_telephone.adjustSize()
+
+
+def attente_telephone_fermer(apres_ecran=False):
+    """Ferme la fenêtre d'attente ; apres_ecran : seulement une fois l'écran
+    du téléphone visible (pas de vide entre les deux), au plus 15 s."""
+    global _attente_telephone
+    fenetre, _attente_telephone = _attente_telephone, None
+    if fenetre is None:
+        return
+    fenetre.terminer()
+    if apres_ecran:
+        fenetre.accepted.connect(fenetre.deleteLater)
+        _fermer_quand_ecran_affiche(fenetre, delai=15.0)
+    else:
+        fenetre.close()
+        fenetre.deleteLater()
+
+
+def connecter_telephone(parent=None, apres=None, si_echec=None, attendre_ecran=False):
     """S'assure qu'un téléphone est joignable par adb, puis appelle
     apres(numero_de_serie). Asynchrone (QProcess + thread) : l'interface
-    ne gèle pas pendant la recherche. En cas d'échec,
+    ne gèle pas pendant la recherche, une fenêtre d'attente montre l'étape
+    en cours (attendre_ecran : elle reste jusqu'à l'apparition de l'écran
+    du téléphone, que apres() ouvre). En cas d'échec,
     DialogueTelephoneIntrouvable explique quoi faire, guette le téléphone
     et propose l'assistant d'association."""
     from PySide6.QtCore import QProcess
     from PySide6.QtWidgets import QInputDialog
     adb = chemin_adb()
 
-    def _reussi(serie):
-        _memoriser_telephone(serie)
+    def _apres(serie):
+        if attendre_ecran:
+            attente_telephone_etape("Téléphone trouvé. Ouverture de son écran…")
+        attente_telephone_fermer(apres_ecran=attendre_ecran)
         if apres:
             apres(serie)
 
+    def _reussi(serie):
+        _memoriser_telephone(serie)
+        if not modem_wifi_active() or serie.endswith(f":{PORT_ADB_MODEM}"):
+            _apres(serie)
+            return
+        # Option mode modem Wi-Fi : ouvrir la porte 5555 (si elle ne l'est
+        # pas déjà) AVANT d'ouvrir l'écran, sinon le redémarrage d'adb sur
+        # le téléphone couperait l'écran juste ouvert
+        attente_telephone_etape("Téléphone trouvé. Préparation du mode modem Wi-Fi "
+                                "(quelques secondes, une fois par redémarrage du téléphone)…")
+        relais_porte = _RelaisTelephone(parent)
+
+        def _porte_prete(nouvelle_serie):
+            relais_porte.deleteLater()
+            _apres(nouvelle_serie or serie)
+
+        relais_porte.fini.connect(_porte_prete)
+        _threading.Thread(target=lambda: relais_porte.fini.emit(_ouvrir_porte_modem(serie)),
+                          daemon=True).start()
+
     def _abandon():
+        attente_telephone_fermer()
         if si_echec:
             si_echec()
 
     def _echec(cas, detail=""):
         print(f"[TELEPHONE] échec : {cas} {detail}".strip())
+        attente_telephone_fermer()
         # Les deux boîtes appellent elles-mêmes _reussi (qui ouvre l'écran
         # du téléphone) et restent affichées jusqu'à son apparition.
         dialogue = DialogueTelephoneIntrouvable(parent, cas, detail, si_trouve=_reussi)
@@ -4650,6 +5274,7 @@ def connecter_telephone(parent=None, apres=None, si_echec=None):
                                  "Il se trouve normalement dans :\n" + CHEMINS_ADB[0])
         _abandon()
         return
+    attente_telephone(parent, "Recherche du téléphone…")
 
     def _lancer(arguments, suite):
         processus = QProcess(parent)
@@ -4679,8 +5304,22 @@ def connecter_telephone(parent=None, apres=None, si_echec=None):
     def _apres_recherche(adresse):
         if adresse:
             _lancer(["connect", adresse], lambda c, s: _apres_connect(c, s, adresse))
-        else:
-            _echec("introuvable" if lire_telephone_associe() else "jamais")
+            return
+        # Pas de Débogage sans fil sur le Wi-Fi : le téléphone sert peut-être
+        # de modem (point d'accès) avec la porte 5555 ouverte
+        attente_telephone_etape("Recherche en mode modem Wi-Fi (point d'accès)…")
+        relais_modem = _RelaisTelephone(parent)
+
+        def _apres_passerelle(serie):
+            relais_modem.deleteLater()
+            if serie:
+                _reussi(serie)
+            else:
+                _echec("introuvable" if lire_telephone_associe() else "jamais")
+
+        relais_modem.fini.connect(_apres_passerelle)
+        _threading.Thread(target=lambda: relais_modem.fini.emit(_essayer_passerelle()),
+                          daemon=True).start()
 
     def _apres_liste(code, sortie):
         appareils, non_autorise = _lire_appareils(sortie)
@@ -4688,6 +5327,7 @@ def connecter_telephone(parent=None, apres=None, si_echec=None):
             _reussi(appareils[0][0])
             return
         if len(appareils) > 1:
+            attente_telephone_fermer()
             noms = [m.replace("_", " ") for _, m in appareils]
             choix = QInputDialog(parent)
             choix.setWindowTitle(TITRE_BOITES_TELEPHONE)
@@ -4696,6 +5336,7 @@ def connecter_telephone(parent=None, apres=None, si_echec=None):
             choix.setOkButtonText("Utiliser ce téléphone")
             choix.setCancelButtonText("Annuler")
             choix.setStyleSheet(style_boites_telephone())
+            choix.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
             if choix.exec() == QDialog.Accepted:
                 _reussi(appareils[noms.index(choix.textValue())][0])
             else:
@@ -4706,6 +5347,7 @@ def connecter_telephone(parent=None, apres=None, si_echec=None):
             _echec("non_autorise")
             return
         print("[TELEPHONE] aucun téléphone relié, recherche en Wi-Fi…")
+        attente_telephone_etape("Recherche du téléphone sur le Wi-Fi…")
         relais = _RelaisTelephone(parent)
 
         def _resultat(adresse):
@@ -4794,6 +5436,7 @@ class DialogueAssociationTelephone(QDialog):
         import secrets, string
         self.setWindowTitle("Rescanner le QR code" if rapide else "Associer un téléphone Android")
         self.setStyleSheet(style_boites_telephone())
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         self.serie = None
         self._si_trouve = si_trouve  # appelée avec la série : ouvre l'écran du téléphone
         self._fini = False
@@ -5139,7 +5782,9 @@ class DialogueRallumageAuto(QDialog):
     def __init__(self, parent, serie):
         super().__init__(parent)
         self.setWindowTitle("Rallumage automatique du Débogage sans fil")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # devant l'écran du téléphone (scrcpy)
         self.setStyleSheet(style_boites_telephone())
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         self.serie = serie
         self._fini = False
         self._installe = self._autorise = False
@@ -5391,6 +6036,8 @@ def verifier_rappel_7_jours(fenetre):
                         f"repartira pour 7 jours.",
                         QMessageBox.NoButton, fenetre)
     boite.setStyleSheet(style_boites_telephone())
+    boite.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
+    boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # ouverte en arrière-plan : devant tout
     b_relier = boite.addButton("Relier maintenant", QMessageBox.AcceptRole)
     boite.addButton("Plus tard", QMessageBox.RejectRole)
     boite.exec()
@@ -5398,6 +6045,23 @@ def verifier_rappel_7_jours(fenetre):
         print("[TELEPHONE] rappel 7 jours : liaison demandée")
         connecter_telephone(fenetre, lambda _serie: _boite_telephone(
             fenetre, "Le téléphone est relié : Android repart pour 7 jours.", QMessageBox.Information))
+
+
+def proposer_reglages_telephone(parent, serie):
+    """Après une connexion réussie par TÉL : propose, une fois chacun et
+    jamais les deux d'affilée, le rallumage automatique puis le mode modem
+    Wi-Fi (15/10/2026). Les deux restent accessibles par le ▾ de TÉL."""
+    associe = lire_telephone_associe() or {}
+    choix = associe.get("rallumage", "")
+    if not (choix in ("fait", "jamais") or choix == "plus_tard:" + time.strftime("%Y-%m-%d")):
+        proposer_rallumage_auto(parent, serie)
+        return
+    if "modem_wifi" not in associe:
+        dialogue = DialogueModemWifi(parent)
+        dialogue.exec()
+        if "modem_wifi" not in (lire_telephone_associe() or {}):
+            _ecrire_telephone_associe(modem_wifi=False)  # Annuler = non (▾ pour changer d'avis)
+        dialogue.deleteLater()
 
 
 def proposer_rallumage_auto(parent, serie):
@@ -5428,6 +6092,89 @@ def _ramener_fenetre_telephone(serie):
     return True
 
 
+def _centrer_fenetre_telephone_a_l_ouverture(processus, marge=8):
+    """Centre la fenêtre scrcpy (TÉL) dans la zone utile de l'écran dès
+    qu'elle a pris sa taille définitive (15/10/2026, demandé : elle ne
+    l'était pas, surtout à 150 % avec la barre des tâches en haut). Fenêtre
+    d'un autre programme : on la cherche par son titre toutes les 250 ms
+    (20 s au plus) et on la place via Windows, en pixels physiques ; trop
+    haute pour l'écran, elle est réduite en gardant ses proportions."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    user32 = ctypes.windll.user32
+    etat = {"essais": 0, "dernier": None, "centree_a": None}
+
+    def rectangles(hwnd):
+        # Rectangle Windows + rectangle visible (sans bordures invisibles)
+        r = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
+        v = wintypes.RECT()
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                hwnd, 9, ctypes.byref(v), ctypes.sizeof(v)) != 0:
+            v = r
+        return r, v
+
+    def essayer():
+        etat["essais"] += 1
+        if etat["essais"] > 80 or processus.poll() is not None:
+            return
+        hwnd = user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE)
+        if not hwnd or not user32.IsWindowVisible(hwnd):
+            QTimer.singleShot(250, essayer)
+            return
+        hwnd = wintypes.HWND(hwnd)
+        r, v = rectangles(hwnd)
+        taille = (r.right - r.left, r.bottom - r.top)
+        # scrcpy se redimensionne à l'arrivée de la première image : on
+        # centre quand la taille est stable (deux relevés identiques), et on
+        # continue de surveiller jusqu'à 20 s pour recentrer si elle change
+        # encore. Un simple déplacement par l'utilisateur ne change pas la
+        # taille : il est respecté.
+        stable = taille == etat["dernier"]
+        etat["dernier"] = taille
+        QTimer.singleShot(250, essayer)
+        if not stable or taille == etat["centree_a"]:
+            return
+        try:
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 2), ctypes.byref(info))
+            zone = info.rcWork
+            zone_l = zone.right - zone.left
+            zone_h = zone.bottom - zone.top
+            try:
+                m = round(marge * user32.GetDpiForWindow(hwnd) / 96)  # pixels physiques
+            except Exception:
+                m = marge
+            bord_l = (r.right - r.left) - (v.right - v.left)
+            bord_h = (r.bottom - r.top) - (v.bottom - v.top)
+            vis_l = v.right - v.left
+            vis_h = v.bottom - v.top
+            echelle = min(1.0, (zone_l - 2 * m) / vis_l, (zone_h - 2 * m) / vis_h)
+            if echelle < 1.0:
+                vis_l = int(vis_l * echelle)
+                vis_h = int(vis_h * echelle)
+            x = zone.left + max(0, (zone_l - vis_l) // 2) - (v.left - r.left)
+            y = zone.top + max(0, (zone_h - vis_h) // 2) - (v.top - r.top)
+            drapeaux = 0x0004 | 0x0010  # SWP_NOZORDER | SWP_NOACTIVATE
+            if echelle >= 1.0:
+                drapeaux |= 0x0001  # SWP_NOSIZE
+            user32.SetWindowPos(hwnd, None, x, y, vis_l + bord_l, vis_h + bord_h, drapeaux)
+            r, _v = rectangles(hwnd)
+            etat["centree_a"] = etat["dernier"] = (r.right - r.left, r.bottom - r.top)
+        except Exception as e:
+            print(f"[TELEPHONE] centrage impossible : {e}")
+
+    QTimer.singleShot(250, essayer)
+
+
 def afficher_ecran_telephone(serie, parent=None):
     """Ouvre l'écran du téléphone `serie` dans une fenêtre scrcpy (mêmes
     réglages que le navigateur : 2 Mbps, 1080, sans reverse connection,
@@ -5450,6 +6197,7 @@ def afficher_ecran_telephone(serie, parent=None):
         stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
     journal.close()  # le processus garde sa propre copie du descripteur
     processus = _processus_scrcpy
+    _centrer_fenetre_telephone_a_l_ouverture(processus)
 
     def _verifier():
         # scrcpy mort dans les premières secondes = échec : on montre la
@@ -6059,7 +6807,8 @@ class DialogueSMS(QDialog):
 
     def __init__(self, parent=None, destinataires=None):
         super().__init__(None)  # fenêtre indépendante + bouton taskbar
-        from PySide6.QtWidgets import (QTextEdit, QSpinBox, QProgressBar)
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
+        from PySide6.QtWidgets import (QTextEdit, QSpinBox, QProgressBar, QScrollArea)
         self._parent_courrier = parent
         self.thread_envoi = None
         self.setWindowTitle("SMS")
@@ -6067,7 +6816,10 @@ class DialogueSMS(QDialog):
                             Qt.WindowType.WindowCloseButtonHint |
                             Qt.WindowType.WindowMinimizeButtonHint |
                             Qt.WindowType.WindowMaximizeButtonHint)
-        self.setMinimumSize(1040, 760)
+        # Hauteur minimum ramenée de 760 à 420 (15/10/2026) : à 150 % la
+        # fenêtre dépassait l'écran ; le contenu défile si besoin (plus bas).
+        self.setMinimumSize(1040, 420)
+        self.resize(1040, 780)  # réduite à l'affichage si l'écran est trop petit
         self.setStyleSheet("""
             QDialog, QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
             QLineEdit, QSpinBox, QTextEdit {
@@ -6081,10 +6833,23 @@ class DialogueSMS(QDialog):
         # Colonne des pièces jointes à droite (08/10/2026), comme Rédiger
         layout_externe = QHBoxLayout(self)
         layout_externe.setContentsMargins(0, 0, 12, 12)
-        layout = QVBoxLayout()
-        layout.setContentsMargins(20, 15, 20, 15)
+        # Partie gauche dans une zone défilante (15/10/2026), invisible quand
+        # tout tient ; la ligne du bas (aide + FERMER) reste hors défilement,
+        # toujours visible, même à 150 % sur un écran 1080p.
+        layout_gauche = QVBoxLayout()
+        layout_gauche.setContentsMargins(0, 0, 0, 0)
+        layout_gauche.setSpacing(0)
+        layout_externe.addLayout(layout_gauche, 1)
+        zone_defilante = QScrollArea()
+        zone_defilante.setWidgetResizable(True)
+        zone_defilante.setFrameShape(QFrame.Shape.NoFrame)
+        zone_defilante.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        contenu_gauche = QWidget()
+        zone_defilante.setWidget(contenu_gauche)
+        layout_gauche.addWidget(zone_defilante, 1)
+        layout = QVBoxLayout(contenu_gauche)
+        layout.setContentsMargins(20, 15, 20, 8)
         layout.setSpacing(10)
-        layout_externe.addLayout(layout, 1)
         self.setAcceptDrops(True)
         titre = QLabel("SMS")
         titre.setStyleSheet("color: #A52A2A; font-size: 16px; font-weight: bold; padding: 5px 0;")
@@ -6207,11 +6972,12 @@ class DialogueSMS(QDialog):
         layout.addWidget(lbl_journal)
         self.journal = QTextEdit()
         self.journal.setReadOnly(True)
-        self.journal.setMinimumHeight(150)
+        self.journal.setMinimumHeight(100)
         self.journal.setStyleSheet("background-color: #1a1a1a; color: #cccccc; border: 1px solid #444; font-size: 14px;")
         layout.addWidget(self.journal)
 
         h_bas = QHBoxLayout()
+        h_bas.setContentsMargins(20, 8, 20, 3)
         lbl_aide_envoi = QLabel(
             "Téléphone verrouillé : l'envoi se met en pause, déverrouillez puis cliquez REPRENDRE.\n"
             "Interruption : si vous fermez la fenêtre ou si l'envoi s'arrête, REPRENDRE repart\n"
@@ -6222,7 +6988,7 @@ class DialogueSMS(QDialog):
         btn_fermer = QPushButton("FERMER")
         btn_fermer.clicked.connect(self.close)
         h_bas.addWidget(btn_fermer, 0, Qt.AlignmentFlag.AlignBottom)
-        layout.addLayout(h_bas)
+        layout_gauche.addLayout(h_bas)
 
         # Colonne des pièces jointes (même présentation que Rédiger) : une
         # image par message (MMS)
@@ -6651,7 +7417,7 @@ class DialogueSMS(QDialog):
             self.lbl_statut.setText("Envoi en cours…")
             self.lbl_statut.setStyleSheet("color: #80c080;")
 
-        connecter_telephone(self, _connecte, si_echec=_echec)
+        connecter_telephone(self, _connecte, si_echec=_echec, attendre_ecran=True)
 
     def _pause(self):
         t = self.thread_envoi
@@ -16619,6 +17385,7 @@ class DialogueAbonnementsRSS(QDialog):
     qu'en tri manuel — voir _basculer_tri pour le tri alphabétique."""
     def __init__(self, parent=None):
         super().__init__(None)  # pas de parent Qt → fenêtre indépendante + bouton taskbar auto
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         self._parent_courrier = parent
         self.setWindowTitle("RSS to EMAIL")
         self.setWindowFlags(
@@ -17350,6 +18117,7 @@ class DialogueCarnetAdresses(QDialog):
 
     def __init__(self, parent=None, champ_cible=None, libelle_cible=""):
         super().__init__(None)  # pas de parent Qt → fenêtre indépendante + bouton taskbar auto
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         self._parent_courrier = parent
         # Mode "choix de destinataires" (28/09/2026, demandé par l'utilisateur) :
         # ouvert par un clic sur À / Cc / Cci dans la fenêtre de rédaction,
@@ -23835,6 +24603,7 @@ class GestionnaireModeles(QDialog):
 
     def __init__(self, client_mail, parent=None):
         super().__init__(None)  # pas de parent Qt → fenêtre indépendante + bouton taskbar auto
+        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         self._parent_courrier = parent
         self.client_mail = client_mail
         self.setWindowTitle("MODÈLES")
@@ -25253,7 +26022,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 10h05")
+        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 18h57")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -25982,11 +26751,50 @@ class ClientMail(QMainWindow):
                 _retablir()
                 afficher_ecran_telephone(serie, self)
                 # Une fois l'écran du téléphone affiché : proposer (une
-                # fois) le rallumage automatique du Débogage sans fil
-                QTimer.singleShot(6000, lambda: proposer_rallumage_auto(self, serie))
-            connecter_telephone(self, _connecte, si_echec=_retablir)
+                # fois chacun) le rallumage automatique puis le mode modem Wi-Fi
+                QTimer.singleShot(6000, lambda: proposer_reglages_telephone(self, serie))
+            connecter_telephone(self, _connecte, si_echec=_retablir, attendre_ecran=True)
         btn_tel.clicked.connect(_ouvrir_telephone)
         layout_haut.addWidget(btn_tel)
+        # ⚙ à côté de TÉL (15/10/2026) : réglages du téléphone à tout moment
+        # (les fenêtres proposées d'elles-mêmes ne le sont qu'une fois).
+        # D'abord une flèche ▾, remplacée par ⚙ : « Mode modem Wi-Fi » y
+        # était pris pour « afficher le téléphone en mode modem ». Le menu
+        # commence donc par « Afficher l'écran du téléphone » (= TÉL) et les
+        # réglages sont nommés comme tels.
+        btn_tel_menu = QPushButton("⚙")
+        btn_tel_menu.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_tel_menu.setFixedWidth(26)
+        btn_tel_menu.setToolTip("Réglages du téléphone")
+        def _menu_telephone():
+            from PySide6.QtWidgets import QMenu
+            menu = QMenu(self)
+            menu.setStyleSheet("""
+                QMenu { background-color: #2a2a2a; color: white;
+                        font-family: Verdana; font-size: 11px; border: 1px solid #5a5a5a; }
+                QMenu::item { padding: 6px 20px; }
+                QMenu::item:selected { background-color: #A52A2A; }
+            """)
+            def _associer():
+                serie = ouvrir_assistant_association(self)
+                if serie:
+                    afficher_ecran_telephone(serie, self)
+            menu.addAction("Afficher l'écran du téléphone", _ouvrir_telephone)
+            menu.addSeparator()
+            titre = menu.addAction("Réglages :")
+            titre.setEnabled(False)
+            menu.addAction("   Associer un téléphone (ou rescanner le QR code)…", _associer)
+            menu.addAction("   Réglage du rallumage automatique…",
+                           lambda: connecter_telephone(self, lambda s: DialogueRallumageAuto(self, s).exec()))
+            menu.addAction("   Réglage du mode modem Wi-Fi…", lambda: DialogueModemWifi(self).exec())
+            menu.exec(btn_tel_menu.mapToGlobal(btn_tel_menu.rect().bottomLeft()))
+        btn_tel_menu.clicked.connect(_menu_telephone)
+        layout_haut.addWidget(btn_tel_menu)
+        # Surveillance de la porte du mode modem Wi-Fi (option cochée) :
+        # propose de la rouvrir après un redémarrage du téléphone, toutes les 30 s
+        self._minuterie_porte_modem = QTimer(self)
+        self._minuterie_porte_modem.timeout.connect(lambda: surveiller_porte_modem(self))
+        self._minuterie_porte_modem.start(30 * 1000)
         # Rappel la veille de l'oubli de l'ordinateur par Android (7 jours) :
         # 1 min après le lancement, puis toutes les heures
         self._minuterie_rappel_tel = QTimer(self)
@@ -30105,7 +30913,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 15/10/2026 à 10h05")
+        lbl_version = QLabel("Version du 15/10/2026 à 18h57")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -40947,6 +41755,7 @@ __JS_TRADUCTION__
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QCheckBox, QFileDialog, QFrame
         dlg = QDialog(None)  # pas de parent Qt → fenêtre indépendante + bouton taskbar auto
         dlg.setWindowTitle("SONS")
+        dlg.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         dlg.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowTitleHint |
@@ -41221,6 +42030,7 @@ __JS_TRADUCTION__
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, QLineEdit, QLabel, QFormLayout, QComboBox
         dlg = QDialog(None)  # pas de parent Qt → fenêtre indépendante + bouton taskbar auto
         dlg.setWindowTitle("COMPTES")
+        dlg.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         dlg.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowTitleHint |
@@ -42255,6 +43065,94 @@ __JS_TRADUCTION__
         self.label_statut.setText(f"Erreur : {msg}")
         self.label_statut.setStyleSheet("color: #ffcccc; font-family: Verdana; font-size: 11px; font-weight: bold;")
 
+
+def centrer_fenetre_ecran(fenetre, marge=8):
+    """Centre une fenêtre DÉJÀ affichée dans la zone utile de son écran
+    (barre des tâches exclue), après l'avoir réduite si elle n'y tient pas.
+    Sous Windows, mesures prises directement à Windows (pixels physiques) :
+    à 150 % avec la barre des tâches en haut, Qt renvoie une zone utile
+    dont le coin haut-gauche n'est pas mis à l'échelle (124 au lieu de 83),
+    d'où des fenêtres trop basses (15/10/2026, même correctif que MAILING).
+    Fenêtres concernées : propriété Qt « centrer_ecran » (voir
+    _AjusteurTailleEcran)."""
+    import math
+    try:
+        if fenetre.isMaximized() or fenetre.isFullScreen():
+            return
+        dpr = fenetre.devicePixelRatioF() or 1.0
+    except RuntimeError:
+        return  # fenêtre déjà détruite
+
+    def reduire(trop_l, trop_h):
+        # Excédent en pixels logiques ; le minimum est abaissé au besoin
+        if trop_l <= 0 and trop_h <= 0:
+            return False
+        l = fenetre.width() - max(0, trop_l)
+        h = fenetre.height() - max(0, trop_h)
+        if fenetre.minimumWidth() > l:
+            fenetre.setMinimumWidth(l)
+        if fenetre.minimumHeight() > h:
+            fenetre.setMinimumHeight(h)
+        fenetre.resize(l, h)
+        return True
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+            user32 = ctypes.windll.user32
+            hwnd = wintypes.HWND(int(fenetre.winId()))
+
+            def rectangles():
+                # Rectangle Windows + rectangle visible (sans bordures invisibles)
+                r = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(r))
+                v = wintypes.RECT()
+                if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                        hwnd, 9, ctypes.byref(v), ctypes.sizeof(v)) != 0:
+                    v = r
+                return r, v
+
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 2), ctypes.byref(info))
+            zone = info.rcWork
+            zone_l = zone.right - zone.left
+            zone_h = zone.bottom - zone.top
+            m = round(marge * dpr)
+
+            r, v = rectangles()
+            if reduire(math.ceil(((v.right - v.left) - (zone_l - 2 * m)) / dpr),
+                       math.ceil(((v.bottom - v.top) - (zone_h - 2 * m)) / dpr)):
+                QApplication.processEvents()
+                r, v = rectangles()
+            vis_l = v.right - v.left
+            vis_h = v.bottom - v.top
+            x = zone.left + max(0, (zone_l - vis_l) // 2) - (v.left - r.left)
+            y = zone.top + max(0, (zone_h - vis_h) // 2) - (v.top - r.top)
+            # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+            user32.SetWindowPos(hwnd, None, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010)
+            return
+        except Exception as e:
+            print(f"[CENTRAGE] Win32 impossible, repli Qt : {e}")
+
+    ecran = fenetre.screen() or QApplication.primaryScreen()
+    if ecran is None:
+        return
+    dispo = ecran.availableGeometry()
+    cadre = fenetre.frameGeometry()
+    if reduire(cadre.width() - (dispo.width() - 2 * marge),
+               cadre.height() - (dispo.height() - 2 * marge)):
+        cadre = fenetre.frameGeometry()
+    fenetre.move(dispo.x() + max(0, (dispo.width() - cadre.width()) // 2),
+                 dispo.y() + max(0, (dispo.height() - cadre.height()) // 2))
+
+
 if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Journalisation persistante + capture des plantages natifs
@@ -42483,6 +43381,13 @@ if __name__ == "__main__":
             try:
                 if not isinstance(obj, QWidget) or not obj.isWindow():
                     return False
+                # Fenêtres marquées « centrer_ecran » : centrées (et réduites
+                # si besoin) une fois affichées, d'après Windows — voir
+                # centrer_fenetre_ecran (15/10/2026). Une seule fois par
+                # fenêtre : si l'utilisateur la déplace, elle y reste.
+                if obj.property("centrer_ecran") and not obj.property("_centree"):
+                    obj.setProperty("_centree", True)
+                    QTimer.singleShot(0, lambda f=obj: centrer_fenetre_ecran(f))
                 if obj.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip,
                                         Qt.WindowType.SplashScreen):
                     return False

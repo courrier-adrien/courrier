@@ -478,6 +478,30 @@
   </ul>
   <p>Vous pouvez aussi choisir <b>Plus tard</b> (Courrier Adrien le reproposera le lendemain), <b>Ne plus proposer</b>, ou <b>C'est déjà en place</b>.</p>
 
+  <h3>Les réglages du téléphone : la roue dentée ⚙</h3>
+  <p>La petite roue dentée <span class="btn">⚙</span>, à droite de <span class="btn">TÉL</span>, ouvre un menu :</p>
+  <ul>
+    <li><b>Afficher l'écran du téléphone</b> : comme un clic sur TÉL.</li>
+    <li><b>Réglages</b>, pour changer d'avis à tout moment : associer un téléphone (ou rescanner le QR code), régler le rallumage automatique, régler le mode modem Wi-Fi.</li>
+  </ul>
+  <p>Pendant la recherche du téléphone, une petite fenêtre avec une barre de progression indique l'étape en cours ; elle se ferme dès que l'écran du téléphone apparaît.</p>
+
+  <h3>Quand le téléphone sert de modem (partage de connexion)</h3>
+  <ul>
+    <li><b>Partage de connexion par câble USB</b> : rien de particulier, le câble suffit. Activez le <b>Débogage USB</b> dans les Options de développement et touchez <b>Autoriser</b> sur le téléphone la première fois. Utilisez de préférence un câble <b>USB-A vers USB-C</b> (prise rectangulaire classique côté ordinateur) : avec certains ordinateurs, un câble USB-C vers USB-C ne permet ni la charge ni le partage de connexion.</li>
+    <li><b>Point d'accès Wi-Fi</b> : dans ce mode, Android coupe le Débogage sans fil (le téléphone n'est connecté à aucun Wi-Fi : c'est lui qui le diffuse). Courrier Adrien peut alors passer par une autre « porte » d'Android, s'il l'a ouverte auparavant. Cochez la case dans <span class="btn">⚙</span> › <b>Réglage du mode modem Wi-Fi</b> (elle vous est aussi proposée une fois, après une connexion réussie).</li>
+  </ul>
+  <p>Avec cette option :</p>
+  <ul>
+    <li>en point d'accès, un clic sur <b>TÉL</b> trouve le téléphone tout seul, sans câble ;</li>
+    <li>quand l'ordinateur se connecte au point d'accès du téléphone (ou au lancement de Courrier Adrien s'il y est déjà connecté), Courrier Adrien propose d'afficher l'écran du téléphone (<b>Afficher l'écran</b> / <b>Pas maintenant</b>). <b>Comptez une trentaine de secondes</b> avant que cette proposition apparaisse : Courrier Adrien vérifie toutes les 30 secondes. Elle n'est faite qu'une fois par connexion au point d'accès, et pas si l'écran du téléphone est déjà affiché ;</li>
+    <li>la porte s'ouvre lors d'une connexion normale (Wi-Fi de la maison ou câble USB), et reste ouverte <b>jusqu'au prochain redémarrage du téléphone</b> ;</li>
+    <li>après un redémarrage, Courrier Adrien vous propose de la rouvrir (fenêtre <b>Rouvrir la porte</b> / <b>Pas maintenant</b>, une seule fois par redémarrage). Si le téléphone a redémarré pendant que vous étiez dehors, en point d'accès, Courrier Adrien vous demande de le brancher une fois avec son câble USB : Android ne permet pas de rouvrir la porte autrement. Branchez-le : Courrier Adrien le détecte aussitôt, propose de rouvrir la porte, puis affiche l'écran du téléphone. Vous pouvez ensuite débrancher le câble.<br>
+      <small><b>Pourquoi le câble est obligatoire dans ce cas : c'est une mesure de sécurité d'Android.</b> Le point d'accès Wi-Fi relie bien l'ordinateur au téléphone, mais seulement pour Internet : après un redémarrage, Android n'accepte plus aucune commande par le Wi-Fi tant que vous n'avez pas fait un geste physique sur le téléphone (le brancher). Sinon, n'importe quel ordinateur connecté à votre point d'accès (une connexion prêtée dans un train, par exemple) pourrait tenter de piloter votre téléphone. Le câble ne sert qu'une fois par redémarrage, et uniquement si le téléphone n'est pas repassé par le Wi-Fi de la maison entre-temps.</small></li>
+  </ul>
+  <p>Condition : le <b>Débogage USB</b> doit rester activé dans les Options de développement.</p>
+  <div class="attention"><b>Sécurité :</b> jusqu'au prochain redémarrage du téléphone, cette porte reste ouverte sur tous les réseaux (café, hôtel…). Seuls les ordinateurs que vous avez déjà autorisés peuvent l'utiliser : un inconnu ne ferait qu'afficher une demande d'autorisation sur votre écran (touchez « Refuser »). C'est pourquoi l'option est désactivée par défaut. Pour refermer la porte : redémarrez le téléphone, ou <span class="btn">⚙</span> › <b>Réglage du mode modem Wi-Fi</b> › <b>Refermer la porte maintenant</b>.</div>
+
   <h3>Envoyer des SMS</h3>
   <ul>
     <li>Choisissez les destinataires : dans le carnet (dossier entier ou contacts sélectionnés), ou depuis un fichier CSV ou Excel. Vous pouvez joindre des photos.</li>
