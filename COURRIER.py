@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-15 09h32"
+VERSION_BUILD = "2026-10-15 10h05"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -25253,7 +25253,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 09h32")
+        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 10h05")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -30105,7 +30105,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 15/10/2026 à 09h32")
+        lbl_version = QLabel("Version du 15/10/2026 à 10h05")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
