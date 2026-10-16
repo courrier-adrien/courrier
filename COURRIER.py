@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-16 02h18"
+VERSION_BUILD = "2026-10-16 17h27"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -5150,6 +5150,9 @@ class DialogueTelephoneIntrouvable(QDialog):
 
         btn_reessayer = QPushButton("Réessayer")
         btn_reessayer.clicked.connect(self._guetter)
+        # Visible seulement une fois la recherche arrêtée (17/10/2026 : un
+        # bouton Réessayer pendant une recherche en cours était contradictoire)
+        self._btn_reessayer = btn_reessayer
         # Téléphone connu qui ne reconnaît plus l'ordinateur : association
         # effacée (Options de développement coupées) -> QR code, version courte
         self.rapide = cas == "refuse" and bool(lire_telephone_associe())
@@ -5280,8 +5283,9 @@ class DialogueTelephoneIntrouvable(QDialog):
     def _guetter(self):
         """(Re)lance la recherche automatique pour DUREE_GUET_TELEPHONE secondes."""
         self._fin_guet = time.monotonic() + DUREE_GUET_TELEPHONE
-        self.lbl_statut.setText("Recherche du téléphone en cours… Inutile de cliquer sur "
-                                "Réessayer : dès qu'il sera prêt, il sera détecté tout seul.")
+        self._btn_reessayer.hide()
+        self.lbl_statut.setText("Recherche du téléphone en cours… Dès qu'il sera prêt, "
+                                "il sera détecté tout seul.")
         self.lbl_statut.setStyleSheet(f"color: {COULEUR_TEL_OK}; font-style: italic;")
         QTimer.singleShot(DUREE_GUET_TELEPHONE * 1000 + 500, self._fin_recherche)
 
@@ -5289,6 +5293,7 @@ class DialogueTelephoneIntrouvable(QDialog):
         if not self._fini and time.monotonic() >= self._fin_guet:
             self.lbl_statut.setText("Recherche arrêtée. Cliquez sur Réessayer quand le téléphone "
                                     "est prêt.")
+            self._btn_reessayer.show()
             self.lbl_statut.setStyleSheet(f"color: {COULEUR_TEL_DISCRET};")
 
     def _fil_guet(self):
@@ -5696,10 +5701,13 @@ def connecter_telephone(parent=None, apres=None, si_echec=None, attendre_ecran=F
             _apres(serie)
             return
         # Option mode modem Wi-Fi : ouvrir la porte 5555 (si elle ne l'est
-        # pas déjà) AVANT d'ouvrir l'écran, sinon le redémarrage d'adb sur
+        # pas déjà ; elle se referme au redémarrage du téléphone, mais aussi
+        # quand Android relance le débogage sans fil, ex. après une sortie du
+        # Wi-Fi : constaté le 16/10/2026, port sans fil changé dans la nuit)
+        # AVANT d'ouvrir l'écran, sinon le redémarrage d'adb sur
         # le téléphone couperait l'écran juste ouvert
-        attente_telephone_etape("Téléphone trouvé. Préparation du mode modem Wi-Fi "
-                                "(quelques secondes, une fois par redémarrage du téléphone)…")
+        attente_telephone_etape("Téléphone trouvé. Préparation de la liaison "
+                                "(quelques secondes, seulement de temps en temps)…")
         relais_porte = _RelaisTelephone(parent)
 
         def _porte_prete(nouvelle_serie):
@@ -5780,12 +5788,58 @@ def connecter_telephone(parent=None, apres=None, si_echec=None, attendre_ecran=F
             relais_modem.deleteLater()
             if serie:
                 _reussi(serie)
+            elif lire_telephone_associe():
+                _patienter()
             else:
-                _echec("introuvable" if lire_telephone_associe() else "jamais")
+                _echec("jamais")
 
         relais_modem.fini.connect(_apres_passerelle)
         _threading.Thread(target=lambda: relais_modem.fini.emit(_essayer_passerelle()),
                           daemon=True).start()
+
+    def _patienter():
+        """Téléphone associé mais pas encore joignable (17/10/2026, demandé :
+        la boîte « introuvable » apparaissait alors que le téléphone se
+        signalait quelques secondes plus tard, avec un bouton Réessayer
+        contradictoire). On reste sur la fenêtre de recherche, qui dit
+        exactement ce qui se passe, et on continue de chercher : jusqu'à
+        40 s si le rallumage automatique est en place (le téléphone relance
+        son débogage sans fil toutes les 30 s), 12 s sinon. La boîte d'aide
+        n'arrive que si le téléphone reste introuvable. Fermer la fenêtre
+        de recherche arrête tout."""
+        duree = 40 if (lire_telephone_associe() or {}).get("rallumage") == "fait" else 12
+        attente_telephone_etape("Recherche du téléphone…\n"
+                                f"Cela peut prendre jusqu'à {duree} secondes : le téléphone sera "
+                                "détecté tout seul dès qu'il se signale.")
+        fenetre = _attente_telephone
+        arret = {"stop": False}
+        if fenetre is not None:
+            fenetre.rejected.connect(lambda: arret.__setitem__("stop", True))
+        relais_patience = _RelaisTelephone(parent)
+
+        def _fin_patience(serie):
+            relais_patience.deleteLater()
+            if arret["stop"]:
+                print("[TELEPHONE] recherche arrêtée par l'utilisateur")
+                attente_telephone_fermer()
+                if si_echec:
+                    si_echec()
+            elif serie:
+                _reussi(serie)
+            else:
+                _echec("introuvable")
+
+        def _fil():
+            fin = time.monotonic() + duree
+            while time.monotonic() < fin and not arret["stop"]:
+                serie = _chercher_telephone_bloquant()
+                if serie:
+                    return serie
+                time.sleep(1)
+            return None
+
+        relais_patience.fini.connect(_fin_patience)
+        _threading.Thread(target=lambda: relais_patience.fini.emit(_fil()), daemon=True).start()
 
     def _apres_liste(code, sortie):
         appareils, non_autorise = _lire_appareils(sortie)
@@ -8358,6 +8412,19 @@ COLONNES_PORTABLE = ("téléphone portable", "telephone portable", "portable",
 COLONNES_FIXE = ("téléphone fixe", "telephone fixe", "fixe",
                  "tél fixe", "tel fixe", "tél. fixe",
                  "téléphone", "telephone", "tél", "tel", "phone")
+# Champs ajoutés le 17/10/2026 (import des contacts du téléphone) : les
+# numéros au-delà d'un fixe et d'un portable, et les notes du contact
+COLONNES_AUTRES_TEL = ("autres téléphones", "autres telephones", "autres numéros",
+                       "autres numeros", "autre téléphone", "autre telephone")
+COLONNES_NOTES = ("notes", "note", "remarques", "remarque", "commentaire", "commentaires")
+
+
+def formater_autres_telephones(texte):
+    """Champ « Autres téléphones » : numéros séparés par « ; » (ou « , »),
+    chacun écrit comme formater_numero_telephone. Texte libre accepté
+    (numéros courts, étrangers...)."""
+    morceaux = [m.strip() for m in re.split(r"[;,\n]", texte or "") if m.strip()]
+    return " ; ".join(formater_numero_telephone(m) for m in morceaux)
 
 
 def _parser_csv_generique(chemin, encodage, separateur=","):
@@ -8386,8 +8453,10 @@ def _parser_csv_generique(chemin, encodage, separateur=","):
         idx_dossier = trouver_colonne(*COLONNES_DOSSIER)
         idx_portable = trouver_colonne(*COLONNES_PORTABLE)
         idx_fixe = trouver_colonne(*COLONNES_FIXE)
+        idx_autres = trouver_colonne(*COLONNES_AUTRES_TEL)
+        idx_notes = trouver_colonne(*COLONNES_NOTES)
 
-        if idx_email is None and idx_portable is None and idx_fixe is None:
+        if idx_email is None and idx_portable is None and idx_fixe is None and idx_autres is None:
             return [], []
 
         def _champ(idx):
@@ -8399,14 +8468,16 @@ def _parser_csv_generique(chemin, encodage, separateur=","):
             # MyPhoneExplorer recopiée dans Excel) : retiré
             portable = formater_numero_telephone(_champ(idx_portable).rstrip(";, "))
             fixe = formater_numero_telephone(_champ(idx_fixe).rstrip(";, "))
+            autres = formater_autres_telephones(_champ(idx_autres))
             if "@" not in email:
                 email = ""
-            if not email and not portable and not fixe:
+            if not email and not portable and not fixe and not autres:
                 continue
             nom = _champ(idx_nom)
             dossier = _champ(idx_dossier)
             contacts.append({"nom": nom, "email": email, "dossier": dossier,
-                             "fixe": fixe, "portable": portable})
+                             "fixe": fixe, "portable": portable,
+                             "autres_tel": autres, "notes": _champ(idx_notes)})
             if dossier and dossier not in dossiers_vus:
                 dossiers_vus.append(dossier)
     return dossiers_vus, contacts
@@ -8469,7 +8540,7 @@ def importer_csv_carnet(chemin):
             if existant.get("dossier", "") in dossiers_generiques and c.get("dossier", "") not in dossiers_generiques:
                 existant["dossier"] = c["dossier"]
             # Réimport d'un fichier avec les numéros : complète les contacts existants
-            for champ_tel in ("fixe", "portable"):
+            for champ_tel in ("fixe", "portable", "autres_tel", "notes"):
                 if c.get(champ_tel) and not existant.get(champ_tel):
                     existant[champ_tel] = c[champ_tel]
             continue
@@ -8487,10 +8558,12 @@ def exporter_csv_carnet(chemin, contacts):
     détecte correctement l'encodage."""
     with open(chemin, "w", encoding="utf-8-sig", newline="") as f:
         ecrivain = csv.writer(f)
-        ecrivain.writerow(["Nom", "Email", "Dossier", "Téléphone fixe", "Téléphone portable"])
+        ecrivain.writerow(["Nom", "Email", "Dossier", "Téléphone fixe", "Téléphone portable",
+                           "Autres téléphones", "Notes"])
         for c in contacts:
             ecrivain.writerow([c.get("nom", ""), c.get("email", ""), c.get("dossier", ""),
-                               c.get("fixe", ""), c.get("portable", "")])
+                               c.get("fixe", ""), c.get("portable", ""),
+                               c.get("autres_tel", ""), c.get("notes", "")])
 
 def exporter_excel_carnet(chemin, carnet):
     """Exporte le carnet en classeur Excel (07/10/2026) : un premier onglet
@@ -8516,8 +8589,10 @@ def exporter_excel_carnet(chemin, carnet):
         return nom
 
     def _onglet(nom, liste, avec_dossier):
-        colonnes = ["Nom", "Email", "Téléphone fixe", "Téléphone portable"] + (["Dossier"] if avec_dossier else [])
-        lignes = [[c.get("nom", ""), c.get("email", ""), c.get("fixe", ""), c.get("portable", "")]
+        colonnes = (["Nom", "Email", "Téléphone fixe", "Téléphone portable", "Autres téléphones", "Notes"]
+                    + (["Dossier"] if avec_dossier else []))
+        lignes = [[c.get("nom", ""), c.get("email", ""), c.get("fixe", ""), c.get("portable", ""),
+                   c.get("autres_tel", ""), c.get("notes", "")]
                   + ([c.get("dossier", "")] if avec_dossier else []) for c in liste]
         largeurs = [min(60, max([len(t)] + [len(l[i]) for l in lignes]) + 2) for i, t in enumerate(colonnes)]
         return _nom_onglet(nom), colonnes, lignes, largeurs
@@ -8654,7 +8729,8 @@ def importer_excel_carnet(chemin):
 
         i_nom, i_email, i_dossier = _idx(COLONNES_NOM), _idx(COLONNES_EMAIL), _idx(COLONNES_DOSSIER)
         i_port, i_fixe = _idx(COLONNES_PORTABLE), _idx(COLONNES_FIXE)
-        if i_email is None and i_port is None and i_fixe is None:
+        i_autres, i_notes = _idx(COLONNES_AUTRES_TEL), _idx(COLONNES_NOTES)
+        if i_email is None and i_port is None and i_fixe is None and i_autres is None:
             continue  # onglet sans colonne exploitable
         titre = titre.strip()
         dossier_onglet = "" if titre.upper() == "SANS DOSSIER" else titre
@@ -8664,12 +8740,14 @@ def importer_excel_carnet(chemin):
             email = _v(i_email)
             portable = formater_numero_telephone(_v(i_port, _numero))
             fixe = formater_numero_telephone(_v(i_fixe, _numero))
+            autres = formater_autres_telephones(_v(i_autres))
             if "@" not in email:
                 email = ""
-            if not email and not portable and not fixe:
+            if not email and not portable and not fixe and not autres:
                 continue
             dossier = _v(i_dossier) if i_dossier is not None else dossier_onglet
-            lus.append(({"nom": _v(i_nom), "email": email, "fixe": fixe, "portable": portable}, dossier))
+            lus.append(({"nom": _v(i_nom), "email": email, "fixe": fixe, "portable": portable,
+                         "autres_tel": autres, "notes": _v(i_notes)}, dossier))
     if not lus:
         return 0, 0, "Aucun contact exploitable trouvé dans ce classeur."
 
@@ -8694,7 +8772,7 @@ def importer_excel_carnet(chemin):
         cle = _cle(c, dossier)
         existant = existants.get(cle)
         if existant is not None:
-            for champ in ("fixe", "portable"):
+            for champ in ("fixe", "portable", "autres_tel", "notes"):
                 if c.get(champ) and not existant.get(champ):
                     existant[champ] = c[champ]
             continue
@@ -8704,6 +8782,1026 @@ def importer_excel_carnet(chemin):
         nb_ajoutes += 1
     sauvegarder_carnet(carnet)
     return nb_ajoutes, nb_dossiers, None
+
+
+# --- Contacts du téléphone (17/10/2026, demandé par l'auteur) ---
+# Lus par la liaison adb déjà validée (bouton « Importer du tél. » du
+# carnet), avec « content query » sur le fournisseur de contacts Android :
+# aucune appli ni autorisation à ajouter, rien n'est jamais écrit sur le
+# téléphone. Les groupes du téléphone deviennent des dossiers du carnet
+# (« Téléphone » pour les contacts sans groupe).
+DOSSIER_CONTACTS_TELEPHONE = "Téléphone"
+_GROUPES_SYSTEME_TELEPHONE = {"Family": "Famille", "Friends": "Amis", "Coworkers": "Collègues"}
+
+
+def _requete_contacts_telephone(serie, uri, projection, ou=None):
+    """Lignes d'un « content query » : [{colonne: valeur}]. La DERNIÈRE
+    colonne de `projection` peut contenir « , » et des retours à la ligne
+    (notes) : le texte libre doit donc toujours être placé en dernier."""
+    commande = f"content query --user 0 --uri {uri} --projection {projection}"
+    if ou:
+        commande += f' --where "{ou}"'
+    # adb renvoie des fins de ligne Windows (\r\n) : sans ce remplacement,
+    # chaque ligne d'une note gardait un \r invisible (corrigé le 17/10/2026)
+    sortie = _adb_bloquant("-s", serie, "shell", commande, delai=90, erreurs=False).replace("\r\n", "\n")
+    colonnes = projection.split(":")
+    debut = re.compile(r"^Row: \d+ " + re.escape(colonnes[0]) + "=")
+    brutes = []
+    for ligne in sortie.split("\n"):
+        if debut.match(ligne):
+            brutes.append(ligne.split(" ", 2)[2])
+        elif brutes:
+            brutes[-1] += "\n" + ligne  # suite d'une note sur plusieurs lignes
+    resultats = []
+    for brute in brutes:
+        valeurs, reste = {}, brute
+        try:
+            for i, col in enumerate(colonnes):
+                reste = reste[len(col) + 1:]
+                if i < len(colonnes) - 1:
+                    valeurs[col], reste = reste.split(", " + colonnes[i + 1] + "=", 1)
+                    reste = colonnes[i + 1] + "=" + reste
+                else:
+                    valeurs[col] = reste.rstrip("\r\n")
+        except ValueError:
+            continue
+        resultats.append({k: ("" if v == "NULL" else v.strip()) for k, v in valeurs.items()})
+    return resultats
+
+
+class _EtapesLecture:
+    """Avancement de la lecture du téléphone (17/10/2026, demandé : le
+    décompte doit se voir partout). Android livre les données par catégorie,
+    d'un bloc : on affiche l'étape en cours et ce qui a déjà été lu."""
+
+    def __init__(self, progression, total, titre="Lecture des contacts du téléphone"):
+        self.progression, self.total, self.titre = progression, total, titre
+        self.n, self.lus = 0, []
+
+    def __call__(self, libelle, lignes_ou_fonction):
+        self.n += 1
+        if self.progression:
+            deja = "\n".join(self.lus)
+            self.progression(f"{self.titre}…\nÉtape {self.n} / {self.total} : {libelle}…"
+                             + (f"\n{deja}" if deja else ""))
+        lignes = lignes_ou_fonction() if callable(lignes_ou_fonction) else lignes_ou_fonction
+        self.lus.append(f"   {libelle} : {len(lignes):,} lu(s)".replace(",", " "))
+        return lignes
+
+
+def lire_contacts_telephone(serie, progression=None):
+    """Contacts du téléphone, au format du carnet (avec "dossiers" : liste
+    des dossiers où le ranger). Les contacts sans numéro ni mail sont
+    ignorés. Bloquant (quelques secondes)."""
+    base = "content://com.android.contacts"
+    etape = _EtapesLecture(progression, 6)
+    noms, cles = {}, {}
+    for r in etape("contacts", lambda: _requete_contacts_telephone(
+            serie, f"{base}/contacts", "_id:lookup:display_name")):
+        noms[r["_id"]] = r["display_name"]
+        cles[r["_id"]] = r["lookup"]
+    if not noms:
+        raise RuntimeError("aucun contact lu (téléphone déconnecté ?)")
+
+    def _donnees(type_mime, projection):
+        return _requete_contacts_telephone(serie, f"{base}/data", projection,
+                                           f"mimetype='vnd.android.cursor.item/{type_mime}'")
+
+    numeros, mails, notes, groupes_de = {}, {}, {}, {}
+    for r in etape("numéros de téléphone", lambda: _donnees("phone_v2", "contact_id:data2:data1")):
+        numeros.setdefault(r["contact_id"], []).append((r["data2"], r["data1"]))
+    for r in etape("adresses mail", lambda: _donnees("email_v2", "contact_id:data1")):
+        if "@" in r["data1"]:
+            mails.setdefault(r["contact_id"], []).append(r["data1"])
+    for r in etape("notes", lambda: _donnees("note", "contact_id:data1")):
+        if r["data1"]:
+            notes.setdefault(r["contact_id"], []).append(r["data1"])
+    titres = {}
+    for g in etape("groupes", lambda: _requete_contacts_telephone(
+            serie, f"{base}/groups", "_id:system_id:deleted:title")):
+        if g["deleted"] == "1":
+            continue
+        if g["system_id"]:
+            if g["system_id"] in _GROUPES_SYSTEME_TELEPHONE:
+                titres[g["_id"]] = _GROUPES_SYSTEME_TELEPHONE[g["system_id"]]
+        elif g["title"]:
+            titres[g["_id"]] = g["title"]
+    for r in etape("membres des groupes", lambda: _donnees("group_membership", "contact_id:data1")):
+        if r["data1"] in titres:
+            groupes_de.setdefault(r["contact_id"], [])
+            if titres[r["data1"]] not in groupes_de[r["contact_id"]]:
+                groupes_de[r["contact_id"]].append(titres[r["data1"]])
+
+    contacts = []
+    for cid, nom in noms.items():
+        portables, fixes, vus = [], [], set()
+        for type_num, numero in numeros.get(cid, []):
+            cle = _cle_numero(numero) or numero
+            if not numero or cle in vus:
+                continue  # même numéro en double (WhatsApp, compte Google...)
+            vus.add(cle)
+            # Portable : type « mobile » (2) ou « mobile pro » (17), ou 06/07
+            if type_num in ("2", "17") or re.match(r"0[67]\d{8}$", cle):
+                portables.append(formater_numero_telephone(numero))
+            else:
+                fixes.append(formater_numero_telephone(numero))
+        adresses = list(dict.fromkeys(mails.get(cid, [])))
+        if not portables and not fixes and not adresses:
+            continue
+        autres = portables[1:] + fixes[1:]
+        texte_notes = "\n".join(dict.fromkeys(notes.get(cid, [])))
+        if len(adresses) > 1:  # le carnet n'a qu'une adresse : les autres vont en note
+            texte_notes = "\n".join(m for m in (texte_notes, "Autres mails : " + " ; ".join(adresses[1:])) if m)
+        contacts.append({
+            "nom": nom, "email": adresses[0] if adresses else "",
+            "portable": portables[0] if portables else "", "fixe": fixes[0] if fixes else "",
+            "autres_tel": " ; ".join(autres), "notes": texte_notes,
+            "dossiers": groupes_de.get(cid) or [DOSSIER_CONTACTS_TELEPHONE],
+            # Clé invisible et stable du contact sur le téléphone (« lookup
+            # key » d'Android, 17/10/2026) : lie la fiche du carnet à SA fiche
+            # du téléphone, pour « Envoyer au tél. » sans confusion
+            # possible (homonymes, fiches identiques...)
+            "cle_tel": cles.get(cid, ""),
+        })
+    # (contacts, toutes les clés du téléphone) : une fiche du carnet dont la
+    # clé n'y est plus a été supprimée du téléphone (17/10/2026)
+    return contacts, {k for k in cles.values() if k}
+
+
+def noter_suppressions_telephone(carnet, supprimes):
+    """Contacts supprimés du carnet (17/10/2026) : ceux qui étaient liés au
+    téléphone sont notés dans carnet["suppressions_tel"] {clé: {"nom",
+    "date", "statut"}}, pour (1) proposer de les supprimer aussi du
+    téléphone au prochain « Envoyer au tél. » et (2) que l'import ne les
+    remette pas dans le carnet. Une copie (« Copier vers ») ne compte pas :
+    seule la suppression de la DERNIÈRE fiche portant la clé est notée."""
+    restantes = {c.get("cle_tel") for c in carnet.get("contacts", []) if c.get("cle_tel")}
+    for c in supprimes:
+        cle = c.get("cle_tel")
+        if cle and cle not in restantes:
+            carnet.setdefault("suppressions_tel", {})[cle] = {
+                "nom": c.get("nom", ""), "date": time.strftime("%Y-%m-%d %H:%M"), "statut": "a_proposer"}
+
+
+def fusionner_contacts_telephone(contacts_tel, enregistrer=False, cles_telephone=None,
+                                 supprimer_absents=None):
+    """Range les contacts du téléphone dans le carnet. Un contact déjà
+    présent (même portable ou autre numéro, même mail, ou même nom sans
+    portable contradictoire) n'est pas ajouté : ses champs VIDES sont
+    complétés (jamais rien d'écrasé), dans chacun de ses exemplaires. Les
+    autres sont ajoutés dans les dossiers de leurs groupes (créés au
+    besoin). Sans `enregistrer`, ne fait que compter (récapitulatif avant
+    import). Retourne {"nouveaux", "completes", "inchanges", "dossiers",
+    "lies", "ignores", "supprimes_tel"}.
+    Suppressions (17/10/2026) : un contact supprimé du carnet (voir
+    noter_suppressions_telephone) n'est pas réimporté ("ignores") ; les
+    fiches liées dont la clé n'existe plus sur le téléphone (`cles_telephone`)
+    sont listées dans "supprimes_tel" (noms) ; `supprimer_absents` : True =
+    les supprimer aussi du carnet, False = les garder (elles ne sont plus
+    liées, la question ne revient pas), None = ne rien faire."""
+    import copy
+    carnet = charger_carnet()
+    if not enregistrer:
+        carnet = copy.deepcopy(carnet)
+    contacts = carnet.setdefault("contacts", [])
+    dossiers = carnet.setdefault("dossiers", [])
+    par_minuscules = {d.lower(): d for d in dossiers}
+    par_numero, par_mail, par_nom = {}, {}, {}
+
+    def _indexer(c):
+        for champ in ("portable", "fixe"):
+            if _cle_numero(c.get(champ, "")):
+                par_numero.setdefault(_cle_numero(c[champ]), []).append(c)
+        for n in (c.get("autres_tel", "") or "").split(";"):
+            if len(_cle_numero(n)) >= 6:
+                par_numero.setdefault(_cle_numero(n), []).append(c)
+        if c.get("email"):
+            par_mail.setdefault(c["email"].strip().lower(), []).append(c)
+        if c.get("nom", "").strip():
+            par_nom.setdefault(c["nom"].strip().lower(), []).append(c)
+
+    for c in contacts:
+        _indexer(c)
+    par_cle = {}
+    for c in contacts:
+        if c.get("cle_tel"):
+            par_cle.setdefault(c["cle_tel"], []).append(c)
+
+    def _numeros(t):
+        return [_cle_numero(n) for n in [t["portable"], t["fixe"]] + t["autres_tel"].split(";")
+                if len(_cle_numero(n)) >= 6]
+
+    # Numéros et mails présents sur PLUSIEURS fiches du téléphone (fixe de la
+    # maison, standard d'une entreprise...) : jamais utilisés pour lier
+    vus_num, vus_mail = {}, {}
+    for t in contacts_tel:
+        for n in set(_numeros(t)):
+            vus_num[n] = vus_num.get(n, 0) + 1
+        if t["email"]:
+            vus_mail[t["email"].lower()] = vus_mail.get(t["email"].lower(), 0) + 1
+
+    def _une_seule_personne(fiches):
+        return len({(c.get("nom", "") or "").strip().lower() for c in fiches}) == 1
+
+    stats = {"nouveaux": 0, "completes": 0, "inchanges": 0, "dossiers": 0, "lies": 0,
+             "ignores": 0, "ignores_noms": [], "ignores_cles": [], "supprimes_tel": []}
+    pierres = carnet.setdefault("suppressions_tel", {})
+    for t in contacts_tel:
+        numeros_t = _numeros(t)
+        trouves = par_cle.get(t.get("cle_tel")) if t.get("cle_tel") else None
+        a_lier = None
+        if trouves is None:
+            for n in numeros_t:
+                if n in par_numero:
+                    trouves = par_numero[n]
+                    if vus_num.get(n) == 1 and _une_seule_personne(trouves):
+                        a_lier = trouves
+                    break
+        if trouves is None and t["email"]:
+            trouves = par_mail.get(t["email"].lower())
+            if trouves and vus_mail.get(t["email"].lower()) == 1 and _une_seule_personne(trouves):
+                a_lier = trouves
+        if trouves is None and t["nom"].strip():
+            # Reconnu par le nom seul : complété dans le carnet, mais jamais
+            # lié au téléphone (deux homonymes ne doivent pas être confondus)
+            trouves = [c for c in par_nom.get(t["nom"].strip().lower(), [])
+                       if not c.get("portable") or not t["portable"]
+                       or _cle_numero(c["portable"]) == _cle_numero(t["portable"])] or None
+        if not trouves and t.get("cle_tel") in pierres:
+            stats["ignores"] += 1  # supprimé du carnet par l'utilisateur
+            stats["ignores_noms"].append(t["nom"])
+            stats["ignores_cles"].append(t["cle_tel"])
+            continue
+        if trouves and t.get("cle_tel") in pierres:
+            del pierres[t["cle_tel"]]  # remis dans le carnet entre-temps
+        if trouves:
+            modifie = False
+            if a_lier and t.get("cle_tel") and not any(
+                    c.get("cle_tel") and (cles_telephone is None or c["cle_tel"] in cles_telephone)
+                    for c in a_lier):
+                for c in a_lier:
+                    c["cle_tel"] = t["cle_tel"]
+                par_cle[t["cle_tel"]] = a_lier
+                stats["lies"] += 1
+            for c in trouves:
+                for champ in ("email", "portable", "fixe", "notes"):
+                    if t[champ] and not c.get(champ):
+                        c[champ] = t[champ]
+                        modifie = True
+                # Numéros du téléphone absents de la fiche : ajoutés aux autres
+                connus = {_cle_numero(n) for n in [c.get("portable", ""), c.get("fixe", "")]
+                          + (c.get("autres_tel", "") or "").split(";")}
+                manquants = [n.strip() for n in [t["portable"], t["fixe"]] + t["autres_tel"].split(";")
+                             if n.strip() and _cle_numero(n) not in connus]
+                if manquants:
+                    c["autres_tel"] = " ; ".join(m for m in [c.get("autres_tel", "")] + manquants if m)
+                    modifie = True
+            stats["completes" if modifie else "inchanges"] += 1
+            continue
+        stats["nouveaux"] += 1
+        for dossier in t["dossiers"]:
+            if dossier.lower() not in par_minuscules:
+                dossiers.append(dossier)
+                par_minuscules[dossier.lower()] = dossier
+                stats["dossiers"] += 1
+            nouveau = {k: v for k, v in t.items() if k != "dossiers"}
+            nouveau.update(id=uuid.uuid4().hex, dossier=par_minuscules[dossier.lower()])
+            contacts.append(nouveau)
+            _indexer(nouveau)
+    # Fiches liées dont la clé n'existe plus sur le téléphone : supprimées là-bas
+    if cles_telephone:
+        absents = {}
+        for c in contacts:
+            if c.get("cle_tel") and c["cle_tel"] not in cles_telephone:
+                absents.setdefault(c["cle_tel"], c.get("nom", ""))
+        stats["supprimes_tel"] = sorted(absents.values(), key=cle_tri_alpha)
+        if supprimer_absents is True:
+            carnet["contacts"] = [c for c in contacts if c.get("cle_tel") not in absents]
+        elif supprimer_absents is False:
+            for c in contacts:
+                if c.get("cle_tel") in absents:
+                    del c["cle_tel"]  # gardée dans le carnet, plus liée au téléphone
+    if enregistrer:
+        sauvegarder_carnet(carnet)
+    return stats
+
+
+# --- Envoyer au téléphone (17/10/2026, demandé par l'auteur) ---
+# Complète les fiches du téléphone LIÉES au carnet (clé « cle_tel », posée à
+# l'import) : numéros, mail et note qui leur manquent. Garde-fous :
+#  - seules les fiches liées par la clé sont touchées (jamais par le nom) ;
+#  - on ajoute, on ne remplace ni ne supprime jamais rien sur le téléphone ;
+#  - récapitulatif à valider avant toute écriture ;
+#  - avant chaque envoi, copie brute de tous les contacts du téléphone sur
+#    l'ordinateur (DOSSIER_SAUVEGARDES_TELEPHONE) ;
+#  - chaque ajout est noté dans un journal : annuler_envoi_telephone retire
+#    exactement ce qui a été ajouté.
+# Fiches modifiables : comptes Google ou téléphone (Samsung...) ; jamais
+# WhatsApp (resynchronisé par l'appli) ni la carte SIM.
+DOSSIER_SAUVEGARDES_TELEPHONE = os.path.join(DOSSIER_APP, "sauvegardes_contacts_telephone")
+FICHIER_JOURNAL_ENVOI_TELEPHONE = os.path.join(DOSSIER_SAUVEGARDES_TELEPHONE, "dernier_envoi.json")
+_COMPTES_NON_MODIFIABLES = ("com.whatsapp", "vnd.sec.contact.sim", "com.android.sim")
+_TYPE_MIME_CONTACT = "vnd.android.cursor.item/"
+
+
+def _guillemets_shell(texte):
+    """Texte entre apostrophes pour le shell du téléphone."""
+    return "'" + str(texte).replace("'", "'\\''") + "'"
+
+
+def _valeur_bind(texte):
+    """Valeur d'un « --bind colonne:type:valeur » de content : le deux-points
+    y sert de séparateur et doit être écrit « \\: » (17/10/2026 : une note
+    contenant « : » était refusée par le téléphone)."""
+    return _guillemets_shell(str(texte).replace("\r", "").replace(":", "\\:"))
+
+
+def lire_details_telephone(serie, progression=None):
+    """Ce que l'envoi doit savoir des contacts du téléphone :
+    {clé: {"id", "bruts": [(raw_id, compte)], "numeros": {clés}, "mails":
+    {minuscules}, "notes": [(data_id, raw_id, texte)]}}. Bloquant."""
+    base = "content://com.android.contacts"
+    etape = _EtapesLecture(progression, 5)
+    par_id = {}
+    for r in etape("contacts", lambda: _requete_contacts_telephone(
+            serie, f"{base}/contacts", "_id:lookup:display_name")):
+        par_id[r["_id"]] = {"cle": r["lookup"], "nom": r["display_name"], "bruts": [],
+                            "numeros": set(), "mails": set(), "notes": []}
+    if not par_id:
+        raise RuntimeError("aucun contact lu (téléphone déconnecté ?)")
+    for r in etape("fiches (Google, téléphone, WhatsApp…)", lambda: _requete_contacts_telephone(
+            serie, f"{base}/raw_contacts", "_id:contact_id:deleted:account_type")):
+        if r["deleted"] != "1" and r["contact_id"] in par_id:
+            par_id[r["contact_id"]]["bruts"].append((r["_id"], r["account_type"]))
+
+    def _donnees(type_mime):
+        return _requete_contacts_telephone(serie, f"{base}/data", "contact_id:raw_contact_id:_id:data1",
+                                           f"mimetype='{_TYPE_MIME_CONTACT}{type_mime}'")
+    for r in etape("numéros de téléphone", lambda: _donnees("phone_v2")):
+        if r["contact_id"] in par_id and _cle_numero(r["data1"]):
+            par_id[r["contact_id"]]["numeros"].add(_cle_numero(r["data1"]))
+    for r in etape("adresses mail", lambda: _donnees("email_v2")):
+        if r["contact_id"] in par_id:
+            par_id[r["contact_id"]]["mails"].add(r["data1"].strip().lower())
+    for r in etape("notes", lambda: _donnees("note")):
+        if r["contact_id"] in par_id:
+            par_id[r["contact_id"]]["notes"].append((r["_id"], r["raw_contact_id"], r["data1"]))
+    return {d["cle"]: dict(d, id=cid) for cid, d in par_id.items() if d["cle"]}
+
+
+def actions_suppression_telephone(details, cles_a_supprimer):
+    """Contacts supprimés du carnet à supprimer aussi du téléphone : une
+    action par contact, sur ses fiches Google / téléphone seulement (jamais
+    WhatsApp ni la carte SIM)."""
+    actions = []
+    nom_de = {k: v.get("nom", "") for k, v in charger_carnet().get("suppressions_tel", {}).items()}
+    for cle in cles_a_supprimer:
+        d = details.get(cle)
+        if d is None:
+            continue
+        raws = [rid for rid, compte in d["bruts"] if compte not in _COMPTES_NON_MODIFIABLES]
+        if raws:
+            actions.append({"mime": "suppression", "raws": raws, "cle": cle,
+                            "nom": d.get("nom") or nom_de.get(cle, ""), "type": "", "valeur": ""})
+    return actions
+
+
+def preparer_envoi_telephone(details, cles=None):
+    """Ce qu'il faut ajouter sur le téléphone, d'après le carnet (seulement
+    les fiches des clés `cles` si elle est donnée : contacts sélectionnés) :
+    (actions, stats). Une action : {"nom", "raw", "mime", "valeur", "type"
+    (numéro ou mail), "note_vide" (data_id d'une note vide à remplir)}."""
+    par_cle = {}
+    for c in charger_carnet().get("contacts", []):
+        if c.get("cle_tel") and (cles is None or c["cle_tel"] in cles):
+            par_cle.setdefault(c["cle_tel"], []).append(c)
+    actions = []
+    stats = {"fiches": 0, "numeros": 0, "mails": 0, "notes": 0,
+             "introuvables": 0, "non_modifiables": 0, "liees": len(par_cle)}
+    for cle, fiches in par_cle.items():
+        d = details.get(cle)
+        if d is None:
+            stats["introuvables"] += 1  # supprimée du téléphone depuis l'import
+            continue
+        modifiables = [(rid, compte) for rid, compte in d["bruts"] if compte not in _COMPTES_NON_MODIFIABLES]
+        if not modifiables:
+            stats["non_modifiables"] += 1
+            continue
+        # Fiche Google de préférence (sauvegardée par Google), sinon téléphone
+        raw = next((rid for rid, compte in modifiables if compte == "com.google"), modifiables[0][0])
+        nom = fiches[0].get("nom", "")
+        a_faire = []
+        numeros_vus = set(d["numeros"])
+        for c in fiches:
+            for champ, type_num in (("portable", "2"), ("fixe", "1")):
+                n = (c.get(champ) or "").strip()
+                if n and _cle_numero(n) and _cle_numero(n) not in numeros_vus:
+                    a_faire.append({"mime": "phone_v2", "valeur": n, "type": type_num})
+                    numeros_vus.add(_cle_numero(n))
+            for n in (c.get("autres_tel") or "").split(";"):
+                n = n.strip()
+                if n and _cle_numero(n) and _cle_numero(n) not in numeros_vus:
+                    type_num = "2" if re.match(r"0[67]\d{8}$", _cle_numero(n)) else "7"
+                    a_faire.append({"mime": "phone_v2", "valeur": n, "type": type_num})
+                    numeros_vus.add(_cle_numero(n))
+        mails_vus = set(d["mails"])
+        for c in fiches:
+            m = (c.get("email") or "").strip()
+            if m and "@" in m and m.lower() not in mails_vus:
+                a_faire.append({"mime": "email_v2", "valeur": m, "type": "1"})
+                mails_vus.add(m.lower())
+        # Note : seulement si le téléphone n'en a aucune (rien n'est remplacé).
+        # La ligne « Autres mails : » vient du téléphone lui-même : pas renvoyée.
+        if not any(texte.strip() for _i, _r, texte in d["notes"]):
+            note = next(((c.get("notes") or "").strip() for c in fiches if (c.get("notes") or "").strip()), "")
+            note = "\n".join(l for l in note.split("\n") if not l.startswith("Autres mails : ")).strip()
+            if note:
+                vide = next((i for i, r, _t in d["notes"] if r == raw), None)
+                a_faire.append({"mime": "note", "valeur": note, "type": "", "note_vide": vide})
+        if a_faire:
+            stats["fiches"] += 1
+            for a in a_faire:
+                stats[{"phone_v2": "numeros", "email_v2": "mails", "note": "notes"}[a["mime"]]] += 1
+                actions.append(dict(a, nom=nom, raw=raw))
+    return actions, stats
+
+
+def _shell_telephone_suivi(serie, commandes, rappel=None, taille=20):
+    """Exécute les commandes sur le téléphone par paquets (un seul appel adb
+    par paquet, pour la vitesse), chacune suivie d'un repère « @@n » lu au fil
+    de l'eau : rappel(n) est appelé dès que la n-ième commande est faite
+    (17/10/2026, demandé : voir les ajouts défiler un par un pour de bon,
+    pas par paquets). Bloquant."""
+    import subprocess
+    fait = 0
+    for k in range(0, len(commandes), taille):
+        lot = commandes[k:k + taille]
+        ligne_shell = " ; ".join(f"{c} ; echo @@{k + i + 1}" for i, c in enumerate(lot))
+        proc = subprocess.Popen([chemin_adb(), "-s", serie, "shell", ligne_shell],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            for brut in proc.stdout:
+                ligne = brut.decode("utf-8", "replace").strip()
+                if ligne.startswith("@@") and ligne[2:].isdigit():
+                    fait = int(ligne[2:])
+                    if rappel:
+                        rappel(fait)
+            proc.wait(timeout=120)
+        except Exception:
+            proc.kill()
+            raise
+    return fait
+
+
+def _ids_donnees_telephone(serie, raw, mime):
+    return {r["_id"] for r in _requete_contacts_telephone(
+        serie, "content://com.android.contacts/data", "_id:raw_contact_id",
+        f"raw_contact_id={raw} AND mimetype='{_TYPE_MIME_CONTACT}{mime}'")}
+
+
+def sauvegarder_contacts_telephone(serie, progression=None):
+    """Copie de sécurité de tous les contacts du téléphone sur l'ordinateur
+    (avant toute écriture) : données brutes (contacts_telephone_<date>.txt)
+    et groupes (…_groupes.txt, depuis le 17/10/2026, pour retrouver les noms
+    des dossiers). 10 copies gardées. Retourne (chemin, plus grand numéro de
+    ligne, horodatage). Bloquant."""
+    os.makedirs(DOSSIER_SAUVEGARDES_TELEPHONE, exist_ok=True)
+    horodatage = time.strftime("%Y-%m-%d_%H-%M-%S")
+    sauvegarde = os.path.join(DOSSIER_SAUVEGARDES_TELEPHONE, f"contacts_telephone_{horodatage}.txt")
+    if progression:
+        progression("Sauvegarde des contacts du téléphone dans Courrier Adrien…")
+    brut = _adb_bloquant("-s", serie, "shell", "content query --user 0 --uri content://com.android.contacts/data",
+                         delai=180, erreurs=False)
+    if "Row:" not in brut:
+        raise RuntimeError("sauvegarde des contacts du téléphone impossible : rien n'a été modifié")
+    with open(sauvegarde, "w", encoding="utf-8") as f:
+        f.write(brut)
+    groupes = _adb_bloquant("-s", serie, "shell", "content query --user 0 --uri content://com.android.contacts/groups "
+                            "--projection _id:system_id:deleted:title", delai=60, erreurs=False)
+    with open(sauvegarde[:-4] + "_groupes.txt", "w", encoding="utf-8") as f:
+        f.write(groupes)
+    for chemin in lister_copies_telephone()[10:]:
+        for p in (chemin, chemin[:-4] + "_groupes.txt"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    id_max = max((int(m) for m in re.findall(r"(?:^Row: \d+ |, )_id=(\d+)", brut, re.M)), default=0)
+    return sauvegarde, id_max, horodatage
+
+
+def lister_copies_telephone():
+    """Copies de sécurité du téléphone, de la plus récente à la plus ancienne."""
+    try:
+        noms = [n for n in os.listdir(DOSSIER_SAUVEGARDES_TELEPHONE)
+                if n.startswith("contacts_telephone_") and n.endswith(".txt") and not n.endswith("_groupes.txt")]
+    except OSError:
+        return []
+    return [os.path.join(DOSSIER_SAUVEGARDES_TELEPHONE, n) for n in sorted(noms, reverse=True)]
+
+
+_COLONNES_UTILES_COPIE = {"_id", "contact_id", "raw_contact_id", "lookup", "display_name", "mimetype",
+                          "account_type", "account_name", "raw_contact_is_user_profile"} | \
+                         {f"data{i}" for i in range(1, 15)}
+
+
+def lire_copie_telephone(chemin):
+    """Lignes d'une copie de sécurité : [{colonne: valeur}] (colonnes utiles
+    seulement ; la photo, data15, est ignorée), et {id de groupe: titre}.
+    Les colonnes sont toujours dans le même ordre : chaque valeur va
+    jusqu'à « , <colonne suivante>= », retours à la ligne compris."""
+    brut = open(chemin, encoding="utf-8").read().replace("\r\n", "\n")
+    brutes = []
+    for ligne in brut.split("\n"):
+        if ligne.startswith("Row: "):
+            brutes.append(ligne.split(" ", 2)[2] if ligne.count(" ") >= 2 else "")
+        elif brutes:
+            brutes[-1] += "\n" + ligne
+    if not brutes:
+        return [], {}
+    # Colonnes lues sur toute la 1re fiche (retours à la ligne compris : la
+    # photo, data15, en contient)
+    colonnes = re.findall(r"(?:^|, )([A-Za-z0-9_]+)=", brutes[0])
+    lignes = []
+    for brute in brutes:
+        valeurs, reste, ok = {}, brute, True
+        for i, col in enumerate(colonnes):
+            if not reste.startswith(col + "="):
+                ok = False
+                break
+            reste = reste[len(col) + 1:]
+            if i < len(colonnes) - 1:
+                fin = reste.find(", " + colonnes[i + 1] + "=")
+                if fin < 0:
+                    ok = False
+                    break
+                valeur, reste = reste[:fin], reste[fin + 2:]
+            else:
+                valeur = reste
+            if col in _COLONNES_UTILES_COPIE:
+                valeurs[col] = "" if valeur == "NULL" else valeur
+        if ok:
+            lignes.append(valeurs)
+    titres = {}
+    chemin_groupes = chemin[:-4] + "_groupes.txt"
+    if os.path.exists(chemin_groupes):
+        for g in _lignes_requete_texte(open(chemin_groupes, encoding="utf-8").read(), "_id:system_id:deleted:title"):
+            if g["deleted"] != "1":
+                if g["system_id"] in _GROUPES_SYSTEME_TELEPHONE:
+                    titres[g["_id"]] = _GROUPES_SYSTEME_TELEPHONE[g["system_id"]]
+                elif not g["system_id"] and g["title"]:
+                    titres[g["_id"]] = g["title"]
+    return lignes, titres
+
+
+def _lignes_requete_texte(sortie, projection):
+    """Comme _requete_contacts_telephone, sur une sortie déjà lue."""
+    sortie = sortie.replace("\r\n", "\n")
+    colonnes = projection.split(":")
+    debut = re.compile(r"^Row: \d+ " + re.escape(colonnes[0]) + "=")
+    brutes = []
+    for ligne in sortie.split("\n"):
+        if debut.match(ligne):
+            brutes.append(ligne.split(" ", 2)[2])
+        elif brutes:
+            brutes[-1] += "\n" + ligne
+    resultats = []
+    for brute in brutes:
+        valeurs, reste = {}, brute
+        try:
+            for i, col in enumerate(colonnes):
+                reste = reste[len(col) + 1:]
+                if i < len(colonnes) - 1:
+                    valeurs[col], reste = reste.split(", " + colonnes[i + 1] + "=", 1)
+                    reste = colonnes[i + 1] + "=" + reste
+                else:
+                    valeurs[col] = reste.rstrip("\n")
+        except ValueError:
+            continue
+        resultats.append({k: ("" if v == "NULL" else v.strip()) for k, v in valeurs.items()})
+    return resultats
+
+
+def _fiches_copie(lignes):
+    """Lignes d'une copie regroupées par contact : {contact_id: {"nom",
+    "cle", "comptes": [(type, nom)], "donnees": [ligne, ...]}}. Ni le profil
+    du propriétaire, ni les fiches seulement WhatsApp / carte SIM."""
+    fiches = {}
+    for l in lignes:
+        if l.get("raw_contact_is_user_profile") == "1" or not l.get("contact_id"):
+            continue
+        f = fiches.setdefault(l["contact_id"], {"nom": l.get("display_name", ""), "cle": l.get("lookup", ""),
+                                                "comptes": [], "donnees": []})
+        compte = (l.get("account_type", ""), l.get("account_name", ""))
+        if compte not in f["comptes"]:
+            f["comptes"].append(compte)
+        if compte[0] not in _COMPTES_NON_MODIFIABLES:
+            f["donnees"].append(l)
+    return {cid: f for cid, f in fiches.items() if f["donnees"]}
+
+
+def _type_court(ligne):
+    return ligne.get("mimetype", "").replace(_TYPE_MIME_CONTACT, "")
+
+
+def contacts_carnet_depuis_copie(lignes, titres):
+    """Contacts d'une copie au format du carnet (export Excel / CSV) : comme
+    l'import du téléphone, plus société, adresse et anniversaire en note."""
+    contacts = []
+    for f in _fiches_copie(lignes).values():
+        portables, fixes, vus, mails, notes, extras, dossiers = [], [], set(), [], [], [], []
+        for l in f["donnees"]:
+            t, d1 = _type_court(l), l.get("data1", "").strip()
+            if t == "phone_v2" and d1:
+                cle = _cle_numero(d1) or d1
+                if cle in vus:
+                    continue
+                vus.add(cle)
+                if l.get("data2") in ("2", "17") or re.match(r"0[67]\d{8}$", cle):
+                    portables.append(formater_numero_telephone(d1))
+                else:
+                    fixes.append(formater_numero_telephone(d1))
+            elif t == "email_v2" and "@" in d1 and d1 not in mails:
+                mails.append(d1)
+            elif t == "note" and d1 and d1 not in notes:
+                notes.append(d1)
+            elif t == "organization" and (d1 or l.get("data4")):
+                extras.append("Société : " + " — ".join(x for x in (d1, l.get("data4", "").strip()) if x))
+            elif t == "postal-address_v2" and d1:
+                extras.append("Adresse : " + d1.replace("\n", ", "))
+            elif t == "contact_event" and d1 and l.get("data2") == "3":
+                extras.append("Anniversaire : " + d1)
+            elif t == "group_membership" and titres.get(d1) and titres[d1] not in dossiers:
+                dossiers.append(titres[d1])
+        if not portables and not fixes and not mails:
+            continue
+        texte = "\n".join(notes + list(dict.fromkeys(extras)))
+        if len(mails) > 1:
+            texte = "\n".join(m for m in (texte, "Autres mails : " + " ; ".join(mails[1:])) if m)
+        for dossier in dossiers or [DOSSIER_CONTACTS_TELEPHONE]:
+            contacts.append({"nom": f["nom"], "email": mails[0] if mails else "",
+                             "portable": portables[0] if portables else "", "fixe": fixes[0] if fixes else "",
+                             "autres_tel": " ; ".join(portables[1:] + fixes[1:]), "notes": texte,
+                             "dossier": dossier})
+    return contacts
+
+
+def exporter_vcf_copie(lignes, chemin):
+    """Copie au format vCard (.vcf), que le téléphone sait importer lui-même
+    (Contacts > Gérer les contacts > Importer). Retourne le nombre de fiches."""
+    def _e(t):
+        return (t or "").replace("\\", "\\\\").replace("\n", "\\n").replace(";", "\\;").replace(",", "\\,")
+    types_tel = {"1": "HOME", "2": "CELL", "3": "WORK", "4": "WORK,FAX", "5": "HOME,FAX", "6": "PAGER", "17": "WORK,CELL"}
+    n = 0
+    with open(chemin, "w", encoding="utf-8", newline="\r\n") as sortie:
+        for f in _fiches_copie(lignes).values():
+            lignes_v = ["BEGIN:VCARD", "VERSION:3.0", f"FN:{_e(f['nom'])}"]
+            nom_fait, vus = False, set()
+            for l in f["donnees"]:
+                t, d1 = _type_court(l), l.get("data1", "").strip()
+                cle = (t, (_cle_numero(d1) or d1.lower()) if t == "phone_v2" else d1.lower())
+                if cle in vus:
+                    continue
+                vus.add(cle)
+                if t == "name" and not nom_fait:
+                    lignes_v.append(f"N:{_e(l.get('data3', ''))};{_e(l.get('data2', ''))};{_e(l.get('data5', ''))};"
+                                    f"{_e(l.get('data4', ''))};{_e(l.get('data6', ''))}")
+                    nom_fait = True
+                elif t == "phone_v2" and d1:
+                    lignes_v.append(f"TEL;TYPE={types_tel.get(l.get('data2'), 'VOICE')}:{d1}")
+                elif t == "email_v2" and d1:
+                    lignes_v.append(f"EMAIL;TYPE=INTERNET:{_e(d1)}")
+                elif t == "note" and d1:
+                    lignes_v.append(f"NOTE:{_e(d1)}")
+                elif t == "organization" and (d1 or l.get("data4")):
+                    lignes_v.append(f"ORG:{_e(d1)}")
+                    if l.get("data4"):
+                        lignes_v.append(f"TITLE:{_e(l['data4'])}")
+                elif t == "postal-address_v2" and d1:
+                    lignes_v.append(f"ADR:;;{_e(l.get('data4', ''))};{_e(l.get('data7', ''))};"
+                                    f"{_e(l.get('data8', ''))};{_e(l.get('data9', ''))};{_e(l.get('data10', ''))}")
+                    lignes_v.append(f"LABEL:{_e(d1)}")
+                elif t == "contact_event" and d1 and l.get("data2") == "3":
+                    lignes_v.append(f"BDAY:{d1}")
+                elif t == "website" and d1:
+                    lignes_v.append(f"URL:{_e(d1)}")
+                elif t == "nickname" and d1:
+                    lignes_v.append(f"NICKNAME:{_e(d1)}")
+            if not nom_fait:
+                lignes_v.insert(3, f"N:{_e(f['nom'])};;;;")
+            lignes_v.append("END:VCARD")
+            sortie.write("\n".join(lignes_v) + "\n")
+            n += 1
+    return n
+
+
+# Types de données recopiés quand un contact disparu est recréé
+_TYPES_RECREES = ("name", "phone_v2", "email_v2", "note", "organization", "postal-address_v2",
+                  "nickname", "website", "contact_event", "im", "relation", "sip_address")
+
+
+def preparer_remise_telephone(lignes, details):
+    """Ce que la copie a et que le téléphone n'a plus : contacts supprimés
+    depuis (recréés), numéros et mails effacés (rajoutés), note effacée
+    (remise si la fiche n'en a plus). Rien n'est retiré ni remplacé.
+    Retourne (plan, stats) ; plan : liste de {"op": "completer", "raw",
+    "nom", "donnees"} ou {"op": "creer", "compte", "nom", "donnees"}."""
+    par_nom = {}
+    for d in details.values():
+        par_nom.setdefault((d.get("nom") or "").strip().lower(), []).append(d)
+    comptes_presents = {compte for d in details.values() for _r, compte in d["bruts"]}
+    plan = []
+    st = {"recrees": 0, "completes": 0, "numeros": 0, "mails": 0, "notes": 0}
+    for f in _fiches_copie(lignes).values():
+        numeros_copie = {_cle_numero(l.get("data1", "")) for l in f["donnees"]
+                         if _type_court(l) == "phone_v2" and _cle_numero(l.get("data1", ""))}
+        mails_copie = {l.get("data1", "").strip().lower() for l in f["donnees"] if _type_court(l) == "email_v2"}
+        d = details.get(f["cle"])
+        if d is None:
+            # Clé changée (fiches fusionnées...) : même nom ET un numéro ou un mail en commun
+            d = next((x for x in par_nom.get(f["nom"].strip().lower(), [])
+                      if x["numeros"] & numeros_copie or x["mails"] & mails_copie), None)
+        if d is None:
+            comptes = [c for c in f["comptes"] if c[0] not in _COMPTES_NON_MODIFIABLES]
+            compte = next((c for c in comptes if c[0] == "com.google" and c[0] in comptes_presents), None) \
+                or next((c for c in comptes if c[0] in comptes_presents and c[0] != "com.google"), None) \
+                or ("vnd.sec.contact.phone", "vnd.sec.contact.phone")
+            donnees, vus = [], set()
+            for l in f["donnees"]:
+                t, d1 = _type_court(l), l.get("data1", "").strip()
+                cle = (t, (_cle_numero(d1) or d1.lower()) if t == "phone_v2" else d1.lower())
+                if t in _TYPES_RECREES and (d1 or t == "name") and cle not in vus and not (t == "name" and any(
+                        _type_court(x) == "name" for x in donnees)):
+                    vus.add(cle)
+                    donnees.append(l)
+            if donnees:
+                plan.append({"op": "creer", "compte": compte, "nom": f["nom"], "donnees": donnees,
+                             "cle": f["cle"]})
+                st["recrees"] += 1
+            continue
+        modifiables = [(rid, c) for rid, c in d["bruts"] if c not in _COMPTES_NON_MODIFIABLES]
+        if not modifiables:
+            continue
+        raw = next((rid for rid, c in modifiables if c == "com.google"), modifiables[0][0])
+        a_ajouter, nums, mails = [], set(d["numeros"]), set(d["mails"])
+        for l in f["donnees"]:
+            t, d1 = _type_court(l), l.get("data1", "").strip()
+            if t == "phone_v2" and _cle_numero(d1) and _cle_numero(d1) not in nums:
+                a_ajouter.append(l)
+                nums.add(_cle_numero(d1))
+                st["numeros"] += 1
+            elif t == "email_v2" and d1 and d1.lower() not in mails:
+                a_ajouter.append(l)
+                mails.add(d1.lower())
+                st["mails"] += 1
+        if not any(texte.strip() for _i, _r, texte in d["notes"]):
+            note = next((l for l in f["donnees"] if _type_court(l) == "note" and l.get("data1", "").strip()), None)
+            if note:
+                a_ajouter.append(note)
+                st["notes"] += 1
+        if a_ajouter:
+            plan.append({"op": "completer", "raw": raw, "nom": f["nom"], "donnees": a_ajouter})
+            st["completes"] += 1
+    return plan, st
+
+
+def _commande_insertion(raw, ligne):
+    """« content insert » d'une ligne de données recopiée de la copie."""
+    morceaux = [f"content insert --user 0 --uri content://com.android.contacts/data "
+                f"--bind raw_contact_id:i:{raw} --bind mimetype:s:{ligne['mimetype']}"]
+    for i in range(1, 15):
+        v = ligne.get(f"data{i}", "")
+        if v:
+            morceaux.append(f"--bind data{i}:s:{_valeur_bind(v)}")
+    return " ".join(morceaux)
+
+
+def remettre_sur_telephone(serie, plan, progression=None):
+    """Exécute le plan de preparer_remise_telephone : copie de sécurité,
+    contacts recréés, puis données ajoutées ; tout est noté dans le journal
+    (« Défaire ces changements » l'annule). Retourne (réussis,
+    échecs, chemin de la copie). Bloquant."""
+    sauvegarde, id_max, horodatage = sauvegarder_contacts_telephone(serie, progression)
+    journal = {"date": horodatage, "serie": serie, "ajouts": []}
+    total = len([p for p in plan if p["op"] == "creer"]) + sum(len(p["donnees"]) for p in plan)
+    fait = 0
+    if progression:
+        progression((0, total))
+    # 1) Contacts recréés : une fiche (raw contact) chacun, dans son compte d'origine
+    a_creer = [p for p in plan if p["op"] == "creer"]
+    if a_creer:
+        raw_max = max((int(x["_id"]) for x in _requete_contacts_telephone(
+            serie, "content://com.android.contacts/raw_contacts", "_id")), default=0)
+        commandes = [f"content insert --user 0 --uri content://com.android.contacts/raw_contacts "
+                     f"--bind account_type:s:{_valeur_bind(p['compte'][0])} "
+                     f"--bind account_name:s:{_valeur_bind(p['compte'][1])}" for p in a_creer]
+        noms = [p["nom"] for p in a_creer]
+        _shell_telephone_suivi(serie, commandes,
+                               (lambda n: progression((n, total, noms[n - 1]))) if progression else None)
+        fait = len(commandes)
+        nouveaux = sorted(int(x["_id"]) for x in _requete_contacts_telephone(
+            serie, "content://com.android.contacts/raw_contacts", "_id", f"_id>{raw_max}"))
+        if len(nouveaux) != len(a_creer):
+            for rid in nouveaux:  # incohérence : on retire ce qui vient d'être créé
+                _adb_bloquant("-s", serie, "shell", "content delete --user 0 --uri "
+                              f"content://com.android.contacts/raw_contacts --where \"_id={rid}\"")
+            raise RuntimeError("création des contacts incohérente : rien n'a été gardé")
+        for p, rid in zip(a_creer, nouveaux):
+            p["raw"] = str(rid)
+            journal["ajouts"].append({"op": "raw_cree", "data_id": str(rid), "nom": p["nom"]})
+    # 2) Données : celles des contacts recréés et celles qui manquent aux autres
+    commandes = [_commande_insertion(p["raw"], l) for p in plan for l in p["donnees"]]
+    noms_donnees = [p["nom"] for p in plan for _l in p["donnees"]]
+    _shell_telephone_suivi(serie, commandes,
+                           (lambda n: progression((fait + n, total, noms_donnees[n - 1])))
+                           if progression else None)
+    if progression:
+        progression("Vérification sur le téléphone…")
+    a_completer = [p for p in plan if p["op"] == "completer"]
+    raws = sorted({p["raw"] for p in a_completer})
+    trouvees = _requete_contacts_telephone(
+        serie, "content://com.android.contacts/data", "_id:raw_contact_id:mimetype:data1",
+        f"_id>{id_max} AND raw_contact_id IN ({','.join(raws)})") if raws else []
+    ok = len(a_creer)
+    echecs = 0
+    for p in a_completer:
+        for l in p["donnees"]:
+            ligne = next((t for t in trouvees if t["raw_contact_id"] == p["raw"] and t["mimetype"] == l["mimetype"]
+                          and t["data1"].strip() == l.get("data1", "").replace("\r", "").strip()), None)
+            if ligne is None:
+                echecs += 1
+                continue
+            trouvees.remove(ligne)
+            journal["ajouts"].append({"op": "ajout", "data_id": ligne["_id"], "nom": p["nom"]})
+            ok += 1
+    with open(FICHIER_JOURNAL_ENVOI_TELEPHONE, "w", encoding="utf-8") as f:
+        json.dump(journal, f, ensure_ascii=False, indent=1)
+    if a_creer:
+        _relier_contacts_recrees(serie, a_creer)
+    return ok, echecs, sauvegarde
+
+
+def _relier_contacts_recrees(serie, crees):
+    """Un contact recréé sur le téléphone y reçoit une NOUVELLE clé (17/10/2026 :
+    après une remise, la fiche du carnet gardait l'ancienne, et sa
+    suppression ne pouvait plus être proposée). Les fiches du carnet et les
+    suppressions notées passent à la nouvelle clé."""
+    raws = [p["raw"] for p in crees if p.get("raw") and p.get("cle")]
+    if not raws:
+        return
+    contact_de = {x["_id"]: x["contact_id"] for x in _requete_contacts_telephone(
+        serie, "content://com.android.contacts/raw_contacts", "_id:contact_id", f"_id IN ({','.join(raws)})")}
+    ids = sorted({v for v in contact_de.values() if v})
+    if not ids:
+        return
+    cle_de = {x["_id"]: x["lookup"] for x in _requete_contacts_telephone(
+        serie, "content://com.android.contacts/contacts", "_id:lookup", f"_id IN ({','.join(ids)})")}
+    correspondances = {}
+    for p in crees:
+        nouvelle = cle_de.get(contact_de.get(p.get("raw", ""), ""), "")
+        if nouvelle and p.get("cle") and nouvelle != p["cle"]:
+            correspondances[p["cle"]] = nouvelle
+    if not correspondances:
+        return
+    carnet = charger_carnet()
+    n = 0
+    for c in carnet.get("contacts", []):
+        if c.get("cle_tel") in correspondances:
+            c["cle_tel"] = correspondances[c["cle_tel"]]
+            n += 1
+    pierres = carnet.get("suppressions_tel", {})
+    for ancienne, nouvelle in correspondances.items():
+        if ancienne in pierres:
+            pierres[nouvelle] = pierres.pop(ancienne)
+    sauvegarder_carnet(carnet)
+    print(f"[CARNET] {len(correspondances)} contact(s) recréé(s) sur le téléphone : "
+          f"{n} fiche(s) du carnet reliée(s) à leur nouvelle clé")
+
+
+def envoyer_au_telephone(serie, actions, progression=None):
+    """Sauvegarde brute des contacts du téléphone, puis ajouts, notés dans
+    le journal d'annulation. Retourne (nb réussis, nb échecs, chemin de la
+    sauvegarde). Bloquant. `progression(texte ou (fait, total))` : avancement à afficher.
+
+    Par paquets de 10 commandes par appel adb (17/10/2026) : la 1re version
+    relevait les données avant ET après chaque ajout (3 appels adb par
+    élément, ~7 s chacun en Wi-Fi : 13 min pour 110 éléments). Désormais,
+    le plus grand numéro de ligne est lu dans la sauvegarde, et les lignes
+    ajoutées sont retrouvées en une seule requête à la fin."""
+    sauvegarde, id_max, horodatage = sauvegarder_contacts_telephone(serie, progression)
+    journal = {"date": horodatage, "serie": serie, "ajouts": [], "sauvegarde": sauvegarde}
+    commandes = []
+    suppressions = [a for a in actions if a["mime"] == "suppression"]
+    actions = [a for a in actions if a["mime"] != "suppression"]
+    for a in suppressions:
+        for rid in a["raws"]:
+            commandes.append(f"content delete --user 0 --uri content://com.android.contacts/raw_contacts "
+                             f"--where \"_id={rid}\"")
+    # Nom du contact de chaque commande, pour le décompte (17/10/2026)
+    noms = [a["nom"] for a in suppressions for _rid in a["raws"]] + [a["nom"] for a in actions]
+    for a in actions:
+        if a["mime"] == "note" and a.get("note_vide"):
+            commandes.append(f"content update --user 0 --uri content://com.android.contacts/data "
+                             f"--bind data1:s:{_valeur_bind(a['valeur'])} --where \"_id={a['note_vide']}\"")
+            journal["ajouts"].append({"op": "note_remplie", "data_id": a["note_vide"], "nom": a["nom"]})
+        else:
+            commandes.append(f"content insert --user 0 --uri content://com.android.contacts/data "
+                             f"--bind raw_contact_id:i:{a['raw']} "
+                             f"--bind mimetype:s:{_TYPE_MIME_CONTACT}{a['mime']} "
+                             f"--bind data1:s:{_valeur_bind(a['valeur'])}"
+                             + (f" --bind data2:i:{a['type']}" if a["type"] else ""))
+    if progression:
+        progression((0, len(commandes)))
+    _shell_telephone_suivi(serie, commandes,
+                           (lambda n: progression((n, len(commandes), noms[n - 1]))) if progression else None)
+
+    # Lignes réellement ajoutées : celles des fiches visées, après id_max
+    if progression:
+        progression("Vérification des ajouts sur le téléphone…")
+    raws = sorted({a["raw"] for a in actions})
+    trouvees = _requete_contacts_telephone(
+        serie, "content://com.android.contacts/data", "_id:raw_contact_id:mimetype:data1",
+        f"_id>{id_max} AND raw_contact_id IN ({','.join(raws)})") if raws else []
+    restantes = list(trouvees)
+    ok = echecs = 0
+    # Suppressions : vérifiées (fiches plus visibles) et notées pour l'annulation
+    if suppressions:
+        tous_raws = [rid for a in suppressions for rid in a["raws"]]
+        restants = {x["_id"] for x in _requete_contacts_telephone(
+            serie, "content://com.android.contacts/raw_contacts", "_id:deleted",
+            f"_id IN ({','.join(tous_raws)}) AND deleted=0")}
+        for a in suppressions:
+            if any(rid in restants for rid in a["raws"]):
+                print(f"[CARNET] envoi au téléphone : suppression refusée pour {a['nom']}")
+                echecs += 1
+                continue
+            journal["ajouts"].append({"op": "contact_supprime", "cle": a["cle"], "nom": a["nom"]})
+            ok += 1
+    for a in actions:
+        if a["mime"] == "note" and a.get("note_vide"):
+            ok += 1
+            continue
+        ligne = next((t for t in restantes if t["raw_contact_id"] == a["raw"]
+                      and t["mimetype"] == _TYPE_MIME_CONTACT + a["mime"]
+                      and t["data1"].strip() == a["valeur"].replace("\r", "").strip()), None)
+        if ligne is None:
+            print(f"[CARNET] envoi au téléphone : échec pour {a['nom']} ({a['mime']})")
+            echecs += 1
+            continue
+        restantes.remove(ligne)
+        journal["ajouts"].append({"op": "ajout", "data_id": ligne["_id"], "nom": a["nom"]})
+        ok += 1
+    with open(FICHIER_JOURNAL_ENVOI_TELEPHONE, "w", encoding="utf-8") as f:
+        json.dump(journal, f, ensure_ascii=False, indent=1)
+    return ok, echecs, sauvegarde
+
+
+def annuler_envoi_telephone(serie, progression=None):
+    """Retire du téléphone exactement ce que le dernier envoi a ajouté
+    (journal). Retourne le nombre d'éléments retirés. Bloquant."""
+    with open(FICHIER_JOURNAL_ENVOI_TELEPHONE, encoding="utf-8") as f:
+        journal = json.load(f)
+    n = 0
+    commandes, noms = [], []
+    supprimes = {a["cle"] for a in journal.get("ajouts", []) if a["op"] == "contact_supprime"}
+    for a in journal.get("ajouts", []):
+        if a["op"] == "contact_supprime":
+            continue  # recréé plus bas, depuis la sauvegarde
+        if a["op"] == "ajout":
+            commande = (f"content delete --user 0 --uri content://com.android.contacts/data "
+                        f"--where \"_id={a['data_id']}\"")
+        elif a["op"] == "raw_cree":  # contact recréé par une remise : retiré en entier
+            commande = (f"content delete --user 0 --uri content://com.android.contacts/raw_contacts "
+                        f"--where \"_id={a['data_id']}\"")
+        else:  # note vide remplie : remise à vide
+            commande = (f"content update --user 0 --uri content://com.android.contacts/data "
+                        f"--bind data1:s:'' --where \"_id={a['data_id']}\"")
+        commandes.append(commande)
+        noms.append(a.get("nom", ""))
+        n += 1
+    if progression:
+        progression((0, len(commandes)))
+    _shell_telephone_suivi(serie, commandes,
+                           (lambda k: progression((k, len(commandes), noms[k - 1]))) if progression else None)
+    os.replace(FICHIER_JOURNAL_ENVOI_TELEPHONE, FICHIER_JOURNAL_ENVOI_TELEPHONE + ".annule")
+    if supprimes and journal.get("sauvegarde"):
+        # Contacts supprimés par cet envoi : recréés tels qu'ils étaient
+        if progression:
+            # Nouvelle étape : le décompte repart de zéro (17/10/2026, demandé :
+            # la recréation tournait sans détail dans la fenêtre d'attente)
+            progression(("etape", "Remise des contacts supprimés", "remis"))
+        lignes, _titres = lire_copie_telephone(journal["sauvegarde"])
+        ids_contacts = {l["contact_id"] for l in lignes if l.get("lookup") in supprimes}
+        lignes = [l for l in lignes if l.get("contact_id") in ids_contacts]
+        plan, _st = preparer_remise_telephone(lignes, lire_details_telephone(serie, progression))
+        if plan:
+            remettre_sur_telephone(serie, plan, progression)
+            n += len([p for p in plan if p["op"] == "creer"])
+            # (la remise écrit son propre journal : celui-ci est déjà classé)
+            if os.path.exists(FICHIER_JOURNAL_ENVOI_TELEPHONE):
+                os.replace(FICHIER_JOURNAL_ENVOI_TELEPHONE, FICHIER_JOURNAL_ENVOI_TELEPHONE + ".annule")
+    return n
 
 
 NB_MAX_SUGGESTIONS_DESTINATAIRES = 30
@@ -18986,33 +20084,49 @@ class DialogueCarnetAdresses(QDialog):
         layout_principal.setSpacing(10)
 
         ligne_haut = QHBoxLayout()
-        btn_importer = QPushButton("  Importer CSV…  ")
+        btn_importer = QPushButton("Importer CSV")
         btn_importer.setStyleSheet(STYLE_BOUTON)
         btn_importer.clicked.connect(self._importer_csv)
-        btn_exporter = QPushButton("  Exporter CSV…  ")
+        btn_exporter = QPushButton("Exporter CSV")
         btn_exporter.setStyleSheet(STYLE_BOUTON)
         btn_exporter.clicked.connect(self._exporter_csv)
         # Exporter Excel… (07/10/2026) : un onglet par dossier
-        btn_exporter_excel = QPushButton("  Exporter Excel…  ")
+        btn_exporter_excel = QPushButton("Exporter Excel")
         btn_exporter_excel.setStyleSheet(STYLE_BOUTON)
         btn_exporter_excel.setToolTip("Classeur Excel : un onglet par dossier,\n"
                                       "plus un onglet avec tous les contacts")
         btn_exporter_excel.clicked.connect(self._exporter_excel)
         # Restaurer… (07/10/2026) : revenir à une sauvegarde automatique
         # du carnet (voir _sauvegarde_auto_carnet)
-        btn_restaurer = QPushButton("  Restaurer…  ")
+        btn_restaurer = QPushButton("Restaurer")
         btn_restaurer.setStyleSheet(STYLE_BOUTON)
         btn_restaurer.setToolTip("Revenir à un état précédent du carnet\n"
                                  "(sauvegardé automatiquement avant chaque modification)")
         btn_restaurer.clicked.connect(self._restaurer_sauvegarde)
         # Importer Excel… (07/10/2026) : un onglet = un dossier, créé au besoin
-        btn_importer_excel = QPushButton("  Importer Excel…  ")
+        btn_importer_excel = QPushButton("Importer Excel")
         btn_importer_excel.setStyleSheet(STYLE_BOUTON)
         btn_importer_excel.setToolTip("Classeur Excel : chaque onglet devient un dossier\n"
                                       "(créé automatiquement s'il n'existe pas)")
         btn_importer_excel.clicked.connect(self._importer_excel)
+        # Importer du téléphone… (17/10/2026) : contacts du téléphone relié
+        btn_importer_tel = QPushButton("Importer du tél.")
+        btn_importer_tel.setStyleSheet(STYLE_BOUTON)
+        btn_importer_tel.setToolTip("Contacts du téléphone relié (Wi-Fi ou USB) :\n"
+                                    "ses groupes deviennent des dossiers, les autres contacts\n"
+                                    "vont dans « Téléphone ». Rien n'est modifié sur le téléphone.")
+        btn_importer_tel.clicked.connect(self._importer_telephone)
+        # Envoyer au téléphone… (17/10/2026) : complète les fiches liées
+        btn_envoyer_tel = QPushButton("Envoyer au tél.")
+        btn_envoyer_tel.setStyleSheet(STYLE_BOUTON)
+        btn_envoyer_tel.setToolTip("Complète sur le téléphone les fiches importées du téléphone :\n"
+                                   "numéros, mail et note qui leur manquent. Rien n'est remplacé\n"
+                                   "ni supprimé, et chaque envoi peut être annulé.")
+        btn_envoyer_tel.clicked.connect(self._envoyer_telephone)
         ligne_haut.addWidget(btn_importer)
         ligne_haut.addWidget(btn_importer_excel)
+        ligne_haut.addWidget(btn_importer_tel)
+        ligne_haut.addWidget(btn_envoyer_tel)
         ligne_haut.addWidget(btn_exporter)
         ligne_haut.addWidget(btn_exporter_excel)
         ligne_haut.addStretch(1)
@@ -19104,7 +20218,15 @@ class DialogueCarnetAdresses(QDialog):
         btn_supprimer_contact = QPushButton("  Supprimer  ")
         btn_supprimer_contact.setStyleSheet(STYLE_BOUTON)
         btn_supprimer_contact.clicked.connect(self._supprimer_contact)
+        # Afficher (17/10/2026, demandé par l'auteur) : fiche complète du
+        # contact sélectionné sous la liste, notes comprises, en entier
+        btn_afficher_contact = QPushButton("  Afficher  ")
+        btn_afficher_contact.setStyleSheet(STYLE_BOUTON)
+        btn_afficher_contact.setToolTip("Affiche la fiche complète du contact sélectionné\n"
+                                        "(notes comprises) sous la liste ; un 2e clic la referme")
+        btn_afficher_contact.clicked.connect(self._basculer_fiche_contact)
         # Deux lignes de boutons (07/10/2026) : envoyer / ranger
+        ligne_btns_contact.addWidget(btn_afficher_contact, 1)
         ligne_btns_contact.addWidget(btn_ecrire_contact, 1)
         ligne_btns_contact.addWidget(btn_sms_contact, 1)
         ligne_btns_contact.addWidget(btn_copier_contact, 1)
@@ -19116,6 +20238,22 @@ class DialogueCarnetAdresses(QDialog):
         corps.addLayout(colonne_contacts, 1)
 
         layout_principal.addLayout(corps)
+
+        # Fiche du contact (17/10/2026) : un QLabel à retour à la ligne
+        # automatique, sans barre de défilement — il prend la hauteur de
+        # son texte, et la fenêtre s'agrandit au besoin (_afficher_fiche_contact)
+        self.fiche_contact = QLabel()
+        self.fiche_contact.setWordWrap(True)
+        self.fiche_contact.setTextFormat(Qt.TextFormat.RichText)
+        self.fiche_contact.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.fiche_contact.setStyleSheet("QLabel { background-color: #1e1e1e; color: white; "
+                                         "border: 1px solid #A52A2A; padding: 8px; "
+                                         "font-family: Verdana; font-size: 13px; }")
+        self.fiche_contact.hide()
+        self._id_fiche_contact = None
+        layout_principal.addWidget(self.fiche_contact)
+        self.liste_contacts.currentItemChanged.connect(
+            lambda _it, _ancien: self._afficher_fiche_contact() if self.fiche_contact.isVisible() else None)
 
         ligne_separation = QFrame()
         ligne_separation.setFrameShape(QFrame.Shape.HLine)
@@ -19136,6 +20274,22 @@ class DialogueCarnetAdresses(QDialog):
         self.champ_fixe.setPlaceholderText("Téléphone fixe")
         self.champ_portable = QLineEdit()
         self.champ_portable.setPlaceholderText("Téléphone portable")
+        # Autres téléphones et notes (17/10/2026)
+        self.champ_autres_tel = QLineEdit()
+        self.champ_autres_tel.setPlaceholderText("Autres téléphones (séparés par ;)")
+        from PySide6.QtWidgets import QPlainTextEdit
+        self.champ_notes = QPlainTextEdit()
+        self.champ_notes.setPlaceholderText("Notes")
+        self.champ_notes.setFixedHeight(52)
+        self.champ_notes.setTabChangesFocus(True)
+        # La case grandit avec le texte des notes (17/10/2026, demandé :
+        # des notes de plusieurs lignes étaient coupées par une barre de
+        # défilement en modification) ; barre seulement au-delà de 20 lignes
+        self.champ_notes.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # (après la mise en page du texte, pour compter les lignes repliées)
+        self.champ_notes.textChanged.connect(lambda: QTimer.singleShot(0, self._ajuster_hauteur_notes))
+        self.champ_notes.setStyleSheet("background-color: #1e1e1e; color: white; "
+                                       "border: 1px solid #5a5a5a; padding: 2px;")
         self.combo_dossier_ajout = QComboBox()
         # Affiche plus de dossiers d'un coup dans le menu déroulant
         # (13/08/2026, demandé — l'ascenseur du menu déroulant ne se laisse
@@ -19158,6 +20312,8 @@ class DialogueCarnetAdresses(QDialog):
         ligne_ajout.addWidget(self.btn_ajouter, 0, 3)
         ligne_ajout.addWidget(self.champ_fixe, 1, 0)
         ligne_ajout.addWidget(self.champ_portable, 1, 1)
+        ligne_ajout.addWidget(self.champ_autres_tel, 1, 2, 1, 2)
+        ligne_ajout.addWidget(self.champ_notes, 2, 0, 1, 4)
         ligne_ajout.setColumnStretch(0, 1)
         ligne_ajout.setColumnStretch(1, 1)
         layout_principal.addLayout(ligne_ajout)
@@ -19448,7 +20604,158 @@ class DialogueCarnetAdresses(QDialog):
                                 else f"Déjà présent(s) dans « {dossier_destination} ».")
 
     def _restaurer_sauvegarde(self):
-        """Bouton Restaurer… : liste des sauvegardes automatiques (date,
+        """Bouton Restaurer (17/10/2026) : le carnet d'adresses, ou les
+        contacts du téléphone (copies de sécurité faites avant chaque envoi)."""
+        if not lister_copies_telephone():
+            return self._restaurer_carnet()
+        from PySide6.QtWidgets import QMessageBox
+        boite = QMessageBox(QMessageBox.Question, "Restaurer", "Que voulez-vous restaurer ?",
+                            QMessageBox.NoButton, self)
+        boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } QLabel { color: white; }" + STYLE_BOUTON)
+        b_carnet = boite.addButton("Le carnet d'adresses", QMessageBox.AcceptRole)
+        b_tel = boite.addButton("Les contacts du téléphone", QMessageBox.AcceptRole)
+        boite.addButton("Annuler", QMessageBox.RejectRole)
+        boite.exec()
+        if boite.clickedButton() is b_carnet:
+            self._restaurer_carnet()
+        elif boite.clickedButton() is b_tel:
+            self._restaurer_telephone()
+
+    def _restaurer_telephone(self):
+        """Copies de sécurité du téléphone : choisir une copie et ce qu'on en
+        fait (Excel, CSV, .vcf, ou remise sur le téléphone de ce qui manque)."""
+        from PySide6.QtWidgets import QFileDialog
+        copies = lister_copies_telephone()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Restaurer les contacts du téléphone")
+        dlg.setStyleSheet(self.styleSheet())
+        lay = QVBoxLayout(dlg)
+        explication = QLabel(
+            "Avant chaque envoi vers le téléphone, Courrier Adrien fait une sauvegarde de tous ses "
+            "contacts. Choisissez une sauvegarde, puis ce que vous voulez en faire :\n\n"
+            "•  Remettre sur le téléphone : y remet ce qui manque par rapport à la sauvegarde (contacts supprimés "
+            "depuis, numéros, mails ou note effacés). Rien n'y est retiré ni remplacé, et la remise peut "
+            "être annulée.\n"
+            "•  Excel / CSV : enregistre la sauvegarde dans un fichier, lisible par Excel ou réimportable dans le carnet.\n"
+            "•  vCard (.vcf) : fichier que le téléphone sait importer lui-même (application Contacts), "
+            "par exemple après une réinitialisation du téléphone.")
+        explication.setWordWrap(True)
+        lay.addWidget(explication)
+        liste = QListWidget()
+        for chemin in copies:
+            n = os.path.basename(chemin)[len("contacts_telephone_"):-4]
+            liste.addItem(f"Sauvegarde du {n[8:10]}/{n[5:7]}/{n[0:4]} à {n[11:13]}:{n[14:16]}")
+        liste.setCurrentRow(0)
+        lay.addWidget(liste)
+        ligne = QHBoxLayout()
+        choix = {}
+        for cle, libelle in (("telephone", "Remettre sur le téléphone"), ("excel", "Excel"),
+                             ("csv", "CSV"), ("vcf", "vCard (.vcf)"), (None, "Fermer")):
+            b = QPushButton(libelle)
+            b.setStyleSheet(STYLE_BOUTON)
+            b.clicked.connect(lambda _=False, c=cle: (choix.__setitem__("c", c), dlg.accept()))
+            ligne.addWidget(b)
+        lay.addLayout(ligne)
+        dlg.resize(640, 420)
+        dlg.exec()
+        action = choix.get("c")
+        if not action or liste.currentRow() < 0:
+            return
+        chemin = copies[liste.currentRow()]
+        if action == "telephone":
+            return self._remettre_sur_telephone(chemin)
+        try:
+            lignes, titres = lire_copie_telephone(chemin)
+        except Exception as e:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText(f"Sauvegarde illisible : {e}")
+            return
+        base = "Contacts du téléphone " + os.path.basename(chemin)[len("contacts_telephone_"):-4][:10]
+        filtres = {"excel": "Classeur Excel (*.xlsx)", "csv": "Fichier CSV (*.csv)", "vcf": "vCard (*.vcf)"}
+        ext = {"excel": ".xlsx", "csv": ".csv", "vcf": ".vcf"}[action]
+        dest, _ = QFileDialog.getSaveFileName(self, "Enregistrer la sauvegarde", base + ext, filtres[action])
+        if not dest:
+            return
+        try:
+            if action == "vcf":
+                n = exporter_vcf_copie(lignes, dest)
+            else:
+                contacts = contacts_carnet_depuis_copie(lignes, titres)
+                if action == "csv":
+                    exporter_csv_carnet(dest, contacts)
+                else:
+                    exporter_excel_carnet(dest, {"contacts": contacts,
+                                                 "dossiers": sorted({c["dossier"] for c in contacts})})
+                n = len({(c["nom"], c["email"], c["portable"]) for c in contacts})
+        except Exception as e:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText(f"Enregistrement impossible : {e}")
+            return
+        self.lbl_statut.setStyleSheet("color: #80c080;")
+        self.lbl_statut.setText(f"{n} contacts enregistrés dans {os.path.basename(dest)}.")
+
+    def _remettre_sur_telephone(self, chemin):
+        if not verifier_code_telephone(self):
+            return
+        try:
+            lignes, _titres = lire_copie_telephone(chemin)
+        except Exception as e:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText(f"Sauvegarde illisible : {e}")
+            return
+
+        def _echec():
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Téléphone introuvable : remise annulée.")
+
+        def _connecte(serie):
+            attente_telephone(self, "Comparaison de la sauvegarde avec le téléphone…")
+            avancement = self._relais_etapes()
+            self._lancer_fil_telephone(
+                lambda: (serie, preparer_remise_telephone(lignes, lire_details_telephone(serie, avancement))),
+                self._remise_preparee)
+
+        connecter_telephone(self, _connecte, si_echec=_echec)
+
+    def _remise_preparee(self, resultat):
+        attente_telephone_fermer()
+        if isinstance(resultat, Exception):
+            print(f"[CARNET] remise sur le téléphone impossible : {resultat}")
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Lecture des contacts du téléphone impossible.")
+            return
+        serie, (plan, st) = resultat
+        if not plan:
+            self.lbl_statut.setStyleSheet("color: #80c080;")
+            self.lbl_statut.setText("Le téléphone a déjà tout ce que contient cette sauvegarde.")
+            return
+        lignes = ["Par rapport à cette sauvegarde, il manque sur le téléphone :", ""]
+        if st["recrees"]:
+            lignes.append(f"•  {st['recrees']} contact(s) supprimé(s) depuis : à recréer")
+        if st["completes"]:
+            lignes.append(f"•  {st['completes']} fiche(s) à compléter : {st['numeros']} numéro(s), "
+                          f"{st['mails']} mail(s), {st['notes']} note(s)")
+        noms = sorted({p["nom"] for p in plan}, key=cle_tri_alpha)
+        lignes += ["", "Fiches concernées : " + ", ".join(noms[:15]) + (" …" if len(noms) > 15 else ""),
+                   "", "Rien n'est retiré ni remplacé sur le téléphone. Une nouvelle sauvegarde de ses contacts "
+                       "est faite avant, et la remise pourra être annulée.", "", "Remettre sur le téléphone ?"]
+        if not self._boite_question("Remettre sur le téléphone", "\n".join(lignes), "Remettre"):
+            self.lbl_statut.setText("Remise annulée.")
+            return
+        total = st["recrees"] + sum(len(p["donnees"]) for p in plan)
+        attente_telephone(self, f"Remise sur le téléphone ({total} élément(s))…")
+        relais_avancement = _RelaisTelephone(self)
+        relais_avancement.fini.connect(self._avancement_envoi)
+        self._relais_avancement_tel = relais_avancement
+        self._envoi_affiche, self._envoi_confirme, self._envoi_total = 0, 0, total
+        self._libelle_decompte = ("Remise sur le téléphone", "remis")
+        self._envoi_dernier_paquet, self._envoi_intervalle = (None, 0), 1000
+        self._lancer_fil_telephone(
+            lambda: (serie, remettre_sur_telephone(serie, plan, relais_avancement.fini.emit)),
+            self._envoi_telephone_fini)
+
+    def _restaurer_carnet(self):
+        """Restaurer le carnet : liste des sauvegardes automatiques (date,
         nombre de contacts et de dossiers), et remplacement du carnet par
         celle choisie. L'état actuel est lui-même sauvegardé avant, donc
         une restauration peut aussi être annulée."""
@@ -19550,8 +20857,13 @@ class DialogueCarnetAdresses(QDialog):
         la 1re ligne, téléphones (fixe, portable) toujours en dessous."""
         ligne1 = " — ".join(m for m in (c.get("nom", ""), c.get("email", "")) if m)
         ligne2 = " — ".join(m for m in (f"Fixe {c['fixe']}" if c.get("fixe") else "",
-                                         f"Port. {c['portable']}" if c.get("portable") else "") if m)
-        return ligne1 + ("\n" + ligne2 if ligne2 else "")
+                                         f"Port. {c['portable']}" if c.get("portable") else "",
+                                         f"Autres {c['autres_tel']}" if c.get("autres_tel") else "") if m)
+        # Notes (17/10/2026) : 1re ligne seulement, raccourcie
+        note = (c.get("notes", "") or "").strip().split("\n")[0]
+        if note:
+            note = "Note : " + (note[:80] + "…" if len(note) > 80 else note)
+        return "\n".join(m for m in (ligne1, ligne2, note) if m)
 
     def _largeur_par_defaut(self):
         """Largeur de fenêtre pour que "Nom — email" du plus long contact
@@ -19587,8 +20899,10 @@ class DialogueCarnetAdresses(QDialog):
                 continue
             if recherche and recherche not in c.get("nom", "").lower() \
                     and recherche not in c.get("email", "").lower() \
+                    and recherche not in (c.get("notes", "") or "").lower() \
                     and not (chiffres_recherche and chiffres_recherche in
-                             re.sub(r"\D", "", c.get("fixe", "") + " " + c.get("portable", ""))):
+                             re.sub(r"\D", "", c.get("fixe", "") + " " + c.get("portable", "")
+                                    + " " + (c.get("autres_tel", "") or ""))):
                 continue
             contacts_filtres.append(c)
         contacts_filtres.sort(key=lambda c: cle_tri_alpha(c.get("nom", "") or ""))
@@ -19671,7 +20985,9 @@ class DialogueCarnetAdresses(QDialog):
             if reponse == QMessageBox.StandardButton.Cancel:
                 return
             if reponse == QMessageBox.StandardButton.Yes:
+                supprimes = [c for c in carnet.get("contacts", []) if c.get("dossier", "") == dossier]
                 carnet["contacts"] = [c for c in carnet.get("contacts", []) if c.get("dossier", "") != dossier]
+                noter_suppressions_telephone(carnet, supprimes)
             else:
                 for c in carnet.get("contacts", []):
                     if c.get("dossier", "") == dossier:
@@ -19694,8 +21010,10 @@ class DialogueCarnetAdresses(QDialog):
         email = self.champ_email.text().strip()
         fixe = self.champ_fixe.text().strip()
         portable = self.champ_portable.text().strip()
+        autres_tel = formater_autres_telephones(self.champ_autres_tel.text())
+        notes = self.champ_notes.toPlainText().strip()
         # Email OU téléphone (07/10/2026) : un contact peut n'avoir qu'un numéro
-        if (email and "@" not in email) or (not email and not fixe and not portable):
+        if (email and "@" not in email) or (not email and not fixe and not portable and not autres_tel):
             self.lbl_statut.setStyleSheet("color: #e08080;")
             self.lbl_statut.setText("Entrez une adresse email valide ou un numéro de téléphone.")
             return
@@ -19720,30 +21038,539 @@ class DialogueCarnetAdresses(QDialog):
                     c["dossier"] = dossier
                     c["fixe"] = fixe
                     c["portable"] = portable
+                    c["autres_tel"] = autres_tel
+                    c["notes"] = notes
                     break
             sauvegarder_carnet(carnet)
             self._id_contact_en_edition = None
             self.btn_ajouter.setText("  Ajouter  ")
-            self.champ_nom.clear()
-            self.champ_email.clear()
-            self.champ_fixe.clear()
-            self.champ_portable.clear()
+            self._vider_champs_contact()
             self.lbl_statut.setStyleSheet("color: #80c080;")
             self.lbl_statut.setText("Contact modifié.")
             self._rafraichir_contacts()
             return
         carnet.setdefault("contacts", []).append({
             "id": uuid.uuid4().hex, "nom": nom, "email": email, "dossier": dossier,
-            "fixe": fixe, "portable": portable,
+            "fixe": fixe, "portable": portable, "autres_tel": autres_tel, "notes": notes,
         })
         sauvegarder_carnet(carnet)
-        self.champ_nom.clear()
-        self.champ_email.clear()
-        self.champ_fixe.clear()
-        self.champ_portable.clear()
+        self._vider_champs_contact()
         self.lbl_statut.setStyleSheet("color: #80c080;")
         self.lbl_statut.setText("Contact ajouté.")
         self._rafraichir_contacts()
+
+    def _ajuster_hauteur_notes(self):
+        """Hauteur de la case Notes = hauteur de son texte (2 à 20 lignes) ;
+        la fenêtre s'agrandit au besoin, dans la limite de l'écran."""
+        champ = self.champ_notes
+        hauteur_ligne = champ.fontMetrics().lineSpacing()
+        lignes = 0
+        bloc = champ.document().begin()
+        while bloc.isValid():
+            lignes += max(1, bloc.layout().lineCount()) if bloc.layout() else 1
+            bloc = bloc.next()
+        lignes = min(max(lignes, 2), 20)
+        hauteur = lignes * hauteur_ligne + 16
+        if champ.height() != hauteur:
+            champ.setFixedHeight(hauteur)
+            def _agrandir():
+                besoin = self.sizeHint().height()
+                ecran = self.screen().availableGeometry() if self.screen() else None
+                maxi = ecran.height() - 40 if ecran else besoin
+                if self.height() < besoin:
+                    self.resize(self.width(), min(besoin, maxi))
+            QTimer.singleShot(0, _agrandir)
+
+    def _basculer_fiche_contact(self):
+        """Bouton Afficher : ouvre la fiche du contact sélectionné, ou la
+        referme si c'est déjà la sienne qui est affichée."""
+        item = self.liste_contacts.currentItem()
+        if self.fiche_contact.isVisible() and (
+                item is None or item.data(Qt.ItemDataRole.UserRole) == self._id_fiche_contact):
+            self.fiche_contact.hide()
+            self._id_fiche_contact = None
+            return
+        if item is None:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Sélectionnez un contact à afficher.")
+            return
+        self._afficher_fiche_contact()
+
+    def _afficher_fiche_contact(self):
+        """Fiche complète du contact sélectionné : tous ses champs, notes en
+        entier. La fenêtre s'agrandit si la fiche ne tient pas (dans la
+        limite de l'écran)."""
+        import html as _html
+        item = self.liste_contacts.currentItem()
+        id_contact = item.data(Qt.ItemDataRole.UserRole) if item else None
+        c = next((x for x in charger_carnet().get("contacts", []) if x.get("id") == id_contact), None)
+        if c is None:
+            self.fiche_contact.hide()
+            self._id_fiche_contact = None
+            return
+
+        def _e(t):
+            return _html.escape(t or "").replace("\n", "<br>")
+
+        lignes = [f"<span style='font-size:16px; font-weight:bold;'>{_e(c.get('nom')) or '(sans nom)'}</span>"]
+        for libelle, champ in (("Dossier", "dossier"), ("Mail", "email"), ("Portable", "portable"),
+                               ("Fixe", "fixe"), ("Autres téléphones", "autres_tel")):
+            if c.get(champ):
+                lignes.append(f"<span style='color:#aaaaaa;'>{libelle} :</span> {_e(c[champ])}")
+        if (c.get("notes") or "").strip():
+            lignes.append(f"<span style='color:#aaaaaa;'>Notes :</span><br>{_e(c['notes'].strip())}")
+        self.fiche_contact.setText("<br>".join(lignes))
+        self._id_fiche_contact = id_contact
+        self.fiche_contact.show()
+
+        def _agrandir():
+            besoin = self.sizeHint().height()
+            ecran = self.screen().availableGeometry() if self.screen() else None
+            maxi = ecran.height() - 40 if ecran else besoin
+            if self.height() < besoin:
+                self.resize(self.width(), min(besoin, maxi))
+        QTimer.singleShot(0, _agrandir)
+
+    def _vider_champs_contact(self):
+        for champ in (self.champ_nom, self.champ_email, self.champ_fixe, self.champ_portable,
+                      self.champ_autres_tel, self.champ_notes):
+            champ.clear()
+
+    def _importer_telephone(self):
+        """Importer du téléphone… (17/10/2026) : connexion habituelle (code de
+        protection compris s'il est activé), lecture des contacts en
+        arrière-plan, récapitulatif, puis import seulement si l'utilisateur
+        valide. Le carnet est sauvegardé automatiquement avant (Restaurer…)."""
+        if not verifier_code_telephone(self):
+            return
+        self.lbl_statut.setStyleSheet("color: #e0a050;")
+        self.lbl_statut.setText("Connexion au téléphone…")
+
+        def _echec():
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Téléphone introuvable : import annulé.")
+
+        def _connecte(serie):
+            self.lbl_statut.setStyleSheet("color: #e0a050;")
+            self.lbl_statut.setText("Lecture des contacts du téléphone…")
+            # Fenêtre d'attente, comme pour la connexion (17/10/2026, demandé :
+            # la barre d'état seule ne montrait pas assez que ça travaille)
+            attente_telephone(self, "Lecture des contacts du téléphone…\n"
+                                    "(quelques secondes à une minute selon leur nombre)")
+            avancement = self._relais_etapes()
+            self._relais_import_tel = _RelaisTelephone(self)
+            self._relais_import_tel.fini.connect(self._contacts_telephone_lus)
+
+            def _lire():
+                try:
+                    self._relais_import_tel.fini.emit(lire_contacts_telephone(serie, avancement))  # (contacts, clés)
+                except Exception as e:
+                    self._relais_import_tel.fini.emit(e)
+            _threading.Thread(target=_lire, daemon=True).start()
+
+        connecter_telephone(self, _connecte, si_echec=_echec)
+
+    def _envoyer_telephone(self):
+        """Envoyer au téléphone… (17/10/2026) : connexion habituelle, lecture
+        des fiches du téléphone, récapitulatif, puis envoi seulement si
+        l'utilisateur valide ; à la fin, possibilité d'annuler l'envoi."""
+        if not verifier_code_telephone(self):
+            return
+        if not any(c.get("cle_tel") for c in charger_carnet().get("contacts", [])):
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Aucune fiche liée au téléphone : faites d'abord « Importer du tél. ».")
+            return
+        self.lbl_statut.setStyleSheet("color: #e0a050;")
+        self.lbl_statut.setText("Connexion au téléphone…")
+
+        def _echec():
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Téléphone introuvable : envoi annulé.")
+
+        def _connecte(serie):
+            self.lbl_statut.setText("Lecture des fiches du téléphone…")
+            attente_telephone(self, "Lecture des fiches du téléphone…\n"
+                                    "(quelques secondes à une minute selon leur nombre)")
+            avancement = self._relais_etapes()
+            self._lancer_fil_telephone(lambda: (serie, lire_details_telephone(serie, avancement)),
+                                       self._details_telephone_lus)
+
+        connecter_telephone(self, _connecte, si_echec=_echec)
+
+    def _relais_etapes(self):
+        """Relais fil de fond -> fenêtre d'attente (texte de l'étape)."""
+        relais = _RelaisTelephone(self)
+        relais.fini.connect(attente_telephone_etape)
+        self._relais_etapes_tel = relais
+        return relais.fini.emit
+
+    def _lancer_fil_telephone(self, travail, suite):
+        """Exécute travail() dans un fil de fond, puis suite(résultat ou
+        exception) dans l'interface."""
+        relais = _RelaisTelephone(self)
+        self._relais_envoi_tel = relais
+        relais.fini.connect(suite)
+
+        def _fil():
+            try:
+                relais.fini.emit(travail())
+            except Exception as e:
+                relais.fini.emit(e)
+        _threading.Thread(target=_fil, daemon=True).start()
+
+    def _boite_question(self, titre, texte, bouton_oui, bouton_non="Annuler"):
+        from PySide6.QtWidgets import QMessageBox
+        boite = QMessageBox(QMessageBox.Question, titre, texte, QMessageBox.NoButton, self)
+        boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                            "QLabel { color: white; }" + STYLE_BOUTON)
+        b_oui = boite.addButton(bouton_oui, QMessageBox.AcceptRole)
+        boite.addButton(bouton_non, QMessageBox.RejectRole)
+        boite.exec()
+        return boite.clickedButton() is b_oui
+
+    def _details_telephone_lus(self, resultat):
+        attente_telephone_fermer()
+        if isinstance(resultat, Exception):
+            print(f"[CARNET] lecture des fiches du téléphone impossible : {resultat}")
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Lecture des contacts du téléphone impossible.")
+            return
+        serie, details = resultat
+        # Contacts supprimés du carnet (17/10/2026) : ceux déjà absents du
+        # téléphone sont oubliés ; pour les autres, on demande
+        carnet = charger_carnet()
+        pierres = carnet.get("suppressions_tel", {})
+        disparus = [k for k in pierres if k not in details]
+        if disparus:
+            for k in disparus:
+                del pierres[k]
+            sauvegarder_carnet(carnet)
+        a_proposer = [k for k, v in pierres.items() if v.get("statut") == "a_proposer"]
+        suppressions = []
+        if a_proposer:
+            from PySide6.QtWidgets import QMessageBox
+            noms = sorted((pierres[k].get("nom", "") for k in a_proposer), key=cle_tri_alpha)
+            boite = QMessageBox(QMessageBox.Question, "Envoyer au téléphone",
+                                f"{len(noms)} contact(s) supprimé(s) du carnet sont encore sur le "
+                                f"téléphone :\n\n" + ", ".join(noms[:20]) + (" …" if len(noms) > 20 else "")
+                                + "\n\nLes supprimer aussi du téléphone ?",
+                                QMessageBox.NoButton, self)
+            boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                                "QLabel { color: white; }" + STYLE_BOUTON)
+            b_suppr = boite.addButton("Supprimer du téléphone", QMessageBox.AcceptRole)
+            b_garder = boite.addButton("Les garder sur le téléphone", QMessageBox.AcceptRole)
+            boite.addButton("Plus tard", QMessageBox.RejectRole)
+            boite.exec()
+            if boite.clickedButton() is b_suppr:
+                suppressions = actions_suppression_telephone(details, a_proposer)
+            elif boite.clickedButton() is b_garder:
+                carnet = charger_carnet()
+                for k in a_proposer:
+                    if k in carnet.get("suppressions_tel", {}):
+                        carnet["suppressions_tel"][k]["statut"] = "garder_sur_tel"
+                sauvegarder_carnet(carnet)
+        # Contacts sélectionnés liés au téléphone : envoyer seulement eux, ou tout
+        ids = {it.data(Qt.ItemDataRole.UserRole) for it in self.liste_contacts.selectedItems()}
+        cles = {c["cle_tel"] for c in charger_carnet().get("contacts", [])
+                if c.get("id") in ids and c.get("cle_tel")}
+        portee = None
+        if cles:
+            _a, st_sel = preparer_envoi_telephone(details, cles)
+            _a, st_tout = preparer_envoi_telephone(details)
+            if st_tout["fiches"] > st_sel["fiches"]:
+                from PySide6.QtWidgets import QMessageBox
+                boite = QMessageBox(QMessageBox.Question, "Envoyer au téléphone",
+                                    f"Envoyer seulement les contacts sélectionnés "
+                                    f"({st_sel['fiches']} fiche(s) à compléter), ou tout le carnet "
+                                    f"({st_tout['fiches']} fiche(s) à compléter) ?",
+                                    QMessageBox.NoButton, self)
+                boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                                    "QLabel { color: white; }" + STYLE_BOUTON)
+                b_sel = boite.addButton("Contacts sélectionnés", QMessageBox.AcceptRole)
+                b_tout = boite.addButton("Tout le carnet", QMessageBox.AcceptRole)
+                boite.addButton("Annuler", QMessageBox.RejectRole)
+                boite.exec()
+                if boite.clickedButton() is b_sel:
+                    portee = cles
+                elif boite.clickedButton() is not b_tout:
+                    self.lbl_statut.setText("Envoi annulé.")
+                    return
+        actions, st = preparer_envoi_telephone(details, portee)
+        actions = suppressions + actions
+        remarques = []
+        if st["introuvables"]:
+            remarques.append(f"{st['introuvables']} fiche(s) liée(s) n'existent plus sur le téléphone : ignorées.")
+        if st["non_modifiables"]:
+            remarques.append(f"{st['non_modifiables']} fiche(s) seulement WhatsApp ou carte SIM : non modifiables.")
+        if not actions:
+            self.lbl_statut.setStyleSheet("color: #80c080;")
+            self.lbl_statut.setText("Le téléphone a déjà tout ce que contient le carnet. " + " ".join(remarques))
+            return
+        lignes = []
+        if suppressions:
+            lignes += [f"•  {len(suppressions)} contact(s) à supprimer du téléphone", ""]
+        lignes += [f"{st['fiches']} fiche(s) du téléphone à compléter :", ""] if st["fiches"] else []
+        for cle, libelle in (("numeros", "numéro(s) de téléphone"), ("mails", "adresse(s) mail"),
+                             ("notes", "note(s)")):
+            if st[cle]:
+                lignes.append(f"•  {st[cle]} {libelle} à ajouter")
+        noms = sorted({a["nom"] for a in actions}, key=cle_tri_alpha)
+        lignes += ["", "Fiches concernées : " + ", ".join(noms[:15]) + (" …" if len(noms) > 15 else "")]
+        if remarques:
+            lignes += [""] + remarques
+        lignes += ["", "Rien n'est remplacé ni supprimé sur le téléphone. Avant l'envoi, une sauvegarde de "
+                       "tous ses contacts est faite dans Courrier Adrien, et l'envoi pourra être "
+                       "annulé.", "", "Envoyer au téléphone ?"]
+        if not self._boite_question("Envoyer au téléphone", "\n".join(lignes), "Envoyer"):
+            self.lbl_statut.setText("Envoi annulé.")
+            return
+        self.lbl_statut.setStyleSheet("color: #e0a050;")
+        self.lbl_statut.setText("Envoi au téléphone en cours…")
+        attente_telephone(self, f"Envoi au téléphone en cours ({len(actions)} modification(s))…\n"
+                                f"Sauvegarde de ses contacts dans Courrier Adrien, puis ajouts un par un.")
+        relais_avancement = _RelaisTelephone(self)
+        relais_avancement.fini.connect(self._avancement_envoi)
+        self._envoi_affiche, self._envoi_confirme, self._envoi_total = (
+            0, 0, len(actions) + sum(len(a.get("raws", [])) - 1 for a in suppressions))
+        self._libelle_decompte = ("Envoi au téléphone", "envoyé(s)")
+        self._envoi_dernier_paquet, self._envoi_intervalle = (None, 0), 1000
+        self._relais_avancement_tel = relais_avancement
+        self._lancer_fil_telephone(
+            lambda: (serie, envoyer_au_telephone(serie, actions, relais_avancement.fini.emit)),
+            self._envoi_telephone_fini)
+
+    def _avancement_envoi(self, avancement):
+        """Fenêtre d'attente de l'envoi (17/10/2026, demandé : voir défiler
+        le décompte, comme le ménage automatique) : le téléphone confirme
+        les ajouts par paquets de 10, l'affichage les égrène un par un sans
+        jamais dépasser ce qui a réellement été envoyé."""
+        if isinstance(avancement, str):
+            attente_telephone_etape(avancement)
+            return
+        if avancement[0] == "etape":  # nouvelle étape : décompte remis à zéro
+            _e, titre, verbe = avancement
+            self._libelle_decompte = (titre, verbe)
+            self._envoi_affiche = self._envoi_confirme = 0
+            self._envoi_noms = {}
+            attente_telephone_etape(titre + "…")
+            return
+        if avancement[0] == 0:  # départ des ajouts : référence de temps
+            self._envoi_dernier_paquet = (time.monotonic(), 0)
+            self._envoi_total = avancement[1]
+            self._envoi_affiche = self._envoi_confirme = 0
+            self._envoi_noms = {}
+            return
+        if len(avancement) == 3:  # nom du contact de cette modification
+            if not hasattr(self, "_envoi_noms"):
+                self._envoi_noms = {}
+            self._envoi_noms[avancement[0]] = avancement[2]
+            avancement = avancement[:2]
+        # Rythme calé sur le téléphone (17/10/2026) : à 120 ms fixes, les 10
+        # éléments d'un paquet défilaient en 1 s puis le décompte restait figé
+        # ~14 s. L'intervalle est la durée du dernier paquet répartie sur ses
+        # éléments : le décompte avance régulièrement, sans à-coups.
+        maintenant = time.monotonic()
+        precedent, deja = getattr(self, "_envoi_dernier_paquet", (None, 0))
+        nouveau_confirme, self._envoi_total = avancement
+        if precedent is not None and nouveau_confirme > deja:
+            duree_ms = (maintenant - precedent) * 1000 / (nouveau_confirme - deja)
+            self._envoi_intervalle = int(min(max(duree_ms, 60), 3000))
+        self._envoi_dernier_paquet = (maintenant, nouveau_confirme)
+        self._envoi_confirme = nouveau_confirme
+        if not hasattr(self, "_minuteur_envoi"):
+            self._minuteur_envoi = QTimer(self)
+            self._minuteur_envoi.timeout.connect(self._egrener_envoi)
+        self._minuteur_envoi.setInterval(getattr(self, "_envoi_intervalle", 1000))
+        if not self._minuteur_envoi.isActive():
+            self._minuteur_envoi.start()
+
+    def _egrener_envoi(self):
+        if self._envoi_affiche >= self._envoi_confirme:
+            self._minuteur_envoi.stop()
+            return
+        self._envoi_affiche += 1
+        reste = self._envoi_total - self._envoi_affiche
+        titre, verbe = getattr(self, "_libelle_decompte", ("Envoi au téléphone", "envoyé(s)"))
+        nom = getattr(self, "_envoi_noms", {}).get(self._envoi_affiche, "")
+        attente_telephone_etape(f"{titre} : {self._envoi_affiche} / {self._envoi_total} "
+                                f"élément(s) {verbe}\n{'Restent' if reste > 1 else 'Reste'} {reste}…"
+                                + (f"\n{nom}" if nom else ""))
+
+    def _envoi_telephone_fini(self, resultat):
+        if hasattr(self, "_minuteur_envoi"):
+            self._minuteur_envoi.stop()
+        attente_telephone_fermer()
+        if isinstance(resultat, Exception):
+            print(f"[CARNET] envoi au téléphone impossible : {resultat}")
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText(f"Envoi au téléphone impossible : {resultat}")
+            return
+        serie, (ok, echecs, _sauvegarde) = resultat
+        try:
+            with open(FICHIER_JOURNAL_ENVOI_TELEPHONE, encoding="utf-8") as f:
+                ops = json.load(f).get("ajouts", [])
+        except (OSError, ValueError):
+            ops = []
+        supprimes = {a["cle"] for a in ops if a["op"] == "contact_supprime"}
+        nb_suppr = len(supprimes)
+        nb_ajouts = ok - nb_suppr
+        if supprimes:  # supprimés du téléphone : plus rien à proposer pour eux
+            carnet = charger_carnet()
+            for k in supprimes:
+                carnet.get("suppressions_tel", {}).pop(k, None)
+            sauvegarder_carnet(carnet)
+        print(f"[CARNET] envoi au téléphone : {nb_ajouts} ajout(s), {nb_suppr} suppression(s), "
+              f"{echecs} échec(s)")
+        faits = [m for m in (f"{nb_ajouts} élément(s) ajouté(s)" if nb_ajouts else "",
+                             f"{nb_suppr} contact(s) supprimé(s)" if nb_suppr else "") if m]
+        texte = "Envoi terminé : " + " et ".join(faits or ["rien de modifié"]) + " sur le téléphone."
+        if echecs:
+            texte += f"\n{echecs} modification(s) n'ont pas pu être faites."
+        # Libellés validés par l'auteur (17/10/2026) : « Garder » pouvait se
+        # comprendre « garder le contact sur le téléphone », et le texte ne
+        # décrivait pas le cas d'une suppression -> OK / Défaire ces changements
+        defaire = "Défaire ces changements"
+        texte += (f"\n\nVérifiez sur le téléphone. En cas de souci, « {defaire} » annule la "
+                  f"modification que vous venez d'effectuer.")
+        self.lbl_statut.setStyleSheet("color: #80c080;")
+        self.lbl_statut.setText(texte.split("\n")[0])
+        if ok and self._boite_question("Envoyer au téléphone", texte, "OK", defaire):
+            return
+        if ok and not self._boite_question(
+                defaire,
+                ("Retirer du téléphone les " + str(nb_ajouts) + " élément(s) qui viennent d'y être ajoutés"
+                 if nb_ajouts else "")
+                + (" et y recréer les " if nb_ajouts and nb_suppr else "Recréer sur le téléphone les "
+                   if nb_suppr else "")
+                + (f"{nb_suppr} contact(s) supprimé(s)" if nb_suppr else "") + " ?\n\n"
+                "Le carnet n'est pas modifié.",
+                "Oui", "Non"):
+            return
+        if ok:
+            self.lbl_statut.setStyleSheet("color: #e0a050;")
+            self.lbl_statut.setText("Annulation de l'envoi…")
+            attente_telephone(self, "Annulation de l'envoi : retrait de ce qui vient d'être ajouté…")
+            relais_avancement = _RelaisTelephone(self)
+            relais_avancement.fini.connect(self._avancement_envoi)
+            self._relais_avancement_tel = relais_avancement
+            self._envoi_affiche, self._envoi_confirme, self._envoi_total = 0, 0, ok
+            self._libelle_decompte = ("Annulation de l'envoi", "retiré(s)")
+            self._envoi_dernier_paquet, self._envoi_intervalle = (None, 0), 1000
+            self._lancer_fil_telephone(
+                lambda: annuler_envoi_telephone(serie, relais_avancement.fini.emit), self._annulation_finie)
+
+    def _annulation_finie(self, resultat):
+        if hasattr(self, "_minuteur_envoi"):
+            self._minuteur_envoi.stop()
+        attente_telephone_fermer()
+        if isinstance(resultat, Exception):
+            print(f"[CARNET] annulation de l'envoi impossible : {resultat}")
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Annulation impossible : voir le journal.")
+            return
+        self.lbl_statut.setStyleSheet("color: #80c080;")
+        self.lbl_statut.setText(f"Envoi annulé : {resultat} élément(s) retiré(s) du téléphone.")
+
+    def _contacts_telephone_lus(self, resultat):
+        from PySide6.QtWidgets import QMessageBox
+        attente_telephone_fermer()
+        if isinstance(resultat, Exception):
+            print(f"[CARNET] lecture des contacts du téléphone impossible : {resultat}")
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Lecture des contacts du téléphone impossible.")
+            return
+        resultat, cles_tel = resultat
+        stats = fusionner_contacts_telephone(resultat, cles_telephone=cles_tel)
+        # Contacts supprimés du carnet mais toujours sur le téléphone (17/10/2026,
+        # remonté : l'import disait « Carnet à jour » sans rien en dire) :
+        # on les signale et on propose de les réimporter
+        if stats["ignores"]:
+            noms = sorted(stats["ignores_noms"], key=cle_tri_alpha)
+            if self._boite_question(
+                    "Importer du téléphone",
+                    (f"{len(noms)} contact(s) que vous aviez supprimé(s) du carnet sont toujours sur "
+                     f"le téléphone :\n\n" + ", ".join(noms[:20]) + (" …" if len(noms) > 20 else "")
+                     + "\n\nLes réimporter dans le carnet ?"),
+                    "Les réimporter", "Non"):
+                carnet = charger_carnet()
+                for k in stats["ignores_cles"]:
+                    carnet.get("suppressions_tel", {}).pop(k, None)
+                sauvegarder_carnet(carnet)
+                stats = fusionner_contacts_telephone(resultat, cles_telephone=cles_tel)
+        # Contacts supprimés du téléphone depuis : les supprimer aussi du carnet ?
+        decision = None
+        if stats["supprimes_tel"]:
+            noms = stats["supprimes_tel"]
+            boite = QMessageBox(QMessageBox.Question, "Importer du téléphone",
+                                f"{len(noms)} contact(s) ont été supprimés du téléphone depuis le "
+                                f"dernier import :\n\n" + ", ".join(noms[:20]) + (" …" if len(noms) > 20 else "")
+                                + "\n\nLes supprimer aussi du carnet ?\n(bouton Restaurer pour revenir en arrière)",
+                                QMessageBox.NoButton, self)
+            boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                                "QLabel { color: white; }" + STYLE_BOUTON)
+            b_suppr = boite.addButton("Supprimer du carnet", QMessageBox.AcceptRole)
+            b_garder = boite.addButton("Les garder dans le carnet", QMessageBox.AcceptRole)
+            boite.addButton("Annuler", QMessageBox.RejectRole)
+            boite.exec()
+            if boite.clickedButton() is b_suppr:
+                decision = True
+            elif boite.clickedButton() is b_garder:
+                decision = False
+            else:
+                self.lbl_statut.setText("Import annulé.")
+                return
+        if not stats["nouveaux"] and not stats["completes"]:
+            # Rien à ajouter ni compléter : seulement des liens à poser ou la
+            # décision sur les suppressions (déjà validée) -> sans autre question
+            if stats["lies"] or decision is not None:
+                stats = fusionner_contacts_telephone(resultat, enregistrer=True, cles_telephone=cles_tel,
+                                                     supprimer_absents=decision)
+                print(f"[CARNET] import du téléphone : {stats}")
+                self._charger_dossiers()
+            self.lbl_statut.setStyleSheet("color: #80c080;")
+            morceaux = ["Carnet à jour"]
+            if decision is True:
+                morceaux.append(f"{len(stats['supprimes_tel'])} contact(s) supprimé(s) du carnet")
+            if stats["lies"]:
+                morceaux.append(f"{stats['lies']} fiche(s) liée(s) au téléphone")
+            self.lbl_statut.setText(" ; ".join(morceaux) + ".")
+            return
+        lignes = [f"{len(resultat)} contacts lus sur le téléphone (ceux qui ont un numéro ou un mail) :", ""]
+        if decision is True:
+            lignes.append(f"•  {len(stats['supprimes_tel'])} supprimé(s) du téléphone, à supprimer du carnet")
+        if stats["ignores"]:
+            lignes.append(f"•  {stats['ignores']} que vous avez supprimé(s) du carnet : pas réimporté(s)")
+        lignes.append(f"•  {stats['nouveaux']} nouveaux, à ajouter")
+        if stats["dossiers"]:
+            lignes.append(f"   (dans {stats['dossiers']} nouveau(x) dossier(s) : les groupes du "
+                          f"téléphone, et « {DOSSIER_CONTACTS_TELEPHONE} » pour les autres)")
+        lignes.append(f"•  {stats['completes']} déjà dans le carnet, à compléter "
+                      f"(numéro, mail ou note qui leur manque)")
+        lignes.append(f"•  {stats['inchanges']} déjà dans le carnet, sans changement")
+        if stats["lies"]:
+            lignes.append(f"•  {stats['lies']} fiche(s) du carnet liée(s) à leur fiche du téléphone "
+                          f"(pour « Envoyer au tél. »)")
+        lignes += ["", ("Rien d'autre n'est effacé ni remplacé dans le carnet" if decision is True
+                        else "Rien n'est effacé ni remplacé dans le carnet") + ", et rien n'est modifié "
+                       "sur le téléphone. Le carnet actuel est sauvegardé avant l'import "
+                       "(bouton Restaurer pour revenir en arrière).", "", "Importer ?"]
+        boite = QMessageBox(QMessageBox.Question, "Importer du téléphone", "\n".join(lignes),
+                            QMessageBox.NoButton, self)
+        boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                            "QLabel { color: white; }" + STYLE_BOUTON)
+        b_oui = boite.addButton("Importer", QMessageBox.AcceptRole)
+        boite.addButton("Annuler", QMessageBox.RejectRole)
+        boite.exec()
+        if boite.clickedButton() is not b_oui:
+            self.lbl_statut.setText("Import annulé.")
+            return
+        stats = fusionner_contacts_telephone(resultat, enregistrer=True, cles_telephone=cles_tel,
+                                             supprimer_absents=decision)
+        print(f"[CARNET] import du téléphone : {stats}")
+        self._charger_dossiers()
+        self.lbl_statut.setStyleSheet("color: #80c080;")
+        self.lbl_statut.setText(f"{stats['nouveaux']} contact(s) ajouté(s), "
+                                f"{stats['completes']} complété(s).")
 
     def _modifier_contact(self):
         item = self.liste_contacts.currentItem()
@@ -19760,11 +21587,20 @@ class DialogueCarnetAdresses(QDialog):
         self.champ_email.setText(contact.get("email", ""))
         self.champ_fixe.setText(contact.get("fixe", ""))
         self.champ_portable.setText(contact.get("portable", ""))
+        self.champ_autres_tel.setText(contact.get("autres_tel", ""))
+        self.champ_notes.setPlainText(contact.get("notes", ""))
         idx = self.combo_dossier_ajout.findData(contact.get("dossier", ""))
         if idx >= 0:
             self.combo_dossier_ajout.setCurrentIndex(idx)
         self._id_contact_en_edition = id_contact
         self.btn_ajouter.setText("  Enregistrer  ")
+        # La modification remplace la fiche affichée (17/10/2026, demandé :
+        # fiche + case Notes agrandie donnaient une fenêtre immense) ; la
+        # fenêtre reprend la hauteur juste nécessaire
+        if self.fiche_contact.isVisible():
+            self.fiche_contact.hide()
+            self._id_fiche_contact = None
+            QTimer.singleShot(50, lambda: self.resize(self.width(), max(640, self.sizeHint().height())))
         self.lbl_statut.setStyleSheet("color: #e0a050;")
         self.lbl_statut.setText("Modifiez les champs ci-dessous puis cliquez sur Enregistrer.")
         self.champ_nom.setFocus()
@@ -19785,12 +21621,11 @@ class DialogueCarnetAdresses(QDialog):
             # "Enregistrer" pointer vers un contact qui n'existe plus.
             self._id_contact_en_edition = None
             self.btn_ajouter.setText("  Ajouter  ")
-            self.champ_nom.clear()
-            self.champ_email.clear()
-            self.champ_fixe.clear()
-            self.champ_portable.clear()
+            self._vider_champs_contact()
         carnet = charger_carnet()
+        supprimes = [c for c in carnet.get("contacts", []) if c.get("id") in ids_a_supprimer]
         carnet["contacts"] = [c for c in carnet.get("contacts", []) if c.get("id") not in ids_a_supprimer]
+        noter_suppressions_telephone(carnet, supprimes)
         sauvegarder_carnet(carnet)
         self._rafraichir_contacts()
         nb = self.liste_contacts.count()
@@ -26854,7 +28689,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 16/10/2026 02h18")
+        self.setWindowTitle("COURRIER ADRIEN — 16/10/2026 17h27")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31820,7 +33655,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 16/10/2026 à 02h18")
+        lbl_version = QLabel("Version du 16/10/2026 à 17h27")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 

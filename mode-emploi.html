@@ -448,13 +448,32 @@
   <h2>14. Carnet d'adresses</h2>
   <p>Bouton <span class="btn">ADRESSES</span>. Les contacts sont rangés dans des dossiers (<b>Nouveau</b>, <b>Renommer</b>, <b>Supprimer</b> ; <kbd>F2</kbd> pour renommer).</p>
   <ul>
-    <li>Chaque contact peut avoir une adresse mail, un numéro de téléphone, ou les deux.</li>
-    <li>La recherche fonctionne sur le nom, l'adresse ou le numéro (par exemple « 06 12 »).</li>
+    <li>Chaque contact peut avoir une adresse mail, un numéro de téléphone, ou les deux. Fiche : nom, mail, téléphone fixe, téléphone portable, <b>autres téléphones</b> (séparés par « ; ») et <b>notes</b>.</li>
+    <li>La recherche fonctionne sur le nom, l'adresse, le numéro (par exemple « 06 12 ») ou les notes.</li>
     <li><span class="btn">Écrire</span> : nouveau mail aux contacts sélectionnés. <span class="btn">SMS</span> : SMS aux contacts sélectionnés, par le téléphone relié.</li>
     <li><span class="btn">Copier vers…</span> copie des contacts dans un autre dossier. Vous pouvez aussi les faire glisser vers ce dossier en tenant la touche <kbd>Ctrl</kbd>.</li>
     <li><b>Import / export CSV</b> : les colonnes Téléphone, Mobile ou Portable sont reconnues. Réimporter un fichier complète les contacts déjà présents.</li>
     <li><b>Import / export Excel</b> : un onglet par dossier (créé automatiquement s'il n'existe pas), plus un onglet avec tous les contacts à l'export.</li>
-    <li><span class="btn">Restaurer…</span> revient à un état précédent du carnet. Une sauvegarde est faite automatiquement avant chaque modification.</li>
+    <li><span class="btn">Importer du tél.</span> : récupère les contacts du téléphone relié (voir <a href="#tel">la liaison avec le téléphone</a>). Les groupes du téléphone deviennent des dossiers ; les contacts sans groupe vont dans le dossier « Téléphone ». Avant tout enregistrement, un récapitulatif indique combien de contacts seront ajoutés ou complétés : un contact déjà présent n'est pas ajouté une deuxième fois, seuls ses numéros, mail ou notes manquants sont complétés. Rien n'est effacé ni remplacé dans le carnet, et rien n'est modifié sur le téléphone. Vous pouvez recommencer l'import plus tard pour récupérer les nouveaux contacts.</li>
+    <li><span class="btn">Envoyer au tél.</span> : fait l'inverse pour les contacts venus du téléphone. Chacun reste lié à sa fiche du téléphone par une clé invisible : Courrier Adrien y ajoute les numéros, le mail et la note que vous avez saisis dans le carnet et qui manquent sur le téléphone. Rien n'y est remplacé ni supprimé. Si des contacts sont sélectionnés, vous pouvez n'envoyer qu'eux. Un récapitulatif est affiché avant l'envoi ; une sauvegarde de tous les contacts du téléphone est faite dans Courrier Adrien juste avant, et à la fin <b>Défaire ces changements</b> annule la modification que vous venez d'effectuer (après confirmation).</li>
+    <li><b>Contacts supprimés</b> : un contact venu du téléphone et supprimé ensuite d'un côté peut l'être aussi de l'autre, toujours sur votre accord :
+      <ul>
+        <li><b>supprimé du téléphone</b> : au prochain <span class="btn">Importer du tél.</span>, Courrier Adrien le signale et propose de le supprimer aussi du carnet (ou de l'y garder) ;</li>
+        <li><b>supprimé du carnet</b> : il n'est plus réimporté. Au prochain <span class="btn">Envoyer au tél.</span>, Courrier Adrien propose de le supprimer aussi du téléphone, de l'y garder, ou de décider plus tard. Une sauvegarde des contacts du téléphone est faite avant, et <b>Défaire ces changements</b> recrée les contacts supprimés.</li>
+      </ul>
+      Un contact copié dans plusieurs dossiers n'est considéré comme supprimé que lorsque sa dernière copie l'est.</li>
+    <li><span class="btn">Restaurer</span> propose de restaurer :
+      <ul>
+        <li><b>le carnet d'adresses</b> : retour à un état précédent du carnet. Une sauvegarde est faite automatiquement avant chaque modification ;</li>
+        <li><b>les contacts du téléphone</b> : avant chaque envoi vers le téléphone, une sauvegarde de tous ses contacts est faite dans Courrier Adrien (les 10 dernières sont gardées). Choisissez une sauvegarde, puis :
+          <ul>
+            <li><b>Remettre sur le téléphone</b> : y remet ce qui manque par rapport à la sauvegarde (contacts supprimés depuis, numéros, mails ou note effacés). Rien n'y est retiré ni remplacé ; un récapitulatif est affiché avant, et la remise peut être annulée ;</li>
+            <li><b>Excel</b> ou <b>CSV</b> : enregistre la sauvegarde dans un fichier, lisible par Excel ou réimportable dans le carnet ;</li>
+            <li><b>vCard (.vcf)</b> : fichier que le téléphone sait importer lui-même (application Contacts), par exemple après une réinitialisation du téléphone.</li>
+          </ul>
+        </li>
+      </ul>
+    </li>
   </ul>
 </section>
 
