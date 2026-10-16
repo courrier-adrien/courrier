@@ -127,6 +127,8 @@
     <li><a href="#presentation">Présentation</a></li>
     <li><a href="#installation">Installation et premier lancement</a></li>
     <li><a href="#ecran">L'écran principal</a></li>
+    <li><a href="#saisie-comptes">Vos comptes : la fenêtre COMPTES</a></li>
+    <li><a href="#fournisseurs">Réglages selon votre fournisseur</a></li>
     <li><a href="#comptes">Comptes et dossiers</a></li>
     <li><a href="#liste">La liste des mails</a></li>
     <li><a href="#lecture">Lire un mail</a></li>
@@ -142,7 +144,8 @@
     <li><a href="#rss">RSS to Email</a></li>
     <li><a href="#todo">TODO (rappels)</a></li>
     <li><a href="#mailing">MAILING</a></li>
-    <li><a href="#tel">Téléphone : TÉL et SMS</a></li>
+    <li><a href="#tel">Relier votre téléphone à Courrier Adrien</a></li>
+    <li><a href="#sms">Utilisation des SMS</a></li>
     <li><a href="#sons">Sons</a></li>
     <li><a href="#controle">CONTRÔLE et CONSOLE</a></li>
     <li><a href="#raccourcis">Raccourcis clavier</a></li>
@@ -159,7 +162,7 @@
   <p>Courrier Adrien est un client mail pour Windows qui gère plusieurs comptes à la fois (IMAP : Gmail, Orange, Free, o2switch… et Outlook / Hotmail).
   Il n'a <b>aucun menu déroulant</b> : chaque fonction est un bouton visible, accessible en un ou deux clics.</p>
   <p>En plus de la messagerie, il réunit dans une seule fenêtre : un navigateur intégré, un logiciel de mailing, un lecteur de flux RSS qui les envoie en mails, des macros, des modèles, des rappels (TODO), un carnet d'adresses, l'envoi de SMS et l'affichage de l'écran d'un téléphone Android.</p>
-  <p>Tout est stocké sur votre ordinateur. Rien n'est envoyé ailleurs qu'à votre fournisseur de messagerie, sauf si vous choisissez vous-même la correction ou la traduction en ligne par Claude (voir <a href="#langue">section 10</a>).</p>
+  <p>Tout est stocké sur votre ordinateur. Rien n'est envoyé ailleurs qu'à votre fournisseur de messagerie, sauf si vous choisissez vous-même la correction ou la traduction en ligne par Claude (voir <a href="#langue">section 12</a>).</p>
   <p>Licence : <b>PolyForm Noncommercial 1.0.0</b>, usage non commercial. Le texte complet est dans le bouton <span class="btn">À PROPOS</span>.</p>
 </section>
 
@@ -173,12 +176,9 @@
   <h3>Ajouter votre premier compte</h3>
   <p>Au premier lancement, la fenêtre <span class="btn">COMPTES</span> s'ouvre toute seule :</p>
   <ol>
-    <li>Cliquez sur <b>Ajouter</b>, choisissez votre fournisseur (les réglages des serveurs sont préremplis), puis saisissez votre adresse et votre mot de passe.</li>
-    <li>Pour un compte <b>Outlook / Hotmail</b>, utilisez <b>Se connecter avec Microsoft</b> : la connexion se fait sur la page de Microsoft, sans donner votre mot de passe à Courrier Adrien.</li>
-    <li>Pour un compte <b>Gmail</b>, il faut généralement un « mot de passe d'application », créé dans les réglages de sécurité de votre compte Google.</li>
+    <li>Ajoutez votre ou vos comptes : voir <a href="#saisie-comptes">section 4</a>.</li>
     <li>Supprimez ensuite le compte d'exemple « A CONFIGURER ».</li>
   </ol>
-  <p>La même fenêtre sert plus tard à modifier ou supprimer un compte, à vider le cache HTML d'un compte et à lancer une <b>Mise à jour des comptes</b>.</p>
   <h3>Courrier Adrien comme messagerie par défaut</h3>
   <p>Le bouton <span class="btn">DÉFAUT</span>, en bas à droite, propose Courrier Adrien à Windows comme application de messagerie par défaut. Windows ouvre ensuite ses propres réglages pour que vous confirmiez ce choix.</p>
 </section>
@@ -188,19 +188,19 @@
   <h3>Barre du haut, à gauche : les outils</h3>
   <table>
     <tr><th>Bouton</th><th>Rôle</th></tr>
-    <tr><td><span class="btn">CONTRÔLE</span></td><td>Poste de contrôle : ce que fait le logiciel, compte par compte (<a href="#controle">section 21</a>).</td></tr>
+    <tr><td><span class="btn">CONTRÔLE</span></td><td>Poste de contrôle : ce que fait le logiciel, compte par compte (<a href="#controle">section 24</a>).</td></tr>
     <tr><td><span class="btn">SUPPRIMER</span></td><td>Supprime le ou les mails sélectionnés.</td></tr>
-    <tr><td><span class="btn">COMPTES</span></td><td>Ajouter, modifier ou supprimer un compte.</td></tr>
-    <tr><td><span class="btn">TÉL</span> <span class="btn">SMS</span></td><td>Écran du téléphone Android sur le PC, et envoi de SMS (<a href="#tel">section 19</a>).</td></tr>
-    <tr><td><span class="btn">MAILING</span></td><td>Envoi d'un même message à une liste de destinataires (<a href="#mailing">section 18</a>).</td></tr>
-    <tr><td><span class="btn">MACROS</span> <span class="btn">MODÈLES</span></td><td>Réponses toutes faites et modèles de mails (<a href="#macros">section 11</a>).</td></tr>
+    <tr><td><span class="btn">COMPTES</span></td><td>Ajouter, modifier ou supprimer un compte (<a href="#saisie-comptes">section 4</a>).</td></tr>
+    <tr><td><span class="btn">TÉL</span> <span class="btn">SMS</span></td><td>Écran du téléphone Android sur le PC (<a href="#tel">section 21</a>), et envoi de SMS (<a href="#sms">section 22</a>).</td></tr>
+    <tr><td><span class="btn">MAILING</span></td><td>Envoi d'un même message à une liste de destinataires (<a href="#mailing">section 20</a>).</td></tr>
+    <tr><td><span class="btn">MACROS</span> <span class="btn">MODÈLES</span></td><td>Réponses toutes faites et modèles de mails (<a href="#macros">section 13</a>).</td></tr>
     <tr><td><span class="btn">SONS</span></td><td>Son de réception, compte par compte.</td></tr>
-    <tr><td><span class="btn">SPAM</span></td><td>Liste des expéditeurs indésirables (<a href="#spam">section 13</a>).</td></tr>
-    <tr><td><span class="btn">ADRESSES</span></td><td>Carnet d'adresses (<a href="#carnet">section 12</a>).</td></tr>
-    <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span> <span class="btn">CHRONO</span></td><td>Recherche, retour à l'affichage normal, et choix du tri (<a href="#recherche">section 14</a>).</td></tr>
+    <tr><td><span class="btn">SPAM</span></td><td>Liste des expéditeurs indésirables (<a href="#spam">section 15</a>).</td></tr>
+    <tr><td><span class="btn">ADRESSES</span></td><td>Carnet d'adresses (<a href="#carnet">section 14</a>).</td></tr>
+    <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span> <span class="btn">CHRONO</span></td><td>Recherche, retour à l'affichage normal, et choix du tri (<a href="#recherche">section 16</a>).</td></tr>
     <tr><td><span class="btn">INTERNET</span></td><td>Ouvre le mail affiché dans un navigateur installé sur l'ordinateur.</td></tr>
-    <tr><td><span class="btn">RSS to Email</span></td><td>Abonnements RSS reçus sous forme de mails (<a href="#rss">section 16</a>).</td></tr>
-    <tr><td><span class="btn">TODO</span></td><td>Rappels programmés (<a href="#todo">section 17</a>).</td></tr>
+    <tr><td><span class="btn">RSS to Email</span></td><td>Abonnements RSS reçus sous forme de mails (<a href="#rss">section 18</a>).</td></tr>
+    <tr><td><span class="btn">TODO</span></td><td>Rappels programmés (<a href="#todo">section 19</a>).</td></tr>
   </table>
   <h3>Barre du haut, à droite : les actions sur les mails</h3>
   <p><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span> (renvoie le mail à l'identique).</p>
@@ -209,13 +209,90 @@
   <div class="note"><b>Affichage Windows à 125 % ou plus :</b> si la place manque, la barre du haut réduit d'elle-même la taille de ses boutons pour que tout reste visible.</div>
 </section>
 
+<section id="saisie-comptes">
+  <h2>4. Vos comptes : la fenêtre COMPTES</h2>
+  <p>Le bouton <span class="btn">COMPTES</span> ouvre la fenêtre où vous ajoutez, modifiez et classez vos comptes de messagerie. Au premier lancement, elle s'ouvre toute seule.</p>
+  <h3>Ajouter un compte</h3>
+  <ol>
+    <li>Choisissez votre <b>fournisseur</b> dans la liste : les serveurs et les ports sont préremplis. S'il n'y figure pas, choisissez <b>Autre (manuel)</b> et remplissez vous-même les serveurs IMAP et SMTP et leurs ports (indiqués par votre fournisseur).</li>
+    <li>Saisissez le <b>Nom</b> (celui qui s'affichera dans la colonne de gauche), l'<b>Adresse</b> et le <b>Mot de passe</b>.</li>
+    <li>Cliquez sur <b>Ajouter</b>. Un message vert confirme l'ajout.</li>
+  </ol>
+  <ul>
+    <li>Pour un compte <b>Outlook / Hotmail</b>, utilisez <b>Se connecter avec Microsoft</b> à la place du mot de passe : la connexion se fait sur la page de Microsoft, sans donner votre mot de passe à Courrier Adrien.</li>
+    <li>Certains fournisseurs demandent une étape préalable sur leur site (accès IMAP à activer, mot de passe particulier…) : voir <a href="#fournisseurs">section 5</a>.</li>
+  </ul>
+  <h3>Modifier, supprimer, classer</h3>
+  <ul>
+    <li><b>Modifier</b> : sélectionnez le compte dans la liste « Comptes configurés », changez ce qui doit l'être, puis cliquez sur <b>Modifier</b>.</li>
+    <li><b>Supprimer</b> : sélectionnez le compte, puis cliquez sur <b>Supprimer</b>.</li>
+    <li><b>▲ Monter</b> / <b>▼ Descendre</b> : changent l'ordre des comptes dans la colonne de gauche de l'interface générale.</li>
+  </ul>
+  <h3>Mise à jour des comptes</h3>
+  <p>Compare chaque dossier de chaque compte avec le serveur : les mails manquants sont téléchargés, et ceux présents seulement sur votre ordinateur sont renvoyés sur le serveur. <b>Aucun mail n'est supprimé.</b> Cela peut prendre plusieurs minutes : c'est normal, et ce n'est à faire qu'exceptionnellement.</p>
+</section>
+
+<section id="fournisseurs">
+  <h2>5. Réglages particuliers selon votre fournisseur</h2>
+  <p>Pour ajouter un compte, il suffit en général de choisir votre fournisseur dans la liste de <span class="btn">COMPTES</span> : les serveurs et les ports sont préremplis. Certains fournisseurs demandent toutefois une étape préalable, de votre côté, sur leur site. Courrier Adrien vous la rappelle d'ailleurs par une ligne d'aide quand vous choisissez ce fournisseur.</p>
+
+  <h3>Caramail et GMX</h3>
+  <p>Caramail est aujourd'hui géré par GMX : les réglages sont les mêmes pour les deux.</p>
+  <ul>
+    <li><b>Activez d'abord l'accès IMAP</b> sur le site de votre messagerie : <i>E-mail › Paramètres › Fonctions POP3/IMAP</i> › cochez « <b>Envoyer et recevoir des emails via des programmes externes</b> ».</li>
+    <li>D'après GMX, ce réglage se désactive tout seul après une longue période sans utilisation : si votre compte ne fonctionne plus, vérifiez qu'il est toujours coché.</li>
+    <li>Serveurs (préremplis) : IMAP <code>imap.gmx.com</code>, port 993 (SSL) ; SMTP <code>mail.gmx.com</code>, port 587 (STARTTLS).</li>
+  </ul>
+
+  <h3>Gmail</h3>
+  <p><b>Condition obligatoire pour Gmail</b></p>
+  <p>Il vous faut utiliser la validation en deux étapes sur votre compte Google.<br>
+  Et ensuite utiliser un mot de passe d'application pour Courrier Adrien<br>
+  Voici le lien direct pour créer ce mot de passe (après vous être connecté et après avoir activé la validation en 2 étapes)<br>
+  <a href="https://myaccount.google.com/apppasswords">https://myaccount.google.com/apppasswords</a></p>
+  <ul>
+    <li>Le code fait 16 caractères, affichés en 4 groupes : saisissez-le <b>sans les espaces</b> dans le champ « Mot de passe » de Courrier Adrien.</li>
+    <li><b>Si vous changez le mot de passe de votre compte Google, les mots de passe d'application sont annulés</b> : créez-en un nouveau et remettez-le dans Courrier Adrien.</li>
+    <li>Le mot de passe d'application n'est pas disponible si la validation en deux étapes n'utilise que des clés de sécurité, si la Protection avancée est activée, ou pour un compte professionnel ou scolaire (c'est l'organisation qui décide).</li>
+  </ul>
+
+  <h3>Infomaniak (ik.me)</h3>
+  <ul>
+    <li><b>Le mot de passe à saisir n'est pas celui de votre compte Infomaniak.</b> Infomaniak le fournit pour une adresse mail <b>et</b> un appareil (cet ordinateur) : sur le site Infomaniak Mail, <i>Paramètres › Appareils › Ajouter un appareil › Mes e-mails</i>, choisissez votre ordinateur, puis cliquez sur « <b>Afficher le mot de passe</b> ».</li>
+    <li><b>Notez-le</b> : il ne s'affiche qu'une fois. En cas de perte, ajoutez simplement un nouvel appareil pour obtenir un nouveau mot de passe.</li>
+    <li>Pour la même adresse sur un autre ordinateur ou sur un téléphone, Infomaniak vous fournira un autre mot de passe.</li>
+    <li>Serveurs (préremplis) : IMAP et SMTP <code>mail.infomaniak.com</code>, ports 993 (SSL) et 587 (STARTTLS).</li>
+  </ul>
+
+  <h3>o2switch</h3>
+  <ul>
+    <li>Dans « Serveur IMAP » et « Serveur SMTP », indiquez le <b>nom de votre serveur o2switch</b> (de la forme <code>nomduserveur.o2switch.net</code>), affiché dans votre espace cPanel. Il est propre à chaque client : il ne peut donc pas être prérempli.</li>
+    <li>Le mot de passe est celui de l'adresse mail, créé dans cPanel.</li>
+    <li>Ports (préremplis) : IMAP 993 (SSL), SMTP 465 (SSL).</li>
+  </ul>
+
+  <h3>Yahoo</h3>
+  <p><b>Condition obligatoire pour Yahoo</b></p>
+  <p>Il est conseillé d'utiliser un navigateur et un appareil que vous utilisez habituellement pour éviter les blocages de sécurité (Yahoo précise : un navigateur avec lequel vous êtes connecté à Yahoo depuis plusieurs jours de suite, et pas en navigation privée).</p>
+  <ol>
+    <li>Connectez-vous et accédez directement à la page Sécurité du compte Yahoo.<br>
+      <a href="https://login.yahoo.com/account/security">https://login.yahoo.com/account/security</a></li>
+    <li>Faites défiler la page jusqu'à la section Connexions externes.</li>
+    <li>Cliquez sur Créer un mot de passe d'application (ou Générer et gérer les mots de passe d'application).</li>
+    <li>Saisissez le nom Courrier Adrien</li>
+    <li>Cliquez sur Générer le mot de passe.</li>
+    <li>Copiez le code qui s'affiche à l'écran, puis collez-le dans le champ "mot de passe" de Courrier Adrien</li>
+    <li>Cliquez sur Terminé.</li>
+  </ol>
+</section>
+
 <section id="comptes">
-  <h2>4. Comptes et dossiers</h2>
+  <h2>6. Comptes et dossiers</h2>
   <p>La colonne de gauche affiche une barre par compte. <b>Chaque barre sert de boîte de réception</b> : cliquez dessus pour afficher les mails reçus de ce compte. Son arborescence de dossiers s'affiche juste en dessous.</p>
   <ul>
     <li>Le nombre de mails non lus s'affiche à droite de chaque barre.</li>
     <li>Le <b>petit rond gris</b> devant le nom d'un compte force la relève immédiate de ce seul compte.</li>
-    <li>Pour changer l'ordre des comptes, ouvrez <span class="btn">COMPTES</span> et utilisez les boutons <b>▲ Monter</b> / <b>▼ Descendre</b>.</li>
+    <li>Pour ajouter un compte ou changer leur ordre : bouton <span class="btn">COMPTES</span> (<a href="#saisie-comptes">section 4</a>).</li>
     <li>Pour renommer un compte, double-cliquez sur son nom (ou appuyez sur <kbd>F2</kbd>).</li>
   </ul>
   <h3>La barre du compte actif</h3>
@@ -230,10 +307,22 @@
     <tr><td><span class="btn">▲</span> <span class="btn">▼</span></td><td>Monter ou descendre le dossier sélectionné. Vous composez ainsi une arborescence dans l'ordre qui vous convient.</td></tr>
   </table>
   <p>Pour <b>déplacer des mails</b> vers un autre dossier, faites-les glisser depuis la liste vers ce dossier.</p>
+  <h3>Corbeille et Envoyés : ménage automatique</h3>
+  <p>Pour qu'ils ne grossissent pas indéfiniment, la <b>Corbeille</b> et le dossier des <b>Envoyés</b> de chaque compte peuvent faire leur ménage tout seuls. Juste sous le bandeau du dossier, le réglage <b>Garder</b> fixe le nombre de mails conservés : au-delà, les plus anciens sont supprimés définitivement (aussi sur le serveur) dès que vous validez le réglage, puis à chaque ouverture du dossier.</p>
+  <ul>
+    <li>Choisissez <b>TOUT</b> (rien n'est jamais supprimé automatiquement) ou <b>les derniers</b>, puis tapez le nombre de mails à garder, de <b>50 à 5 000</b>, et validez avec <kbd>Entrée</kbd> ou le bouton <b>OK</b>.</li>
+    <li>Si ce nombre entraîne des suppressions, Courrier Adrien vous demande d'abord confirmation.</li>
+    <li>Pendant le ménage, la barre du bas affiche le décompte (« Ménage automatique : 120 / 466 anciens mails supprimés… ») et les mails disparaissent de la liste un par un, puis un bilan s'affiche à la fin.</li>
+    <li>Par défaut : les <b>300 derniers</b> pour la Corbeille, <b>TOUT</b> pour les Envoyés.</li>
+    <li>Le réglage est propre à chaque Corbeille et à chaque dossier Envoyés de chaque compte, Outlook compris (sa corbeille s'appelle « Éléments supprimés »).</li>
+    <li>Ce sont toujours les mails les plus anciens, par leur date (ceux du bas de la liste), qui partent en premier. Attention : un vieux mail que vous venez de mettre à la Corbeille peut donc être effacé aussitôt.</li>
+  </ul>
 </section>
 
+
+
 <section id="liste">
-  <h2>5. La liste des mails</h2>
+  <h2>7. La liste des mails</h2>
   <p>Chaque mail occupe deux lignes. Les couleurs indiquent son état :</p>
   <table>
     <tr><th>Couleur</th><th>Signification</th></tr>
@@ -250,7 +339,7 @@
 </section>
 
 <section id="lecture">
-  <h2>6. Lire un mail</h2>
+  <h2>8. Lire un mail</h2>
   <p>L'en-tête affiche l'expéditeur, le destinataire, la date en toutes lettres et le sujet en gros caractères. Cliquer sur une adresse ouvre le carnet d'adresses pour y ajouter cette personne.</p>
   <p>Boutons du bandeau du mail :</p>
   <table>
@@ -258,7 +347,7 @@
     <tr><td><span class="btn">COPIER</span></td><td>Copie le texte du mail.</td></tr>
     <tr><td><span class="btn">RECHARGER</span></td><td>Télécharge à nouveau ce mail depuis le serveur, par exemple s'il s'affiche mal.</td></tr>
     <tr><td><span class="btn">PDF</span></td><td>Enregistre le mail dans un fichier PDF.</td></tr>
-    <tr><td><span class="btn">TRADUIRE</span></td><td>Traduit le mail sur place (<a href="#langue">section 10</a>). Il devient <span class="btn">ORIGINAL</span> pour revenir au texte d'origine.</td></tr>
+    <tr><td><span class="btn">TRADUIRE</span></td><td>Traduit le mail sur place (<a href="#langue">section 12</a>). Il devient <span class="btn">ORIGINAL</span> pour revenir au texte d'origine.</td></tr>
     <tr><td><span class="btn">▲</span> <span class="btn">▼</span></td><td>Aller en haut ou en bas du mail.</td></tr>
   </table>
   <ul>
@@ -269,7 +358,7 @@
 </section>
 
 <section id="pj">
-  <h2>7. Pièces jointes</h2>
+  <h2>9. Pièces jointes</h2>
   <p>Les pièces jointes s'affichent en haut du mail, avec leur icône, leur nom et leur poids.</p>
   <ul>
     <li><b>Un clic</b> ouvre l'aperçu dans la fenêtre du mail : PDF, Word, Excel, OpenDocument, PowerPoint, images et vidéos.</li>
@@ -282,7 +371,7 @@
 </section>
 
 <section id="redaction">
-  <h2>8. Écrire un mail</h2>
+  <h2>10. Écrire un mail</h2>
   <p>Cliquez sur <span class="btn">NOUVEAU</span>, <span class="btn">RÉPONDRE</span> (<kbd>Ctrl</kbd>+<kbd>R</kbd>), <span class="btn">RÉP. À TOUS</span>, <span class="btn">TRANSFERT</span> ou <span class="btn">RENVOYER</span>.</p>
   <ul>
     <li><b>Destinataires :</b> les adresses se complètent pendant la frappe. Cliquer sur l'étiquette À, Cc ou Cci ouvre le carnet d'adresses pour choisir les destinataires.</li>
@@ -299,7 +388,7 @@
 </section>
 
 <section id="delai">
-  <h2>9. Envoi différé (DÉLAI)</h2>
+  <h2>11. Envoi différé (DÉLAI)</h2>
   <p>Le bouton <span class="btn">DÉLAI</span>, en bas de la fenêtre, règle le délai appliqué au bouton <b>Envoyer</b> :</p>
   <ul>
     <li><b>1 minute</b>, <b>15 minutes</b> ou <b>30 minutes</b> ;</li>
@@ -310,7 +399,7 @@
 </section>
 
 <section id="langue">
-  <h2>10. Orthographe, grammaire, traduction</h2>
+  <h2>12. Orthographe, grammaire, traduction</h2>
   <h3>Orthographe pendant la frappe (gratuit)</h3>
   <p>Les mots inconnus sont soulignés pendant que vous écrivez. Faites un <b>clic droit</b> sur un mot souligné : les corrections proposées s'affichent en haut du menu. Les dictionnaires français (orthographe classique et réformée de 1990) et anglais sont actifs ensemble. La correction fonctionne aussi dans les champs des sites web ouverts dans Courrier Adrien.</p>
   <h3>Le bouton « Langue » de la fenêtre de rédaction</h3>
@@ -335,7 +424,7 @@
 </section>
 
 <section id="macros">
-  <h2>11. Macros et modèles</h2>
+  <h2>13. Macros et modèles</h2>
   <h3>MACROS</h3>
   <p>Une macro écrit un texte tout prêt en un clic. Elle ouvre la fenêtre de rédaction comme le bouton choisi (Nouveau mail, Répondre, Répondre à tous, Transférer ou Renvoyer le mail sélectionné), puis insère son contenu à l'emplacement du curseur. <b>L'envoi reste manuel</b> : c'est vous qui cliquez sur Envoyer.</p>
   <p>Dans <span class="btn">MACROS</span>, créez une macro avec <span class="btn">+</span> et choisissez son bouton de départ. Ajoutez ensuite ses étapes (<b>Ajouter</b>) : du texte, un saut de ligne, ou le contenu du presse-papiers au moment du clic. Ordonnez-les (<b>▲ Monter</b> / <b>▼ Descendre</b>), puis cliquez sur <b>Sauvegarder</b>. Chaque macro devient un bouton dans la <b>barre du bas</b>, à gauche de <span class="btn">DÉLAI</span>.</p>
@@ -356,7 +445,7 @@
 </section>
 
 <section id="carnet">
-  <h2>12. Carnet d'adresses</h2>
+  <h2>14. Carnet d'adresses</h2>
   <p>Bouton <span class="btn">ADRESSES</span>. Les contacts sont rangés dans des dossiers (<b>Nouveau</b>, <b>Renommer</b>, <b>Supprimer</b> ; <kbd>F2</kbd> pour renommer).</p>
   <ul>
     <li>Chaque contact peut avoir une adresse mail, un numéro de téléphone, ou les deux.</li>
@@ -370,7 +459,7 @@
 </section>
 
 <section id="spam">
-  <h2>13. Spam</h2>
+  <h2>15. Spam</h2>
   <p>Sur un mail indésirable, cliquez sur <span class="btn">SPAM</span> dans la barre du bas : le mail part dans le dossier spam du compte, et l'expéditeur est ajouté à une <b>liste commune à tous vos comptes</b>. Ses prochains mails iront directement en spam, quel que soit le compte qui les reçoit.</p>
   <p>Une erreur ? Ouvrez le mail dans le dossier spam et cliquez sur <span class="btn">NON SPAM</span>. Le bouton <span class="btn">SPAM</span> de la barre du haut affiche la liste complète des expéditeurs bloqués.</p>
   <div class="attention"><b>Attention :</b> un mail supprimé depuis un dossier spam est effacé définitivement, sans passer par la corbeille.</div>
@@ -378,7 +467,7 @@
 </section>
 
 <section id="recherche">
-  <h2>14. Rechercher et trier</h2>
+  <h2>16. Rechercher et trier</h2>
   <ul>
     <li><span class="btn">RECHERCHER</span> : recherche par expéditeur ou dans les en-têtes. <span class="btn">✕</span> revient à l'affichage normal.</li>
     <li>Le <b>petit bonhomme</b> d'un mail (à droite dans la liste) affiche tous les mails de cet expéditeur, avec leur dossier.</li>
@@ -388,7 +477,7 @@
 </section>
 
 <section id="internet">
-  <h2>15. Navigateur intégré et vidéos</h2>
+  <h2>17. Navigateur intégré et vidéos</h2>
   <p>Un clic sur un lien d'un mail ouvre la page <b>dans Courrier Adrien</b>, à la place du mail. La barre d'adresse propose :</p>
   <ul>
     <li><span class="btn">CORPS</span> pour revenir au mail ;</li>
@@ -405,7 +494,7 @@
 </section>
 
 <section id="rss">
-  <h2>16. RSS to Email</h2>
+  <h2>18. RSS to Email</h2>
   <p>Recevez les nouveaux articles de vos sites préférés sous forme de mails, dans le compte de votre choix.</p>
   <ol>
     <li>Cliquez sur <span class="btn">RSS to Email</span>.</li>
@@ -417,20 +506,21 @@
 </section>
 
 <section id="todo">
-  <h2>17. TODO (rappels)</h2>
+  <h2>19. TODO (rappels)</h2>
   <p>Bouton <span class="btn">TODO</span>. Saisissez le texte du rappel, la date et l'heure (format libre : <code>9.20</code>, <code>9:20</code> ou <code>22.30</code>), puis cliquez sur <b>Ajouter</b>. Vous pouvez choisir un son (bouton <b>Fichier</b>, et <b>▶</b> pour l'écouter).</p>
   <p>À l'heure prévue, une fenêtre s'affiche avec le son. Cliquez sur <b>OK</b>, ou sur <b>Reporter</b> : dans 10 minutes, 30 minutes, 1 heure, demain à la même heure, dans une semaine, ou à une heure précise.</p>
 </section>
 
 <section id="mailing">
-  <h2>18. MAILING</h2>
+  <h2>20. MAILING</h2>
   <p>Le bouton <span class="btn">MAILING</span> ouvre un logiciel d'envoi groupé (newsletters, annonces). Chaque destinataire reçoit son propre mail. La liste peut venir d'un dossier du carnet d'adresses, d'un fichier CSV ou d'un fichier Excel.</p>
   <div class="note"><b>Conseil :</b> c'est <b>vous</b> qui déterminez la fréquence d'envoi (par exemple, 1 mail toutes les 30 secondes). Renseignez-vous auprès de votre fournisseur de messagerie sur les fréquences qu'il autorise. Les hébergeurs surveillent les envois en nombre : gardez un rythme raisonnable, et envoyez de préférence depuis votre connexion habituelle : un envoi en masse depuis une connexion inconnue (4G, chez un ami…) peut être bloqué par l'hébergeur.</div>
 </section>
 
 <section id="tel">
-  <h2>19. Téléphone : TÉL et SMS</h2>
-  <p><span class="btn">TÉL</span> affiche l'écran de votre téléphone sur le PC ; vous pouvez le piloter à la souris. <span class="btn">SMS</span> envoie des SMS par votre téléphone, avec votre forfait, un par un.</p>
+  <h2>21. Relier votre téléphone à Courrier Adrien</h2>
+  <p><i>Ce chapitre est un peu plus dense que les autres car nous avons tenu à vous expliquer au mieux tout le fonctionnement de cette liaison très pratique au quotidien. C'est dense et un peu long mais ne vous inquiétez pas ce n'est pas très compliqué.</i></p>
+  <p><span class="btn">TÉL</span> affiche l'écran de votre téléphone sur le PC ; vous pouvez le piloter à la souris. Une fois le téléphone relié, vous pouvez aussi envoyer des SMS (<a href="#sms">section 22</a>).</p>
   <div class="attention"><b>Android uniquement.</b> Les iPhone ne sont pas compatibles, car Apple ne permet pas à un PC de piloter un iPhone.</div>
   <h3>Relier le téléphone à l'ordinateur (une seule fois)</h3>
   <p>Il suffit de cliquer sur <span class="btn">TÉL</span>. Si aucun téléphone n'est encore associé, Courrier Adrien l'explique et propose <b>Associer un téléphone…</b> : un assistant vous guide pas à pas, <b>sans câble et sans ligne de commande</b> (Android 11 et plus).</p>
@@ -460,7 +550,7 @@
     <li><b>Le téléphone ne reconnaît plus l'ordinateur</b> : c'est ce qui arrive quand les Options de développement ont été coupées (certaines applis de banque l'exigent), car Android efface alors l'association. Cliquez sur <b>Rescanner le QR code</b> : 30 secondes suffisent.</li>
     <li><b>Téléphone branché en USB mais pas autorisé</b> : touchez <b>Autoriser</b> sur son écran, en cochant « Toujours autoriser depuis cet ordinateur ».</li>
   </ul>
-  <div class="note"><b>Astuce, fortement conseillée :</b> ajoutez la vignette du Débogage sans fil au volet rapide, pour le rallumer d'un geste. <i>Options de développement › Vignettes de développeur pour paramètres rapides</i> › activez <b>Débogage sans fil</b>.</div>
+  <div class="note"><b>Astuce, fortement conseillée :</b> ajoutez la vignette du Débogage sans fil au volet rapide, pour le rallumer d'un geste. <i>Options de développement › Vignettes de développeur (ou Mosaïques développeur raccourcis) pour paramètres rapides</i> › activez <b>Débogage sans fil</b>.</div>
 
   <h3>Rallumage automatique du Débogage sans fil (facultatif)</h3>
   <p>Pour ne plus avoir à le rallumer à la main, Courrier Adrien vous propose, après une première connexion réussie, de le faire <b>rallumer tout seul</b> quand le téléphone revient sur un Wi-Fi. Il s'appuie pour cela sur <b>Automate</b>, une appli gratuite et sans limite de durée (éditeur LlamaLab, Play Store). Une fenêtre vous guide en trois étapes, chacune avec son bouton :</p>
@@ -489,32 +579,35 @@
   <p>Pendant la recherche du téléphone, une petite fenêtre avec une barre de progression indique l'étape en cours ; elle se ferme dès que l'écran du téléphone apparaît.</p>
 
   <h3>Protéger le téléphone par un code (facultatif, conseillé)</h3>
-  <p>Si quelqu'un utilise votre ordinateur en votre absence, il pourrait afficher l'écran de votre téléphone (en direct s'il est déverrouillé : vos messages, à qui vous écrivez…) ou envoyer des SMS à votre place. Courrier Adrien vous propose donc, après une première connexion, de protéger l'affichage du téléphone et l'envoi de SMS par un <b>code propre à Courrier Adrien</b> : <b>Activer la protection</b> ou <b>Ne plus demander</b> (vous pourrez l'activer plus tard dans <span class="btn">⚙</span> › Réglages).</p>
+  <p><b>Nous vous conseillons d'activer le code de protection du téléphone dans Courrier Adrien, surtout si vous utilisez votre ordinateur dans un lieu public.</b></p>
+  <p><b>Comment ça marche ?</b> Si vous vous éloignez de votre ordinateur sans avoir activé le code et que vous restez dans la zone Wi-Fi de l'ordinateur avec votre téléphone, quelqu'un de mal intentionné pourrait utiliser votre ordinateur pour voir ce que vous faites sur votre téléphone, ou envoyer des SMS à votre place. Avec le code, c'est impossible : pensez seulement à fermer la fenêtre du téléphone avant de vous éloigner, car le code est demandé à son ouverture.</p>
+  <p>Courrier Adrien vous propose ce code (propre à Courrier Adrien) après une première connexion : <b>Activer la protection</b> ou <b>Ne plus demander</b> (vous pourrez l'activer plus tard dans <span class="btn">⚙</span> › Réglages).</p>
   <ul>
     <li>Le code est demandé <b>chaque fois que vous voulez ouvrir la fenêtre du téléphone</b> (TÉL, Afficher l'écran, SMS). Il n'est pas demandé si cette fenêtre est déjà ouverte : <b>fermez-la avant de vous absenter</b>.</li>
     <li>Activer, changer ou désactiver la protection à tout moment : <span class="btn">⚙</span> › Réglages › <b>Protection par code</b>.</li>
     <li><b>Code oublié ?</b> Il faut rescanner le QR code avec le téléphone (preuve que vous l'avez en main), puis choisir un nouveau code.</li>
     <li><b>Alerte sur le téléphone</b> : tant que son écran est affiché sur l'ordinateur, une notification « Courrier Adrien — L'écran de ce téléphone est affiché sur l'ordinateur » est présente dans le volet de notifications du téléphone (rangée sous « Shell »). Elle disparaît quand l'écran est fermé sur l'ordinateur. Si vous la voyez alors que vous n'êtes pas devant votre ordinateur, quelqu'un regarde votre téléphone. Désactivable dans <span class="btn">⚙</span> › Réglages.</li>
   </ul>
-  <div class="note"><b>Conseils :</b> en vous absentant, verrouillez aussi Windows (touches <b>Windows + L</b>). Sur le téléphone, masquez le contenu des messages sur l'écran de verrouillage, et méfiez-vous de « Smart Lock » (téléphone qui reste déverrouillé quand il est sur vous ou dans un lieu de confiance).</div>
-
   <h3>Quand le téléphone sert de modem (partage de connexion)</h3>
   <ul>
     <li><b>Partage de connexion par câble USB</b> : rien de particulier, le câble suffit. Activez le <b>Débogage USB</b> dans les Options de développement et touchez <b>Autoriser</b> sur le téléphone la première fois. Utilisez de préférence un câble <b>USB-A vers USB-C</b> (prise rectangulaire classique côté ordinateur) : avec certains ordinateurs, un câble USB-C vers USB-C ne permet ni la charge ni le partage de connexion.</li>
-    <li><b>Point d'accès Wi-Fi</b> : dans ce mode, Android coupe le Débogage sans fil (le téléphone n'est connecté à aucun Wi-Fi : c'est lui qui le diffuse). Courrier Adrien peut alors passer par une autre « porte » d'Android, s'il l'a ouverte auparavant. Cochez la case dans <span class="btn">⚙</span> › <b>Réglage du mode modem Wi-Fi</b> (elle vous est aussi proposée une fois, après une connexion réussie).</li>
+    <li><b>Point d'accès Wi-Fi</b> : dans ce mode, Android coupe le Débogage sans fil (le téléphone n'est connecté à aucun Wi-Fi : c'est lui qui le diffuse). Courrier Adrien peut alors utiliser une autre liaison d'Android, s'il l'a mise en place auparavant. Cochez la case dans <span class="btn">⚙</span> › <b>Réglage du mode modem Wi-Fi</b> (elle vous est aussi proposée une fois, après une connexion réussie).</li>
   </ul>
   <p>Avec cette option :</p>
   <ul>
     <li>en point d'accès, un clic sur <b>TÉL</b> trouve le téléphone tout seul, sans câble ;</li>
     <li>quand l'ordinateur se connecte au point d'accès du téléphone (ou au lancement de Courrier Adrien s'il y est déjà connecté), Courrier Adrien propose d'afficher l'écran du téléphone (<b>Afficher l'écran</b> / <b>Pas maintenant</b>). <b>Comptez une trentaine de secondes</b> avant que cette proposition apparaisse : Courrier Adrien vérifie toutes les 30 secondes. Elle n'est faite qu'une fois par connexion au point d'accès, et pas si l'écran du téléphone est déjà affiché ;</li>
-    <li>la porte s'ouvre lors d'une connexion normale (Wi-Fi de la maison ou câble USB), et reste ouverte <b>jusqu'au prochain redémarrage du téléphone</b> ;</li>
-    <li>après un redémarrage du téléphone, la porte est rouverte à la connexion suivante (clic sur <b>TÉL</b> à la maison). Si le téléphone a redémarré pendant que vous étiez dehors, en point d'accès, Courrier Adrien vous demande de le brancher une fois avec son câble USB : Android ne permet pas de rouvrir la porte autrement. Branchez-le : Courrier Adrien le détecte aussitôt, propose de rouvrir la porte, puis affiche l'écran du téléphone. Vous pouvez ensuite débrancher le câble.<br>
+    <li>la liaison se met en place lors d'une connexion normale (Wi-Fi de la maison ou câble USB), et reste possible <b>jusqu'au prochain redémarrage du téléphone</b> ;</li>
+    <li>après un redémarrage du téléphone, la liaison est rétablie à la connexion suivante (clic sur <b>TÉL</b> à la maison). Si le téléphone a redémarré pendant que vous étiez dehors, en point d'accès, Courrier Adrien vous demande de le brancher une fois avec son câble USB : Android ne permet pas de rétablir la liaison autrement. Branchez-le : Courrier Adrien le détecte aussitôt, propose de rétablir la liaison, puis affiche l'écran du téléphone. Vous pouvez ensuite débrancher le câble.<br>
       <small><b>Pourquoi le câble est obligatoire dans ce cas : c'est une mesure de sécurité d'Android.</b> Le point d'accès Wi-Fi relie bien l'ordinateur au téléphone, mais seulement pour Internet : après un redémarrage, Android n'accepte plus aucune commande par le Wi-Fi tant que vous n'avez pas fait un geste physique sur le téléphone (le brancher). Sinon, n'importe quel ordinateur connecté à votre point d'accès (une connexion prêtée dans un train, par exemple) pourrait tenter de piloter votre téléphone. Le câble ne sert qu'une fois par redémarrage, et uniquement si le téléphone n'est pas repassé par le Wi-Fi de la maison entre-temps.</small></li>
   </ul>
-  <p>Condition : le <b>Débogage USB</b> doit rester activé dans les Options de développement.</p>
-  <div class="attention"><b>Sécurité :</b> jusqu'au prochain redémarrage du téléphone, cette porte reste ouverte sur tous les réseaux (café, hôtel…). Seuls les ordinateurs que vous avez déjà autorisés peuvent l'utiliser : un inconnu ne ferait qu'afficher une demande d'autorisation sur votre écran (touchez « Refuser »). C'est pourquoi l'option est désactivée par défaut. Pour refermer la porte : redémarrez le téléphone, ou <span class="btn">⚙</span> › <b>Réglage du mode modem Wi-Fi</b> › <b>Refermer la porte maintenant</b>.</div>
+  <p><b>Pour que cela fonctionne</b>, laissez le <b>Débogage USB</b> activé dans les Options de développement : sans lui, Android arrête tout le débogage quand il coupe le Débogage sans fil, et la liaison se ferme.</p>
+  <p><b>Bon à savoir :</b> une fois en place, la possibilité de liaison reste active jusqu'au prochain redémarrage du téléphone, mais seuls les ordinateurs que vous avez déjà autorisés peuvent l'utiliser : toute tentative d'intrusion afficherait une demande d'autorisation sur votre téléphone, il suffirait de toucher « Refuser ». Si vous voulez néanmoins couper la liaison manuellement, allez dans <span class="btn">⚙</span> › <b>Réglage du mode modem Wi-Fi</b> › <b>Couper la liaison maintenant</b>, ou décochez <b>Débogage USB</b> dans les Options de développement, ou redémarrez votre téléphone.</p>
+</section>
 
-  <h3>Envoyer des SMS</h3>
+<section id="sms">
+  <h2>22. Utilisation des SMS</h2>
+  <p><span class="btn">SMS</span> envoie des SMS par votre téléphone, avec votre forfait, un par un. Le téléphone doit d'abord être relié à Courrier Adrien (<a href="#tel">section 21</a>).</p>
   <ul>
     <li>Choisissez les destinataires : dans le carnet (dossier entier ou contacts sélectionnés), ou depuis un fichier CSV ou Excel. Vous pouvez joindre des photos.</li>
     <li>Réglez l'intervalle entre deux SMS (20 secondes minimum). Les opérateurs bloquent une ligne qui envoie en rafale, c'est pourquoi Courrier Adrien est réglé par défaut sur <b>30 secondes</b> (45 secondes quand des photos sont jointes, car les MMS sont plus lents).</li>
@@ -525,19 +618,20 @@
   <p>L'envoi automatique a été testé avec l'application Messages de Samsung. Avec une autre application SMS ou un téléphone double SIM, il peut ne pas trouver le bouton Envoyer : rien n'est alors envoyé et l'envoi se met en pause.</p>
 </section>
 
+
 <section id="sons">
-  <h2>20. Sons</h2>
+  <h2>23. Sons</h2>
   <p>Le bouton <span class="btn">SONS</span> attribue un son de réception à chaque compte (<b>Fichier</b> pour le choisir, <b>▶ Lire</b> pour l'écouter, puis <b>Enregistrer</b>). Vous savez ainsi, sans regarder, quel compte vient de recevoir un mail.</p>
 </section>
 
 <section id="controle">
-  <h2>21. CONTRÔLE et CONSOLE</h2>
+  <h2>24. CONTRÔLE et CONSOLE</h2>
   <p><span class="btn">CONTRÔLE</span> montre ce que fait le logiciel, compte par compte : relèves en cours et à venir, nombre de mails et de dossiers, images qui n'ont pas pu être téléchargées. La liste de ces images peut être nettoyée (<b>Supprimer la sélection</b>, ou touche <kbd>Suppr</kbd>).</p>
   <p><span class="btn">CONSOLE</span> affiche le journal technique en direct. Il est utile pour comprendre un problème ou le signaler.</p>
 </section>
 
 <section id="raccourcis">
-  <h2>22. Raccourcis clavier</h2>
+  <h2>25. Raccourcis clavier</h2>
   <table>
     <tr><th>Touche</th><th>Effet</th></tr>
     <tr><th colspan="2">Dans la liste des mails et la rédaction</th></tr>
@@ -560,7 +654,7 @@
 </section>
 
 <section id="donnees">
-  <h2>23. Vos données, désinstallation</h2>
+  <h2>26. Vos données, désinstallation</h2>
   <p>Tout est stocké <b>uniquement sur votre PC</b>, dans le dossier suivant :</p>
   <p><code>%LOCALAPPDATA%\COURRIER</code></p>
   <p>Collez ce chemin dans la barre d'adresse de l'Explorateur Windows pour l'ouvrir. Il contient vos comptes, vos mails, vos modèles, vos macros, le carnet d'adresses, les sons et vos réglages.</p>
@@ -571,7 +665,7 @@
 </section>
 
 <section id="majs">
-  <h2>24. Mises à jour</h2>
+  <h2>27. Mises à jour</h2>
   <p>Courrier Adrien se met à jour <b>tout seul</b>. Vous n'avez rien à télécharger vous-même.</p>
   <ol>
     <li>Une vingtaine de secondes après le démarrage, il vérifie s'il existe une version plus récente.</li>
@@ -594,13 +688,11 @@
 </section>
 
 <section id="probleme">
-  <h2>25. En cas de problème</h2>
+  <h2>28. En cas de problème</h2>
   <ul>
     <li><b>Un mail s'affiche mal :</b> cliquez sur <span class="btn">RECHARGER</span> dans son bandeau.</li>
     <li><b>Un compte ne reçoit plus :</b> cliquez sur le petit rond gris devant son nom, puis regardez <span class="btn">CONTRÔLE</span>.</li>
-    <li><b>Un site ne s'affiche pas :</b> utilisez <span class="btn">INTERNET</span> ou le bouton « Page bloquée ».</li>
-    <li><b>Le cache d'un compte prend trop de place :</b> <span class="btn">COMPTES</span> › <b>Vider le cache HTML</b>. Les mails eux-mêmes sont conservés.</li>
-  </ul>
+    <li><b>Un site ne s'affiche pas :</b> utilisez <span class="btn">INTERNET</span> ou le bouton « Page bloquée ».</li>  </ul>
   <p>Pour signaler un bug, écrivez à <a href="mailto:adrienmel@gmail.com">adrienmel@gmail.com</a> en joignant si possible les fichiers <code>journal.txt</code>, <code>crash_traceback.txt</code> et <code>crash_natif.txt</code>, ainsi que le dossier <code>Logs</code>, tous situés dans <code>%LOCALAPPDATA%\COURRIER</code>.</p>
 </section>
 

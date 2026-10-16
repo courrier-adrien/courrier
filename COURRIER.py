@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-15 21h24"
+VERSION_BUILD = "2026-10-16 02h18"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4409,8 +4409,8 @@ def _chercher_telephone_bloquant(delai_wifi=2.5):
 # « Débogage USB » doit rester activé (sinon Android arrête adb quand le
 # Débogage sans fil se coupe). En mode modem, le téléphone est la
 # passerelle de l'ordinateur : COURRIER essaie alors <passerelle>:5555.
-# Testé le 15/10/2026 (S20+, Android 13, point d'accès « Wifiprive2 »,
-# passerelle 10.220.75.72). Option désactivée par défaut, clé
+# Testé le 15/10/2026 (S20+, Android 13, point d'accès du téléphone de
+# l'auteur). Option désactivée par défaut, clé
 # "modem_wifi" de telephone_associe.json : jusqu'au redémarrage, la porte
 # 5555 reste ouverte sur TOUS les réseaux (seuls les ordinateurs déjà
 # autorisés passent). L'essai de la passerelle, lui, est toujours fait
@@ -4479,7 +4479,7 @@ def _ouvrir_porte_modem(serie):
     if port == str(PORT_ADB_MODEM):
         return serie
     modele = next((m for s, m in _lire_appareils(_adb_bloquant("devices", "-l"))[0] if s == serie), "")
-    print(f"[TELEPHONE] ouverture de la porte du mode modem Wi-Fi ({serie})")
+    print(f"[TELEPHONE] mise en place de la liaison du mode modem Wi-Fi ({serie})")
     _adb_bloquant("-s", serie, "tcpip", str(PORT_ADB_MODEM), delai=15)
     fin = time.monotonic() + 20
     while time.monotonic() < fin:
@@ -4499,12 +4499,12 @@ def _refermer_porte_modem():
     Renvoie un message pour l'utilisateur. Bloquant."""
     appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
     if not appareils:
-        return ("Le téléphone n'est pas joignable en ce moment : impossible de refermer la "
-                "porte. Elle se refermera de toute façon au prochain redémarrage du téléphone.")
+        return ("Le téléphone n'est pas joignable en ce moment : impossible de couper la "
+                "liaison. Elle sera de toute façon coupée au prochain redémarrage du téléphone.")
     serie = appareils[0][0]
     _adb_bloquant("-s", serie, "usb", delai=15)
-    print(f"[TELEPHONE] porte du mode modem Wi-Fi refermée ({serie})")
-    return ("La porte du mode modem Wi-Fi est refermée. Le téléphone peut mettre quelques "
+    print(f"[TELEPHONE] liaison du mode modem Wi-Fi coupée ({serie})")
+    return ("La liaison du mode modem Wi-Fi est coupée. Le téléphone peut mettre quelques "
             "secondes à se reconnecter normalement.")
 
 
@@ -4606,8 +4606,8 @@ class DialogueCableModem(QDialog):
         self._serie = None
         self.serie_ecran = None  # porte rouverte : série par laquelle ouvrir l'écran
         texte = QLabel(f"L'ordinateur est relié au point d'accès de votre téléphone{nom}, mais la "
-                       f"porte du mode modem Wi-Fi est fermée : le téléphone a sans doute "
-                       f"redémarré.\n\nPour la rouvrir, branchez une fois le téléphone avec son "
+                       f"liaison du mode modem Wi-Fi est coupée : le téléphone a sans doute "
+                       f"redémarré.\n\nPour la rétablir, branchez une fois le téléphone avec son "
                        f"câble USB (Débogage USB activé).")
         texte.setWordWrap(True)
         texte.setFixedWidth(460)
@@ -4616,7 +4616,7 @@ class DialogueCableModem(QDialog):
         self.lbl_statut.setFixedWidth(460)
         self.barre = QProgressBar()
         self.barre.setTextVisible(False)
-        self.btn_ouvrir = QPushButton("Rouvrir la porte")
+        self.btn_ouvrir = QPushButton("Rétablir la liaison")
         self.btn_ouvrir.clicked.connect(self._ouvrir)
         self.btn_ouvrir.hide()
         self.btn_fermer = QPushButton("Pas maintenant")
@@ -4670,7 +4670,7 @@ class DialogueCableModem(QDialog):
             self._statut("Téléphone branché : touchez « Autoriser » sur son écran (en cochant "
                          "« Toujours autoriser depuis cet ordinateur »).", COULEUR_TEL_OK, animee=True)
         elif cas == "branche":
-            self._statut("Téléphone branché. Rouvrir la porte du mode modem Wi-Fi maintenant ? Le "
+            self._statut("Téléphone branché. Rétablir la liaison du mode modem Wi-Fi maintenant ? Le "
                          "téléphone pourra ensuite s'afficher sans câble, jusqu'à son prochain "
                          "redémarrage.", COULEUR_TEL_OK)
             self.btn_ouvrir.show()
@@ -4685,14 +4685,14 @@ class DialogueCableModem(QDialog):
                 self.serie_ecran = serie
                 self.accept()
             else:
-                self._statut("La porte n'a pas pu être rouverte : le téléphone ne répond plus. "
+                self._statut("La liaison n'a pas pu être rétablie : le téléphone ne répond plus. "
                              "Vérifiez le câble, puis réessayez avec le bouton TÉL.",
                              COULEUR_TEL_ERREUR)
 
     def _ouvrir(self):
         self.btn_ouvrir.hide()
         self.btn_fermer.setEnabled(False)
-        self._statut("Ouverture de la porte du mode modem Wi-Fi (quelques secondes)…", animee=True)
+        self._statut("Rétablissement de la liaison du mode modem Wi-Fi (quelques secondes)…", animee=True)
 
         def _travail():
             # Validé par l'utilisateur : maintenant seulement, adb démarre et
@@ -4808,22 +4808,22 @@ def surveiller_porte_modem(fenetre):
             return
         etat_global["fenetre"] = True
         boite = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
-                            f"Votre téléphone{nom} a redémarré : la porte du mode modem Wi-Fi "
-                            f"est fermée.\n\nLa rouvrir maintenant ? Le téléphone pourra ensuite "
+                            f"Votre téléphone{nom} a redémarré : la liaison du mode modem Wi-Fi "
+                            f"est coupée.\n\nLa rétablir maintenant ? Le téléphone pourra ensuite "
                             f"s'afficher sur l'ordinateur quand il sert de point d'accès, "
                             f"jusqu'à son prochain redémarrage.\n\n(Si l'écran du téléphone est "
                             f"affiché, il se fermera quelques secondes.)",
                             QMessageBox.NoButton, fenetre)
         boite.setStyleSheet(style_boites_telephone())
         boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        b_ouvrir = boite.addButton("Rouvrir la porte", QMessageBox.AcceptRole)
+        b_ouvrir = boite.addButton("Rétablir la liaison", QMessageBox.AcceptRole)
         boite.addButton("Pas maintenant", QMessageBox.RejectRole)
         boite.exec()
         if boite.clickedButton() is not b_ouvrir:
             _ecrire_telephone_associe(porte_refusee_boot=boot)
             etat_global["fenetre"] = False
             return
-        attente_telephone(fenetre, "Ouverture de la porte du mode modem Wi-Fi (quelques secondes)…")
+        attente_telephone(fenetre, "Rétablissement de la liaison du mode modem Wi-Fi (quelques secondes)…")
         relais_ouverture = _RelaisTelephone(fenetre)
 
         def _ouverte(nouvelle_serie):
@@ -4835,7 +4835,7 @@ def surveiller_porte_modem(fenetre):
                              "le bouton TÉL l'affichera sans câble, jusqu'à son prochain "
                              "redémarrage.\n\nSi le câble USB est branché, vous pouvez le "
                              "débrancher." if nouvelle_serie else
-                             "La porte n'a pas pu être rouverte : le téléphone ne répond plus. "
+                             "La liaison n'a pas pu être rétablie : le téléphone ne répond plus. "
                              "Réessayez avec le bouton TÉL.",
                              QMessageBox.Information if nouvelle_serie else None)
 
@@ -4849,7 +4849,7 @@ def surveiller_porte_modem(fenetre):
         try:
             etat = _etat_porte_modem()
         except Exception as exc:
-            print(f"[TELEPHONE] surveillance de la porte : {exc}")
+            print(f"[TELEPHONE] surveillance de la liaison : {exc}")
             etat = None
         try:
             relais.etat.emit(etat)
@@ -5012,20 +5012,22 @@ class DialogueModemWifi(QDialog):
     EXPLICATION = (
         "<p><b>Voir le téléphone quand il sert de modem Wi-Fi (point d'accès)</b></p>"
         "<p>Quand le téléphone partage sa connexion en Wi-Fi, Android coupe le Débogage sans "
-        "fil. COURRIER peut alors passer par une autre « porte » d'Android, qu'il ouvre "
+        "fil. COURRIER peut alors utiliser une autre liaison d'Android, qu'il met en place "
         "lui-même pendant une connexion normale.</p>"
         "<p><b>Conditions :</b><br>"
         "&nbsp;• <b>Débogage USB</b> activé dans les Options de développement ;<br>"
         "&nbsp;• avoir relié le téléphone <b>une fois depuis son dernier redémarrage</b>, sur "
-        "le Wi-Fi de la maison ou par câble USB : COURRIER ouvre alors la porte (l'écran du "
+        "le Wi-Fi de la maison ou par câble USB : COURRIER met alors la liaison en place (l'écran du "
         "téléphone peut se couper quelques secondes à ce moment-là, c'est normal).<br>"
         "En partage de connexion <b>par câble USB</b>, rien de tout cela n'est nécessaire : "
         "le câble suffit (avec le Débogage USB).</p>"
-        "<p><b>Sécurité :</b> jusqu'au prochain redémarrage du téléphone, cette porte reste "
-        "ouverte sur tous les réseaux (café, hôtel…). Seuls les ordinateurs que vous avez "
-        "déjà autorisés peuvent l'utiliser : un inconnu ne ferait qu'afficher une demande "
-        "d'autorisation sur votre écran (touchez « Refuser »). Pour la refermer : redémarrez "
-        "le téléphone, ou utilisez le bouton ci-dessous.</p>"
+        "<p><b>Bon à savoir :</b> une fois en place, la possibilité de liaison reste active "
+        "jusqu'au prochain redémarrage du téléphone, mais seuls les ordinateurs que vous "
+        "avez déjà autorisés peuvent l'utiliser : toute tentative d'intrusion afficherait "
+        "une demande d'autorisation sur votre téléphone, il suffirait de toucher « Refuser ». "
+        "Si vous voulez néanmoins couper la liaison, utilisez le bouton ci-dessous, ou "
+        "décochez « Débogage USB » dans les Options de développement, ou redémarrez votre "
+        "téléphone.</p>"
     )
 
     def __init__(self, parent=None):
@@ -5041,12 +5043,12 @@ class DialogueModemWifi(QDialog):
         texte.setTextFormat(Qt.RichText)
         texte.setWordWrap(True)
         texte.setFixedWidth(560)
-        self.case = QCheckBox("Ouvrir cette porte automatiquement (mode modem Wi-Fi)")
+        self.case = QCheckBox("Mettre en place cette liaison automatiquement (mode modem Wi-Fi)")
         self.case.setChecked(modem_wifi_active())
         self.lbl_statut = QLabel()
         self.lbl_statut.setWordWrap(True)
         self.lbl_statut.setFixedWidth(560)
-        self.btn_refermer = QPushButton("Refermer la porte maintenant")
+        self.btn_refermer = QPushButton("Couper la liaison maintenant")
         self.btn_refermer.clicked.connect(self._refermer)
         btn_ok = QPushButton("OK")
         btn_ok.clicked.connect(self._valider)
@@ -5092,8 +5094,8 @@ class DialogueModemWifi(QDialog):
 
     def _refermee(self, message):
         if self.case.isChecked():
-            message += (" Option toujours cochée : COURRIER la rouvrira à la prochaine "
-                        "connexion. Décochez-la pour qu'elle reste fermée.")
+            message += (" Option toujours cochée : COURRIER la rétablira à la prochaine "
+                        "connexion. Décochez l'option pour qu'elle reste coupée.")
         self.lbl_statut.setText(message)
         self.btn_refermer.setEnabled(True)
 
@@ -5270,8 +5272,8 @@ class DialogueTelephoneIntrouvable(QDialog):
                 "Ou branchez-le simplement en USB.<br><br>"
                 "<b>Le téléphone sert de modem Wi-Fi (point d'accès) ?</b> "
                 + ("Il a sans doute redémarré depuis la dernière connexion : reliez-le une "
-                   "fois par câble USB ou sur le Wi-Fi de la maison, COURRIER rouvrira la "
-                   "porte du mode modem.<br><br>" if modem_wifi_active() else
+                   "fois par câble USB ou sur le Wi-Fi de la maison, COURRIER rétablira la "
+                   "liaison du mode modem.<br><br>" if modem_wifi_active() else
                    "Voir le bouton « Mode modem… ».<br><br>")
                 + nouveau)
 
@@ -5489,13 +5491,16 @@ class DialogueProtectionCode(QDialog):
         self.setProperty("centrer_ecran", True)
         texte = QLabel(
             "<p><b>Protéger l'affichage du téléphone et l'envoi de SMS par un code</b></p>"
-            "<p>Si quelqu'un utilise cet ordinateur en votre absence, il pourrait afficher "
-            "l'écran de votre téléphone (en direct, s'il est déverrouillé : vos messages, à qui "
-            "vous écrivez…) ou envoyer des SMS à votre place.</p>"
-            "<p>Avec la protection, ce code (propre à Courrier Adrien) est demandé chaque fois "
-            "que vous voulez ouvrir la fenêtre du téléphone ou envoyer des SMS. Il n'est pas "
-            "demandé si la fenêtre du téléphone est déjà ouverte : <b>fermez-la avant de vous "
-            "absenter</b>.</p>"
+            # Texte sobre (15/10/2026, demandé) : conseillé surtout dans un lieu
+            # public, sans laisser croire que le téléphone avec COURRIER serait
+            # plus risqué que la normale
+            "<p>Conseillé surtout si vous utilisez votre ordinateur dans un lieu public.</p>"
+            "<p>Si vous vous éloignez de votre ordinateur en restant dans sa zone Wi-Fi avec "
+            "votre téléphone, quelqu'un pourrait utiliser l'ordinateur pour voir ce que vous "
+            "faites sur votre téléphone, ou envoyer des SMS à votre place. Avec le code, c'est "
+            "impossible : il est demandé chaque fois qu'on veut ouvrir la fenêtre du téléphone "
+            "ou envoyer des SMS. Pensez seulement à fermer la fenêtre du téléphone avant de "
+            "vous éloigner.</p>"
             "<p style='color:#aaaaaa'>Code oublié : il faudra rescanner le QR code avec le "
             "téléphone, preuve que vous l'avez en main.</p>")
         texte.setTextFormat(Qt.RichText)
@@ -5563,9 +5568,10 @@ def proposer_code_telephone(parent):
     from PySide6.QtWidgets import QMessageBox
     boite = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
                         "Protéger l'affichage du téléphone et l'envoi de SMS par un code ?\n\n"
-                        "Si quelqu'un utilise cet ordinateur en votre absence, il pourrait voir "
-                        "l'écran de votre téléphone en direct (vos messages, vos conversations) "
-                        "ou envoyer des SMS à votre place.\n\n"
+                        "Conseillé surtout si vous utilisez votre ordinateur dans un lieu public : "
+                        "si vous vous éloignez en restant dans sa zone Wi-Fi avec votre "
+                        "téléphone, personne ne pourra utiliser l'ordinateur pour voir ce que "
+                        "vous faites sur votre téléphone ou envoyer des SMS à votre place.\n\n"
                         "(« Ne plus demander » : vous pourrez l'activer à tout moment avec la "
                         "roue dentée ⚙ à droite de TÉL › Réglages.)",
                         QMessageBox.NoButton, parent)
@@ -6545,6 +6551,68 @@ def proposer_rallumage_auto(parent, serie):
     dialogue = DialogueRallumageAuto(parent, serie)
     dialogue.exec()
     dialogue.deleteLater()
+
+
+class FenetreModeEmploi(QDialog):
+    """Mode d'emploi dans une fenêtre de COURRIER (moteur de son navigateur
+    intégré, QtWebEngine), ouvert directement à une section. Non bloquante :
+    on peut la lire en gardant ouverte la fenêtre d'où elle est appelée
+    (ex. COMPTES, dont elle est l'enfant pour rester utilisable pendant que
+    COMPTES est ouverte)."""
+
+    def __init__(self, parent, chemin, section):
+        super().__init__(parent)
+        self.setWindowTitle("Mode d'emploi — Courrier Adrien")
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
+        self.setModal(False)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.resize(1000, 800)
+        vue = QWebEngineView(self)
+        url = QUrl.fromLocalFile(chemin)
+        url.setFragment(section)
+        vue.setUrl(url)
+        # « ◀ Retour » : un lien du mode d'emploi (Google, Yahoo...) s'ouvre
+        # dans cette même fenêtre ; ce bouton ramène au mode d'emploi
+        btn_retour = QPushButton("◀ Retour")
+        btn_retour.setStyleSheet(STYLE_BOUTON)
+        btn_retour.setEnabled(False)
+        btn_retour.clicked.connect(vue.back)
+        vue.urlChanged.connect(lambda _u: btn_retour.setEnabled(vue.history().canGoBack()))
+        barre = QHBoxLayout()
+        barre.setContentsMargins(6, 6, 6, 0)
+        barre.addWidget(btn_retour)
+        barre.addStretch()
+        self.setStyleSheet("QDialog { background-color: #2a2a2a; }")
+        disposition = QVBoxLayout(self)
+        disposition.setContentsMargins(0, 0, 0, 0)
+        disposition.addLayout(barre)
+        disposition.addWidget(vue)
+
+
+_fenetres_mode_emploi = []
+
+
+def ouvrir_mode_emploi_section(section, parent=None):
+    """Ouvre le mode d'emploi directement à une section (#section) —
+    15/10/2026, liens « mode d'emploi » des lignes d'aide de la fenêtre
+    COMPTES. Dans une fenêtre de COURRIER (demandé : « se servir du
+    navigateur de COURRIER, ce serait logique ») : le navigateur par défaut
+    de Windows perdait le « #section » d'un fichier local, et une page
+    relais de redirection restait blanche dans certains navigateurs."""
+    from PySide6.QtWidgets import QMessageBox
+    chemin = os.path.join(DOSSIER_APP, "MODE D'EMPLOI COURRIER ADRIEN.html")
+    if not os.path.isfile(chemin):
+        QMessageBox.warning(parent, "AIDE", f"Mode d'emploi introuvable :\n{chemin}")
+        return
+    fenetre = FenetreModeEmploi(parent, chemin, section)
+    # Garder une référence : sans fenêtre parente, Python la détruirait aussitôt
+    _fenetres_mode_emploi.append(fenetre)
+    fenetre.destroyed.connect(lambda *_: _fenetres_mode_emploi.remove(fenetre)
+                              if fenetre in _fenetres_mode_emploi else None)
+    fenetre.show()
+    fenetre.raise_()
+    fenetre.activateWindow()
 
 
 def arreter_liaison_telephone():
@@ -12567,12 +12635,56 @@ def extraire_message_id_eml(compte, dossier, uid):
         return ""
 
 
-LIMITE_MAILS_DOSSIER = 300  # Au-delà, les plus anciens sont supprimés automatiquement
+LIMITE_MAILS_DOSSIER = 300  # Corbeille par défaut : au-delà, les plus anciens sont supprimés
+
+# Limite réglable par dossier (16/10/2026, demandé) : case « Garder : tout /
+# N derniers » dans le bandeau du dossier, pour chaque Corbeille et chaque
+# dossier Envoyés de chaque compte. 0 = tout garder (aucune suppression).
+# Par défaut : 300 pour une Corbeille (comme avant) ; TOUT pour les
+# Envoyés (avant : 300 aussi, ce qui effaçait définitivement, serveur
+# compris, les mails envoyés plus anciens sans que l'utilisateur le sache).
+FICHIER_LIMITES_DOSSIERS = os.path.join(DOSSIER_APP, "limites_dossiers.json")
+LIMITE_DOSSIER_MIN = 50
+LIMITE_DOSSIER_MAX = 5000  # au-delà, l'ouverture du dossier ralentit nettement
+
+
+def _est_corbeille(dossier):
+    # « supprim » (16/10/2026) : la corbeille Outlook s'appelle « Éléments
+    # supprimés » — jusqu'ici ni reconnue, ni réglable, ni purgée
+    d = (dossier or "").lower()
+    return any(m in d for m in ("trash", "corbeille", "deleted", "supprim"))
+
+
+def limite_dossier(adresse, dossier):
+    """Nombre de mails gardés dans ce dossier (0 = tout garder)."""
+    try:
+        with open(FICHIER_LIMITES_DOSSIERS, encoding="utf-8") as f:
+            valeur = json.load(f).get(adresse, {}).get(dossier)
+        if isinstance(valeur, int):
+            return valeur
+    except (OSError, ValueError, AttributeError):
+        pass
+    return LIMITE_MAILS_DOSSIER if _est_corbeille(dossier) else 0
+
+
+def enregistrer_limite_dossier(adresse, dossier, valeur):
+    try:
+        with open(FICHIER_LIMITES_DOSSIERS, encoding="utf-8") as f:
+            donnees = json.load(f)
+    except (OSError, ValueError):
+        donnees = {}
+    donnees.setdefault(adresse, {})[dossier] = int(valeur)
+    try:
+        with open(FICHIER_LIMITES_DOSSIERS, "w", encoding="utf-8") as f:
+            json.dump(donnees, f, ensure_ascii=False, indent=1)
+    except OSError as exc:
+        print(f"[PURGE] limite non enregistrée : {exc}")
+
 
 def _est_dossier_a_purger(dossier):
     """Retourne True si le dossier est une corbeille ou un envoyés."""
     d = dossier.lower()
-    mots = ["trash", "corbeille", "deleted", "sent", "envoy", "envoyes", "envoié"]
+    mots = ["trash", "corbeille", "deleted", "supprim", "sent", "envoy", "envoyes", "envoié"]
     return any(m in d for m in mots)
 
 class PurgeurDossier(QThread):
@@ -12590,35 +12702,53 @@ class PurgeurDossier(QThread):
     de veille) suffisait à les rendre invisibles pour de bon dans COURRIER
     tout en les laissant bien présents côté serveur."""
     termine = Signal(bool)
+    # Avancement (16/10/2026, demandé par l'auteur : le ménage doit se voir,
+    # pour TOUS les comptes) : id supprimés dans ce paquet, total supprimé,
+    # total à supprimer. L'affichage les retire un par un (_depiler_purge).
+    avance = Signal(list, int, int)
 
-    def __init__(self, compte, dossier_imap, uids_a_supprimer):
+    def __init__(self, compte, dossier_imap, uids_a_supprimer, limite=0):
         super().__init__()
         self.compte = compte
         self.dossier_imap = dossier_imap
         self.uids_a_supprimer = uids_a_supprimer  # liste de str/bytes, les plus anciens
+        self.limite = limite  # nombre de mails gardés (pour le bilan à l'écran)
 
     def run(self):
+        # Par paquets de 20 (16/10/2026) : chaque paquet est réellement
+        # supprimé (expunge) avant d'être annoncé à l'affichage ; en fin de
+        # course, self.uids_a_supprimer ne contient plus que les mails
+        # vraiment supprimés (une coupure en cours de route n'en masque aucun)
         conn = None
-        succes = False
+        tous = list(self.uids_a_supprimer)
+        supprimes = []
+        erreur = False
         try:
             conn = connexion_imap(self.compte)
             conn = _authentifier_connexion_imap(conn, self.compte)
             conn.select(f'"{self.dossier_imap}"')
-            for uid in self.uids_a_supprimer:
-                try:
-                    uid_arg = uid if isinstance(uid, bytes) else str(uid).encode()
-                    conn.uid('store', uid_arg, "+FLAGS", "\\Deleted")
-                except Exception:
-                    pass
-            conn.expunge()
-            succes = True
-        except Exception:
-            pass
+            self.avance.emit([], 0, len(tous))
+            for k in range(0, len(tous), 20):
+                paquet = tous[k:k + 20]
+                for uid in paquet:
+                    try:
+                        uid_arg = uid if isinstance(uid, bytes) else str(uid).encode()
+                        conn.uid('store', uid_arg, "+FLAGS", "\\Deleted")
+                    except Exception:
+                        pass
+                conn.expunge()
+                supprimes.extend(paquet)
+                self.avance.emit([u.decode() if isinstance(u, bytes) else str(u) for u in paquet],
+                                 len(supprimes), len(tous))
+        except Exception as e:
+            print(f"[PURGE] {self.compte.get('adresse', '?')} {self.dossier_imap} : {e}")
+            erreur = True
         finally:
             fermer_connexion_imap(conn)
-            if succes:
+            self.uids_a_supprimer = supprimes
+            if supprimes:
                 self._nettoyer_cache()
-            self.termine.emit(succes)
+            self.termine.emit(not erreur)
 
     def _nettoyer_cache(self):
         """Supprime .eml, .html, .reply et l'entrée _meta.json pour chaque uid purgé."""
@@ -12642,6 +12772,122 @@ class PurgeurDossier(QThread):
                 sauvegarder_cache_meta(self.compte, self.dossier_imap, meta)
         except Exception:
             pass
+
+
+class PurgeurDossierGraph(PurgeurDossier):
+    """Équivalent Microsoft Graph de PurgeurDossier (16/10/2026, remonté par
+    l'auteur : « je ne suis jamais arrivé à supprimer les envoyés chez
+    Outlook, ils revenaient toujours »). PurgeurDossier passe par IMAP, or
+    _authentifier_connexion_imap refuse tout IMAP pour un compte Graph : la
+    purge échouait à chaque ouverture du dossier ([PURGE-DEBUG] « échec de
+    la purge automatique », journaux des 07 et 16/10/2026) et rien n'était
+    jamais supprimé chez Microsoft.
+
+    Ici, c'est le SERVEUR qui décide quels mails sont les plus anciens : les
+    id Graph ne sont pas des numéros croissants (pas d'ordre d'arrivée comme
+    les UID IMAP). Liste triée du plus récent au plus ancien :
+      - Corbeille : receivedDateTime (date du mail). Le 16/10/2026, un
+        premier essai par lastModifiedDateTime (« date de mise à la
+        corbeille ») a supprimé 966 mails de 2016-2026 en gardant ceux de
+        2015 : Outlook change cette date à chaque modification (lu/non lu,
+        synchronisation...), elle ne dit rien de l'arrivée dans la
+        corbeille. Graph n'offre aucun ordre d'arrivée fiable (pas d'UID
+        comme IMAP) : la date du mail, celle que l'on voit dans la liste,
+        est le seul critère sûr ;
+      - Envoyés : sentDateTime.
+    On garde les `limite` premiers, les autres sont supprimés définitivement
+    (DELETE /me/messages/{id}, comme SupprimeurMessagesGraph dans la
+    corbeille). self.uids_a_supprimer est remplacé par les id RÉELLEMENT
+    supprimés, pour que l'appelant ne retire de l'affichage que ceux-là."""
+
+    def __init__(self, compte, dossier_imap, limite, est_corbeille):
+        super().__init__(compte, dossier_imap, [], limite)
+        self.est_corbeille = est_corbeille
+
+    def _supprimer_paquet(self, ids):
+        """Supprime jusqu'à 20 mails en UN appel (POST /$batch, limite
+        Microsoft) au lieu d'un appel par mail (~1 mail/s, 30 min pour
+        1 800 mails au premier essai du 16/10/2026). Retourne les id
+        réellement supprimés (204, ou 404 = déjà absent du serveur) ;
+        les refus pour surcharge (429) sont retentés une fois."""
+        import time as _time
+        ok, a_faire = [], list(ids)
+        for _essai in range(2):
+            corps = {"requests": [
+                {"id": str(n), "method": "DELETE", "url": f"/me/messages/{uid}",
+                 "headers": {"Prefer": 'IdType="ImmutableId"'}}
+                for n, uid in enumerate(a_faire)]}
+            rep = _appel_graph(self.compte, "POST", "/$batch", corps=corps, timeout=60)
+            refaire, attente = [], 0
+            for r in (rep or {}).get("responses", []):
+                uid = a_faire[int(r.get("id", -1))]
+                statut = r.get("status", 0)
+                if statut in (200, 204, 404):
+                    ok.append(uid)
+                elif statut == 429:
+                    refaire.append(uid)
+                    try:
+                        attente = max(attente, float((r.get("headers") or {}).get("Retry-After", 5)))
+                    except (TypeError, ValueError):
+                        attente = max(attente, 5)
+                else:
+                    print(f"[PURGE-GRAPH] échec {statut} pour {uid}")
+            if not refaire:
+                break
+            _time.sleep(min(attente or 5, 30))
+            a_faire = refaire
+        return ok
+
+    def _ids_du_plus_recent(self, tri):
+        ids = []
+        while True:
+            rep = _appel_graph(self.compte, "GET",
+                               f"/me/mailFolders/{self.dossier_imap}/messages",
+                               params={"$select": "id", "$orderby": f"{tri} desc",
+                                       "$top": 500, "$skip": len(ids)}, timeout=30)
+            lot = [m["id"] for m in (rep or {}).get("value", [])]
+            ids.extend(lot)
+            if len(lot) < 500:
+                return ids
+
+    def run(self):
+        supprimes = []
+        erreur = False
+        try:
+            tris = (["receivedDateTime"] if self.est_corbeille
+                    else ["sentDateTime", "receivedDateTime"])
+            ids = None
+            for tri in tris:
+                try:
+                    ids = self._ids_du_plus_recent(tri)
+                    break
+                except Exception as e:
+                    print(f"[PURGE-GRAPH] tri {tri} refusé : {e}")
+            erreur = ids is None
+            if ids is not None and len(ids) > self.limite:
+                a_suppr = ids[self.limite:]
+                self.avance.emit([], 0, len(a_suppr))
+                for k in range(0, len(a_suppr), 20):
+                    try:
+                        paquet = self._supprimer_paquet(a_suppr[k:k + 20])
+                    except Exception as e:
+                        print(f"[PURGE-GRAPH] échec d'un paquet : {e}")
+                        paquet = []
+                    supprimes.extend(paquet)
+                    self.avance.emit(paquet, len(supprimes), len(a_suppr))
+                print(f"[PURGE-GRAPH] {self.compte.get('adresse', '?')} : "
+                      f"{len(supprimes)}/{len(ids) - self.limite} mail(s) supprimé(s) "
+                      f"(garder {self.limite} sur {len(ids)})")
+                erreur = not supprimes
+        except Exception as e:
+            print(f"[PURGE-GRAPH] {self.compte.get('adresse', '?')} : {e}")
+            erreur = True
+        self.uids_a_supprimer = supprimes
+        if supprimes:
+            self._nettoyer_cache()
+        # Rien à supprimer (le serveur est déjà à la limite, alors que la
+        # liste locale la dépasse encore un instant) n'est pas un échec
+        self.termine.emit(not erreur)
 
 class SupprimeurMessages(QThread):
     """Effectue la suppression IMAP (copie vers corbeille + flag Deleted + expunge)
@@ -14061,7 +14307,12 @@ class ChargeurMessages(QThread):
             # Purge automatique corbeille/envoyés : supprimer les plus anciens
             # directement sur le serveur si le dossier dépasse LIMITE_MAILS_DOSSIER
             est_a_purger = _est_dossier_a_purger(self.dossier)
-            if est_a_purger and len(ids) > LIMITE_MAILS_DOSSIER:
+            # Désactivé le 16/10/2026 : cette purge se faisait en silence, avant
+            # même l'affichage de la liste. Le ménage est désormais fait juste
+            # après, par ClientMail._lancer_purge_auto : le même pour tous les
+            # comptes (IMAP et Outlook), visible (décompte un par un, bilan).
+            limite = 0
+            if est_a_purger and limite and len(ids) > limite:
                 # BUG CORRIGÉ le 17/08/2026 (remonté par l'utilisateur, avec
                 # logs : une quinzaine de mails supprimés — certains depuis
                 # le téléphone, d'autres depuis COURRIER — invisibles dans
@@ -14081,7 +14332,7 @@ class ChargeurMessages(QThread):
                 # en cas d'échec, rien n'est masqué, tout reste visible
                 # dans COURRIER comme sur le serveur, quitte à réessayer
                 # la purge au prochain chargement de ce dossier.
-                uids_a_suppr = ids[:-LIMITE_MAILS_DOSSIER]
+                uids_a_suppr = ids[:-limite]
                 purge_reussie = False
                 try:
                     conn_purge = connexion_imap(self.compte)
@@ -14118,7 +14369,7 @@ class ChargeurMessages(QThread):
                           f"échec de la purge automatique ({e}) — rien masqué, "
                           f"nouvel essai au prochain chargement de ce dossier")
                 if purge_reussie:
-                    ids = ids[-LIMITE_MAILS_DOSSIER:]
+                    ids = ids[-limite:]
             ids = ids[::-1]  # plus récent en premier
 
             ids_str = [u.decode() if isinstance(u, bytes) else str(u) for u in ids]
@@ -26603,7 +26854,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 15/10/2026 21h24")
+        self.setWindowTitle("COURRIER ADRIEN — 16/10/2026 02h18")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -27902,7 +28153,70 @@ class ClientMail(QMainWindow):
         self.lbl_messages = QLabel("  Messages")
         self.lbl_messages.setFixedHeight(28)
         self.lbl_messages.setStyleSheet("background-color: #1a1a1a; color: #aaaaaa; font-family: Verdana; font-size: 11px; font-weight: bold;")
-        layout_messages.addWidget(self.lbl_messages)
+        # Réglage « Garder » à droite du bandeau (16/10/2026), visible
+        # seulement sur une Corbeille ou un dossier Envoyés. D'abord une case
+        # à flèches : chaque cran (300, 250, 200...) était enregistré aussitôt
+        # et pouvait déclencher une suppression au prochain rafraîchissement
+        # (dangereux, remonté par l'auteur). Désormais : menu « TOUT » / « les
+        # derniers » + champ nombre (50 à 5 000), appliqué seulement une fois
+        # la saisie validée, avec confirmation s'il entraîne des suppressions.
+        from PySide6.QtGui import QIntValidator
+        bandeau_messages = QWidget()
+        bandeau_messages.setFixedHeight(28)
+        bandeau_messages.setStyleSheet("background-color: #1a1a1a;")
+        lay_bandeau = QHBoxLayout(bandeau_messages)
+        lay_bandeau.setContentsMargins(0, 0, 4, 0)
+        lay_bandeau.setSpacing(4)
+        lay_bandeau.addWidget(self.lbl_messages, 1)
+        style_champ = ("background-color: #2a2a2a; color: white; border: 1px solid #5a5a5a; "
+                       "font-family: Verdana; font-size: 11px; padding: 1px 3px;")
+        self.lbl_limite_dossier = QLabel("Garder :")
+        self.lbl_limite_dossier.setStyleSheet("color: #aaaaaa; font-family: Verdana; font-size: 11px;")
+        self.combo_limite_dossier = QComboBox()
+        self.combo_limite_dossier.addItems(["TOUT", "les derniers"])
+        self.combo_limite_dossier.setFixedWidth(105)
+        self.combo_limite_dossier.setStyleSheet(
+            f"QComboBox {{ {style_champ} }} "
+            "QComboBox QAbstractItemView { background-color: #2a2a2a; color: white; "
+            "selection-background-color: #A52A2A; }")
+        self.champ_limite_dossier = QLineEdit()
+        self.champ_limite_dossier.setValidator(QIntValidator(0, LIMITE_DOSSIER_MAX, self))
+        self.champ_limite_dossier.setFixedWidth(50)
+        self.champ_limite_dossier.setStyleSheet(f"QLineEdit {{ {style_champ} }}")
+        bulle = ("Nombre de mails gardés dans ce dossier. Au-delà, les plus anciens sont\n"
+                 "supprimés définitivement (aussi sur le serveur) à la prochaine ouverture\n"
+                 "du dossier. « TOUT » : rien n'est jamais supprimé automatiquement.\n"
+                 f"Nombre : de {LIMITE_DOSSIER_MIN} à {LIMITE_DOSSIER_MAX}, validé par Entrée ou OK.")
+        # Sur une petite ligne SOUS le bandeau (16/10/2026, demandé) : à côté
+        # du nom, il coupait le nom du dossier (« Éléments envoyés ») dans
+        # une colonne étroite. La ligne n'apparaît que sur une Corbeille ou
+        # un dossier Envoyés.
+        self.barre_garder = QWidget()
+        self.barre_garder.setFixedHeight(28)
+        self.barre_garder.setStyleSheet("background-color: #1a1a1a;")
+        lay_garder = QHBoxLayout(self.barre_garder)
+        lay_garder.setContentsMargins(8, 0, 4, 2)
+        lay_garder.setSpacing(4)
+        # Bouton « OK » : avec Entrée, SEUL moyen de valider le nombre
+        # (16/10/2026, remonté par l'auteur : la validation au départ du
+        # curseur se déclenchait dès le choix « les derniers », quand le
+        # menu se refermait, avant même qu'on puisse taper un nombre)
+        self.btn_limite_dossier = QPushButton("OK")
+        self.btn_limite_dossier.setStyleSheet(STYLE_BOUTON.replace("padding: 5px 12px", "padding: 2px 8px"))
+        for w in (self.lbl_limite_dossier, self.combo_limite_dossier, self.champ_limite_dossier,
+                  self.btn_limite_dossier):
+            w.setToolTip(bulle)
+            lay_garder.addWidget(w)
+        lay_garder.addStretch()
+        self.champ_limite_dossier.hide()
+        self.btn_limite_dossier.hide()
+        self.barre_garder.hide()
+        self._limite_en_cours = False
+        self.combo_limite_dossier.activated.connect(self._choix_limite_dossier)
+        self.champ_limite_dossier.returnPressed.connect(self._nombre_limite_dossier)
+        self.btn_limite_dossier.clicked.connect(self._nombre_limite_dossier)
+        layout_messages.addWidget(bandeau_messages)
+        layout_messages.addWidget(self.barre_garder)
         self.liste_messages = ListeMessages()
         self.liste_messages.drag_termine.connect(self._apres_drag_liste)
         self.liste_messages.currentItemChanged.connect(self.on_message_change)
@@ -31506,7 +31820,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 15/10/2026 à 21h24")
+        lbl_version = QLabel("Version du 16/10/2026 à 02h18")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -32115,6 +32429,108 @@ if (typeof module === 'object') {
             texte = f"  {nom_dossier}"
         self.lbl_messages.setText(texte)
         self._maj_visibilite_bouton_non_spam()
+        # Réglage « Garder » : seulement pour une Corbeille ou un dossier Envoyés
+        if hasattr(self, "combo_limite_dossier"):
+            visible = bool(self.compte_actif and self.dossier_actif
+                           and not getattr(self, '_filtre_actif', None)
+                           and _est_dossier_a_purger(self.dossier_actif))
+            self.barre_garder.setVisible(visible)
+            if visible:
+                self._afficher_limite_dossier()
+
+    def _limite_dossier_actif(self):
+        """Limite du dossier affiché (0 = tout garder)."""
+        if not self.compte_actif or not self.dossier_actif:
+            return 0
+        return limite_dossier(self.compte_actif.get("adresse", ""), self.dossier_actif)
+
+    def _afficher_limite_dossier(self, valeur=None):
+        """Affiche dans le bandeau le réglage enregistré (ou `valeur`)."""
+        if valeur is None:
+            valeur = self._limite_dossier_actif()
+        self.combo_limite_dossier.setCurrentIndex(0 if valeur == 0 else 1)
+        self.champ_limite_dossier.setText(str(valeur) if valeur else "")
+        self.champ_limite_dossier.setVisible(valeur != 0)
+        self.btn_limite_dossier.setVisible(valeur != 0)
+
+    def _choix_limite_dossier(self, index):
+        """Menu « TOUT » / « les derniers » choisi par l'utilisateur."""
+        if index == 0:
+            if not self._appliquer_limite_dossier(0):
+                self._afficher_limite_dossier()
+            else:
+                self.champ_limite_dossier.hide()
+                self.btn_limite_dossier.hide()
+            return
+        # « les derniers » : rien n'est appliqué tant que le nombre n'est pas
+        # validé par Entrée ou « OK »
+        actuelle = self._limite_dossier_actif()
+        self.champ_limite_dossier.setText(str(actuelle or LIMITE_MAILS_DOSSIER))
+        self.champ_limite_dossier.show()
+        self.btn_limite_dossier.show()
+
+        def _curseur():
+            # Après la fermeture du menu (sinon il reprendrait le curseur)
+            self.champ_limite_dossier.setFocus()
+            self.champ_limite_dossier.selectAll()
+        QTimer.singleShot(0, _curseur)
+
+    def _nombre_limite_dossier(self):
+        """Nombre validé (Entrée ou bouton « OK ») : contrôlé, puis appliqué."""
+        from PySide6.QtWidgets import QMessageBox
+        if self._limite_en_cours or not self.champ_limite_dossier.isVisible():
+            return
+        texte = self.champ_limite_dossier.text().strip()
+        try:
+            valeur = int(texte)
+        except ValueError:
+            valeur = -1
+        if not LIMITE_DOSSIER_MIN <= valeur <= LIMITE_DOSSIER_MAX:
+            self._limite_en_cours = True
+            boite = QMessageBox(QMessageBox.Warning, "Garder",
+                                f"Le nombre doit être compris entre {LIMITE_DOSSIER_MIN} et "
+                                f"{LIMITE_DOSSIER_MAX}. Le réglage précédent est conservé.",
+                                QMessageBox.Ok, self)
+            boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                                "QLabel { color: white; }" + STYLE_BOUTON)
+            boite.exec()
+            self._limite_en_cours = False
+            self._afficher_limite_dossier()
+            return
+        if not self._appliquer_limite_dossier(valeur):
+            self._afficher_limite_dossier()
+
+    def _appliquer_limite_dossier(self, valeur):
+        """Enregistre la limite de ce dossier ; demande confirmation si elle
+        entraîne la suppression définitive de mails. True si appliquée."""
+        from PySide6.QtWidgets import QMessageBox
+        if not self.compte_actif or not self.dossier_actif:
+            return False
+        if valeur == self._limite_dossier_actif():
+            return True
+        nb = len(getattr(self, "messages", None) or [])
+        if valeur and nb > valeur:
+            self._limite_en_cours = True
+            boite = QMessageBox(QMessageBox.Question, "Garder",
+                                f"Garder seulement les {valeur} derniers mails de ce dossier ?\n\n"
+                                f"Les {nb - valeur} mails les plus anciens seront supprimés "
+                                f"définitivement, aussi sur le serveur.",
+                                QMessageBox.NoButton, self)
+            boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
+                                "QLabel { color: white; }" + STYLE_BOUTON)
+            b_oui = boite.addButton("Supprimer les plus anciens", QMessageBox.AcceptRole)
+            boite.addButton("Annuler", QMessageBox.RejectRole)
+            boite.exec()
+            self._limite_en_cours = False
+            if boite.clickedButton() is not b_oui:
+                return False
+        enregistrer_limite_dossier(self.compte_actif.get("adresse", ""), self.dossier_actif, valeur)
+        print(f"[PURGE] {self.compte_actif.get('adresse', '?')} {self.dossier_actif} : "
+              f"garder {'tout' if valeur == 0 else valeur}")
+        if valeur:
+            # Ménage tout de suite, sans attendre la prochaine ouverture du dossier
+            QTimer.singleShot(0, lambda: self._lancer_purge_auto(getattr(self, "messages", None) or []))
+        return True
 
     def on_dossier_change(self, item, ancien=None):
         if not item:
@@ -32701,7 +33117,7 @@ if (typeof module === 'object') {
         if (_sel_ok
                 and not self._filtre_actif and not self._items_sauvegardes
                 and not (_est_dossier_a_purger(self.dossier_actif)
-                         and len(messages) > LIMITE_MAILS_DOSSIER)
+                         and 0 < self._limite_dossier_actif() < len(messages))
                 and self._liste_affichee_identique(messages)):
             print(f"[REBUILD-DEBUG] {_ts_rebuild} {self.dossier_actif} : liste déjà à "
                   f"jour ({len(messages)} mail(s)) -> reconstruction ignorée")
@@ -33041,8 +33457,18 @@ if (typeof module === 'object') {
             if _faut_restaurer_scroll:
                 self.liste_messages.verticalScrollBar().setValue(_scroll_valeur_avant)
 
-        # Purge automatique : corbeille et envoyés limités à LIMITE_MAILS_DOSSIER
-        if _est_dossier_a_purger(self.dossier_actif) and len(messages) > LIMITE_MAILS_DOSSIER:
+        self._lancer_purge_auto(messages)
+
+    def _lancer_purge_auto(self, messages):
+        """Ménage automatique du dossier affiché, selon son réglage « Garder ».
+        Appelé à chaque chargement de la liste, et aussitôt après un nouveau
+        réglage confirmé (16/10/2026, remonté par l'auteur : « Garder 1500 »
+        validé, mais la liste restait à 1 966 jusqu'à la prochaine ouverture
+        du dossier)."""
+        # Purge automatique : corbeille et envoyés limités au réglage du
+        # dossier (case « Garder », 16/10/2026 ; 0 = tout garder)
+        _limite = self._limite_dossier_actif() if _est_dossier_a_purger(self.dossier_actif) else 0
+        if _limite and len(messages) > _limite:
             # Bug trouvé le 17/08/2026 (remonté par l'utilisateur : 2 mails
             # supprimés dans COURRIER disparaissaient peu après, alors que
             # la suppression elle-même était confirmée réussie côté
@@ -33064,51 +33490,138 @@ if (typeof module === 'object') {
             # l'UID du mail dans la corbeille (ordre d'arrivée garanti par
             # IMAP, universel quelle que soit l'origine de la suppression)
             # remplace la date de suppression pour départager qui garder.
-            dossier_lower = (self.dossier_actif or "").lower()
-            est_corbeille = "trash" in dossier_lower or "corbeille" in dossier_lower or "deleted" in dossier_lower
+            #
+            # Décidé par l'auteur le 16/10/2026 : pour TOUS les comptes et
+            # TOUS ces dossiers (Corbeille comme Envoyés), ce sont les plus
+            # anciens PAR DATE DU MAIL qui partent — ceux que l'on voit en bas
+            # de la liste. L'ordre d'arrivée dans la corbeille (UID, ci-dessus)
+            # n'existe pas chez Outlook, et son équivalent supposé y a supprimé
+            # les mauvais mails : une seule règle, la même partout. Un mail à
+            # la date illisible compte comme récent (jamais supprimé à tort).
+            est_corbeille = _est_corbeille(self.dossier_actif)
+            from email.utils import parsedate_to_datetime as _ptd
+
             def _cle_purge(m):
-                u = m["uid"]
-                u = u.decode() if isinstance(u, bytes) else str(u)
                 try:
-                    return -int(u)
-                except ValueError:
-                    return 0
-            if est_corbeille:
-                messages_pour_purge = sorted(messages, key=_cle_purge)
-            else:
-                messages_pour_purge = messages
-            # messages_pour_purge est trié du plus récent au plus ancien (au
-            # sens pertinent pour ce dossier) — on garde les 300 premiers
-            a_supprimer = [m["uid"] for m in messages_pour_purge[LIMITE_MAILS_DOSSIER:]]
+                    return -_ptd(m.get("date", "")).timestamp()
+                except Exception:
+                    return float("-inf")
+            messages_pour_purge = sorted(messages, key=_cle_purge)
+            # messages_pour_purge est trié du plus récent au plus ancien :
+            # on garde les _limite premiers
+            a_supprimer = [m["uid"] for m in messages_pour_purge[_limite:]]
             dossier_imap = self._nom_imap(self.dossier_actif)
-            purgeur = PurgeurDossier(self.compte_actif, dossier_imap, a_supprimer)
             if not hasattr(self, '_purgeurs_en_cours'):
                 self._purgeurs_en_cours = []
+            # Une purge déjà en cours sur ce dossier : ne pas en relancer une
+            # seconde à chaque rafraîchissement de la liste (16/10/2026)
+            if any(p.compte is self.compte_actif and p.dossier_imap == dossier_imap
+                   for p in self._purgeurs_en_cours):
+                return
+            if self.compte_actif.get("protocole") == "graph":
+                # Compte Microsoft : pas d'IMAP, tri fait par le serveur
+                # (voir PurgeurDossierGraph, 16/10/2026)
+                purgeur = PurgeurDossierGraph(self.compte_actif, dossier_imap, _limite, est_corbeille)
+            else:
+                purgeur = PurgeurDossier(self.compte_actif, dossier_imap, a_supprimer, _limite)
             self._purgeurs_en_cours.append(purgeur)
             # Retrait de l'affichage repoussé APRÈS confirmation de succès
             # (17/08/2026, voir le commentaire détaillé sur PurgeurDossier
             # ci-dessus) — plus de retrait optimiste avant de savoir si la
             # suppression a vraiment eu lieu.
-            def _on_purge_termine(succes, p=purgeur, uids_purges_tentative=a_supprimer):
+            def _on_purge_termine(succes, p=purgeur):
+                # Les mails réellement supprimés ont déjà été retirés un à un
+                # de l'affichage (_avance_purge / _depiler_purge) ; le bilan
+                # s'affiche quand ce défilement est terminé (tous comptes,
+                # 16/10/2026). En cas d'échec, rien d'autre n'est masqué.
                 if p in self._purgeurs_en_cours:
                     self._purgeurs_en_cours.remove(p)
+                p.fini = True
+                self._depiler_purge()
                 if not succes:
-                    print(f"[PURGE-DEBUG] {self.compte_actif.get('adresse','?')} "
-                          f"{self.dossier_actif} : échec de la purge automatique — "
-                          f"rien masqué, nouvel essai au prochain chargement de ce dossier")
-                    return
-                uid_purges = set(str(u.decode() if isinstance(u, bytes) else u) for u in uids_purges_tentative)
-                self.messages = [m for m in self.messages if str(m["uid"].decode() if isinstance(m["uid"], bytes) else m["uid"]) not in uid_purges]
+                    print(f"[PURGE-DEBUG] {p.compte.get('adresse','?')} {p.dossier_imap} : "
+                          f"échec de la purge automatique — {len(p.uids_a_supprimer)} mail(s) "
+                          f"supprimé(s) avant l'échec, nouvel essai au prochain chargement")
+            purgeur.termine.connect(_on_purge_termine)
+            purgeur.avance.connect(
+                lambda ids, fait, total, p=purgeur: self._avance_purge(p, ids, fait, total))
+            purgeur.start()
+
+    def _avance_purge(self, purgeur, ids, fait, total):
+        """Ménage automatique en cours (16/10/2026, tous comptes). Le serveur
+        confirme les suppressions par paquets de 20 : les id confirmés sont mis en file et
+        retirés de l'affichage UN PAR UN par _depiler_purge, pour que la
+        liste et le décompte de la barre d'état défilent régulièrement
+        (demandé par l'auteur) au lieu de sauter de 20 en 20."""
+        if not hasattr(self, "_etat_purges"):
+            self._etat_purges = {}
+            self._file_purge = []
+            self._minuteur_purge = QTimer(self)
+            self._minuteur_purge.setInterval(50)  # ~ le rythme des paquets de 20
+            self._minuteur_purge.timeout.connect(self._depiler_purge)
+            self._purges_suivies = []
+        cle = (purgeur.compte.get("adresse", ""), purgeur.dossier_imap)
+        purgeur.total_a_supprimer = total
+        if not hasattr(purgeur, "affiches"):
+            purgeur.affiches = 0
+            purgeur.fini = False
+            self._etat_purges[cle] = (0, total)
+            self._purges_suivies.append(purgeur)
+        self._file_purge.extend((purgeur, str(u)) for u in ids)
+        if self._file_purge and not self._minuteur_purge.isActive():
+            self._minuteur_purge.start()
+        if self.compte_actif and self.dossier_actif:
+            self._maj_statut()
+
+    def _depiler_purge(self):
+        """Retire de l'affichage le(s) prochain(s) mail(s) supprimé(s) : un à
+        la fois, un peu plus vite si la file s'allonge. Termine chaque ménage
+        (bilan à l'écran) quand tous ses mails ont été retirés."""
+        file = getattr(self, "_file_purge", None)
+        if file is None:
+            return
+        for _ in range(max(1, len(file) // 15) if file else 0):
+            purgeur, uid = file.pop(0)
+            purgeur.affiches += 1
+            cle = (purgeur.compte.get("adresse", ""), purgeur.dossier_imap)
+            self._etat_purges[cle] = (purgeur.affiches, purgeur.total_a_supprimer)
+            if (self.compte_actif and self.dossier_actif
+                    and self.compte_actif.get("adresse") == purgeur.compte.get("adresse")
+                    and self._nom_imap(self.dossier_actif) == purgeur.dossier_imap):
+                self.messages = [m for m in (getattr(self, "messages", None) or [])
+                                 if (m["uid"].decode() if isinstance(m["uid"], bytes) else str(m["uid"])) != uid]
                 for row in range(self.liste_messages.count() - 1, -1, -1):
                     it = self.liste_messages.item(row)
                     if it:
-                        uid_it = it.data(Qt.ItemDataRole.UserRole)
-                        uid_it_str = uid_it.decode() if isinstance(uid_it, bytes) else str(uid_it)
-                        if uid_it_str in uid_purges:
+                        u = it.data(Qt.ItemDataRole.UserRole)
+                        if (u.decode() if isinstance(u, bytes) else str(u)) == uid:
                             self.liste_messages.takeItem(row)
-                self._maj_statut()
-            purgeur.termine.connect(_on_purge_termine)
-            purgeur.start()
+                            # Séparateur de mois resté sans mail (16/10/2026) :
+                            # retiré lui aussi
+                            av = self.liste_messages.item(row - 1) if row > 0 else None
+                            ap = self.liste_messages.item(row)
+                            if (av is not None and av.data(ROLE_SEPARATEUR)
+                                    and (ap is None or ap.data(ROLE_SEPARATEUR))):
+                                self.liste_messages.takeItem(row - 1)
+                            break
+        if not file:
+            self._minuteur_purge.stop()
+        # Ménages terminés dont tous les mails ont été retirés de l'affichage
+        bilan = None
+        for p in list(self._purges_suivies):
+            if p.fini and not any(q is p for q, _u in file):
+                self._purges_suivies.remove(p)
+                self._etat_purges.pop((p.compte.get("adresse", ""), p.dossier_imap), None)
+                if p.uids_a_supprimer:
+                    # Bilan visible (16/10/2026, demandé par l'auteur)
+                    garde = f"{p.limite:,}".replace(",", " ")
+                    fait = f"{len(p.uids_a_supprimer):,}".replace(",", " ")
+                    bilan = (f"  ✓ Ménage automatique terminé : {fait} anciens mails supprimés, "
+                             f"les {garde} plus récents sont gardés.")
+        if bilan:
+            self._statut_temporaire(bilan, 15000)
+        elif self.compte_actif and self.dossier_actif:
+            self._maj_statut()
 
     def _formater_date(self, date_str):
         if not date_str:
@@ -34283,7 +34796,16 @@ if (typeof module === 'object') {
             nom_court = "Boîte de réception"
         else:
             nom_court = nom_affichage_dossier(dossier.split(".")[-1])
-        self.label_statut.setText(f"Connecté — {self.compte_actif['adresse']}   |   {nom_court}  :  {nb} message(s)")
+        texte = f"Connecté — {self.compte_actif['adresse']}   |   {nom_court}  :  {nb} message(s)"
+        # Ménage automatique en cours sur ce dossier (tous comptes,
+        # 16/10/2026) : en TÊTE de la barre — ajouté en fin de ligne, il
+        # était coupé par la largeur de la barre et restait invisible
+        en_cours = getattr(self, "_etat_purges", {}).get(
+            (self.compte_actif.get("adresse", ""), self._nom_imap(dossier)))
+        if en_cours:
+            texte = (f"⟳ Ménage automatique : {en_cours[0]:,} / {en_cours[1]:,} anciens mails "
+                     f"supprimés…".replace(",", " ") + f"   |   {nom_court}  :  {nb} message(s)")
+        self.label_statut.setText(texte)
         tri = self._tri_dossiers.get(self.dossier_actif, "chrono")
         if tri == "expediteur":
             self.btn_tri.setText(" EXPÉDITEUR ")
@@ -42693,8 +43215,8 @@ __JS_TRADUCTION__
         combo_fournisseur = QComboBox()
         # Ordre alphabétique (14/10/2026), "Autre (manuel)" toujours en
         # dernier ; o2switch reste présélectionné comme avant.
-        combo_fournisseur.addItems(["Free", "Gmail", "iCloud", "Infomaniak (ik.me)", "Laposte.net", "o2switch (stunnel)", "Orange", "Outlook / Hotmail", "SFR", "Yahoo", "Autre (manuel)"])
-        combo_fournisseur.setCurrentText("o2switch (stunnel)")
+        combo_fournisseur.addItems(["Caramail", "Free", "Gmail", "GMX", "iCloud", "Infomaniak (ik.me)", "Laposte.net", "o2switch", "Orange", "Outlook / Hotmail", "SFR", "Yahoo", "Autre (manuel)"])
+        combo_fournisseur.setCurrentText("o2switch")
         # Tous les fournisseurs visibles d'un coup, sans ascenseur — comme
         # la liste des comptes des modèles.
         combo_fournisseur.setMaxVisibleItems(combo_fournisseur.count())
@@ -42702,6 +43224,69 @@ __JS_TRADUCTION__
         ligne_fournisseur.addWidget(combo_fournisseur)
         ligne_fournisseur.addStretch(1)
         layout.addLayout(ligne_fournisseur)
+        # Conseil propre au fournisseur (15/10/2026) : chez GMX et Caramail,
+        # l'accès IMAP est désactivé par défaut (et se désactive tout seul
+        # après une longue période sans utilisation, d'après l'aide GMX)
+        CONSEILS_FOURNISSEUR = {
+            "Caramail": "Caramail (géré par GMX) : activez d'abord l'accès IMAP sur le site de "
+                        "votre messagerie : E-mail › Paramètres › Fonctions POP3/IMAP › cochez "
+                        "« Envoyer et recevoir des emails via des programmes externes ».",
+            "GMX": "GMX : activez d'abord l'accès IMAP sur le site de votre messagerie : "
+                   "E-mail › Paramètres › Fonctions POP3/IMAP › cochez « Envoyer et recevoir "
+                   "des emails via des programmes externes ».",
+            # Infomaniak (15/10/2026) : mot de passe d'APPAREIL, généré par
+            # Infomaniak pour une adresse ET un appareil, différent de celui
+            # du compte Infomaniak, affiché une seule fois (FAQ Infomaniak)
+            "Infomaniak (ik.me)": "Infomaniak : le mot de passe à saisir ici n'est pas celui de "
+                                  "votre compte Infomaniak. Infomaniak le fournit pour cette "
+                                  "adresse et cet ordinateur : sur le site Infomaniak Mail, "
+                                  "Paramètres › Appareils › Ajouter un appareil › Mes e-mails, "
+                                  "puis « Afficher le mot de passe ». Notez-le : il ne s'affiche "
+                                  "qu'une fois (en cas de perte, ajoutez un nouvel appareil).",
+            # Gmail et Yahoo (15/10/2026) : mot de passe d'application, avec
+            # le lien officiel de création (aides Google et Yahoo)
+            "Gmail": "Gmail : saisissez ici un <b>mot de passe d'application</b> (la validation en "
+                     "deux étapes de votre compte Google est obligatoire). Pour le créer : "
+                     "<a href='https://myaccount.google.com/apppasswords'>"
+                     "myaccount.google.com/apppasswords</a> — saisissez-le sans les espaces.",
+            "Yahoo": "Yahoo : saisissez ici un <b>mot de passe d'application</b>. Pour le créer : "
+                     "<a href='https://login.yahoo.com/account/security'>"
+                     "login.yahoo.com/account/security</a> › Connexions externes › Créer un mot de "
+                     "passe d'application (nom : Courrier Adrien).",
+            "o2switch": "o2switch : dans « Serveur IMAP » et « Serveur SMTP », indiquez le nom de "
+                        "votre serveur o2switch (de la forme nomduserveur.o2switch.net), affiché "
+                        "dans votre espace cPanel. Le mot de passe est celui de l'adresse mail, "
+                        "créé dans cPanel.",
+        }
+        # Chaque conseil se termine par un lien vers la section du mode
+        # d'emploi (ouverte à la bonne place, voir ouvrir_mode_emploi_section)
+        LIEN_MODE_EMPLOI = (" Détails dans le <a href='aide:fournisseurs'>mode d'emploi</a>.")
+        lbl_conseil_fournisseur = QLabel()
+        lbl_conseil_fournisseur.setWordWrap(True)
+        lbl_conseil_fournisseur.setTextFormat(Qt.RichText)
+        lbl_conseil_fournisseur.setStyleSheet("color: #e0c080;")
+        lbl_conseil_fournisseur.hide()
+
+        def _lien_conseil(lien):
+            from PySide6.QtGui import QDesktopServices
+            if lien.startswith("aide:"):
+                ouvrir_mode_emploi_section(lien[len("aide:"):], dlg)
+            else:
+                QDesktopServices.openUrl(QUrl(lien))
+
+        lbl_conseil_fournisseur.linkActivated.connect(_lien_conseil)
+        layout.addWidget(lbl_conseil_fournisseur)
+
+        def _maj_conseil_fournisseur(fournisseur):
+            texte = CONSEILS_FOURNISSEUR.get(fournisseur, "")
+            # Liens en bleu clair, lisible sur le fond sombre (choix de
+            # l'auteur : le rouge de COURRIER (#A52A2A) s'y lit mal, et un
+            # rouge vif ne s'accorde pas avec le reste)
+            lbl_conseil_fournisseur.setText(
+                (texte + LIEN_MODE_EMPLOI).replace("<a ", "<a style='color:#9fd0ff' ") if texte else "")
+            lbl_conseil_fournisseur.setVisible(bool(texte))
+
+        combo_fournisseur.currentTextChanged.connect(_maj_conseil_fournisseur)
 
         # Formulaire
         form_widget = QWidget()
@@ -42831,10 +43416,16 @@ __JS_TRADUCTION__
 
         # Paramètres prédéfinis par fournisseur
         PRESETS = {
-            "o2switch (stunnel)": {
-                "imap_host": "127.0.0.1", "imap_port": 1993,
-                "smtp_host": "127.0.0.1", "smtp_port": 1587,
-                "ssl_direct": False, "smtp_starttls": False,
+            # o2switch (16/10/2026) : connexion directe en SSL (IMAP 993,
+            # SMTP 465), comme les comptes o2switch de l'auteur. Le nom du
+            # serveur est propre à chaque client (nomduserveur.o2switch.net) :
+            # à saisir, voir CONSEILS_FOURNISSEUR. L'ancien réglage « o2switch
+            # (stunnel) » (127.0.0.1:1993/1587) ne servait qu'à une ancienne
+            # version de COURRIER sous Windows 7 : retiré de la liste.
+            "o2switch": {
+                "imap_host": "", "imap_port": 993,
+                "smtp_host": "", "smtp_port": 465,
+                "ssl_direct": True, "smtp_starttls": False,
             },
             "Free": {
                 "imap_host": "imap.free.fr", "imap_port": 993,
@@ -42876,6 +43467,20 @@ __JS_TRADUCTION__
                 "smtp_host": "smtp.laposte.net", "smtp_port": 587,
                 "ssl_direct": True, "smtp_starttls": True,
             },
+            # GMX et Caramail (15/10/2026) : caramail.com redirige vers gmx.fr,
+            # mêmes serveurs (aide officielle « GMX Caramail », support.gmx.fr) :
+            # IMAP imap.gmx.com 993 SSL, SMTP mail.gmx.com 587 STARTTLS.
+            # Accès IMAP à activer d'abord sur le site (CONSEILS_FOURNISSEUR).
+            "GMX": {
+                "imap_host": "imap.gmx.com", "imap_port": 993,
+                "smtp_host": "mail.gmx.com", "smtp_port": 587,
+                "ssl_direct": True, "smtp_starttls": True,
+            },
+            "Caramail": {
+                "imap_host": "imap.gmx.com", "imap_port": 993,
+                "smtp_host": "mail.gmx.com", "smtp_port": 587,
+                "ssl_direct": True, "smtp_starttls": True,
+            },
             # Infomaniak (14/10/2026) : adresses ik.me (my kSuite) et domaines
             # hébergés chez Infomaniak — un seul serveur pour IMAP et SMTP.
             # SMTP 587 STARTTLS : réglage recommandé par la page de
@@ -42910,20 +43515,20 @@ __JS_TRADUCTION__
         def on_select(row):
             if 0 <= row < len(COMPTES):
                 c = COMPTES[row]
-                champ_nom.setText(c.get("nom", ""))
-                champ_adresse.setText(c.get("adresse", ""))
-                champ_mdp.setText(c.get("mdp", ""))
+                # Fournisseur choisi AVANT de remplir les champs, signaux
+                # bloqués (16/10/2026) : changer le fournisseur appliquait son
+                # préréglage et EFFAÇAIT les serveurs que l'on venait de
+                # remplir (ex. maken.o2switch.net -> « Autre (manuel) » ->
+                # champs vides -> compte enregistré sans serveur par Modifier)
+                combo_fournisseur.blockSignals(True)
                 ssl = c.get("ssl_direct", False)
-                champ_imap.setText(c.get("imap_host", "") if ssl else "")
-                champ_port_imap.setText(str(c.get("imap_port", 993 if ssl else 1993)))
-                champ_smtp.setText(c.get("smtp_host", "") if ssl else "")
-                champ_port_smtp.setText(str(c.get("smtp_port", 465)))
-                # Sélectionner le bon fournisseur dans le combo
                 if not ssl:
-                    combo_fournisseur.setCurrentText("o2switch (stunnel)")
+                    combo_fournisseur.setCurrentText("Autre (manuel)")  # ancien stunnel (Windows 7)
                 else:
                     imap_h = c.get("imap_host", "")
-                    if "free" in imap_h:
+                    if "o2switch" in imap_h:
+                        combo_fournisseur.setCurrentText("o2switch")
+                    elif "free" in imap_h:
                         combo_fournisseur.setCurrentText("Free")
                     elif "orange" in imap_h:
                         combo_fournisseur.setCurrentText("Orange")
@@ -42941,8 +43546,21 @@ __JS_TRADUCTION__
                         combo_fournisseur.setCurrentText("Laposte.net")
                     elif "infomaniak" in imap_h:
                         combo_fournisseur.setCurrentText("Infomaniak (ik.me)")
+                    elif "gmx" in imap_h:
+                        # Mêmes serveurs : l'adresse distingue Caramail de GMX
+                        combo_fournisseur.setCurrentText(
+                            "Caramail" if "caramail" in c.get("adresse", "").lower() else "GMX")
                     else:
                         combo_fournisseur.setCurrentText("Autre (manuel)")
+                combo_fournisseur.blockSignals(False)
+                champ_nom.setText(c.get("nom", ""))
+                champ_adresse.setText(c.get("adresse", ""))
+                champ_mdp.setText(c.get("mdp", ""))
+                champ_imap.setText(c.get("imap_host", ""))
+                champ_port_imap.setText(str(c.get("imap_port", 993)))
+                champ_smtp.setText(c.get("smtp_host", ""))
+                champ_port_smtp.setText(str(c.get("smtp_port", 465)))
+                _maj_conseil_fournisseur(combo_fournisseur.currentText())
                 _maj_visibilite_oauth()
 
         liste.currentRowChanged.connect(on_select)
@@ -42977,12 +43595,15 @@ __JS_TRADUCTION__
         btn_modifier  = QPushButton(" Modifier ")
         btn_supprimer = QPushButton(" Supprimer ")
         btn_vider_cache = QPushButton(" Vider le cache HTML ")
+        # Infobulle reformulée (16/10/2026) pour l'utilisateur : l'ancienne
+        # parlait de « fichiers .html », de « .eml » et du correctif du
+        # 27/07/2026 (images embarquées en pleine résolution)
         btn_vider_cache.setToolTip(
-            "Supprime tous les fichiers .html en cache de ce compte (les .eml "
-            "sont conservés). Récupère l'espace disque occupé par les images "
-            "embarquées en pleine résolution avant le correctif du 27/07/2026 "
-            "— chaque mail régénère ensuite son .html (plus léger) la "
-            "prochaine fois qu'il est ouvert."
+            "COURRIER garde une page d'affichage toute prête pour chaque mail\n"
+            "déjà ouvert, afin de le réafficher instantanément. Ce bouton supprime\n"
+            "ces pages pour le compte sélectionné (vos mails, eux, sont conservés) :\n"
+            "seules celles des mails que vous rouvrez sont recréées, et la place\n"
+            "occupée par toutes les autres est récupérée."
         )
         btn_fermer    = QPushButton(" Fermer ")
         btn_verif_complete = QPushButton(" Mise à jour des comptes ")
@@ -42998,7 +43619,14 @@ __JS_TRADUCTION__
         layout_btn_verif.addWidget(btn_verif_complete)
         layout.addLayout(layout_btn_verif)
 
-        for b in [btn_ajouter, btn_modifier, btn_supprimer, btn_vider_cache]:
+        # « Vider le cache HTML » retiré de la fenêtre (16/10/2026) : depuis
+        # le service de préparation des pages en arrière-plan (septembre
+        # 2026), chaque page supprimée est aussitôt recréée (gain de place
+        # quasi nul, mails absents de la liste en attendant, photos
+        # retéléchargées). Utile une seule fois, après le correctif du
+        # 27/07/2026. Code conservé (vider_cache_html), bouton non affiché.
+        btn_vider_cache.hide()
+        for b in [btn_ajouter, btn_modifier, btn_supprimer]:
             b.setStyleSheet(STYLE_BOUTON)
             layout_btn.addWidget(b)
         layout.addLayout(layout_btn)
@@ -43044,18 +43672,23 @@ __JS_TRADUCTION__
                     return None
             p = PRESETS.get(fournisseur, {})
             ssl = p.get("ssl_direct", True)
-            imap_h = champ_imap.text().strip() or p.get("imap_host", "127.0.0.1")
-            smtp_h = champ_smtp.text().strip() or p.get("smtp_host", "127.0.0.1")
+            imap_h = champ_imap.text().strip() or p.get("imap_host", "")
+            smtp_h = champ_smtp.text().strip() or p.get("smtp_host", "")
+            if not est_oauth and (not imap_h or not smtp_h):
+                return None  # serveurs obligatoires (message : _message_formulaire_incomplet)
             try: imap_p = int(champ_port_imap.text().strip())
             except ValueError: imap_p = p.get("imap_port", 993)
             try: smtp_p = int(champ_port_smtp.text().strip())
             except ValueError: smtp_p = p.get("smtp_port", 465)
+            # « Autre (manuel) » : le port 587 exige STARTTLS (16/10/2026 :
+            # jusqu'ici seul le 465 fonctionnait en saisie manuelle)
+            starttls = p.get("smtp_starttls", smtp_p == 587)
             return {
                 "nom": nom, "adresse": adresse, "mdp": mdp,
                 "imap_host": imap_h, "imap_port": imap_p,
                 "smtp_host": smtp_h, "smtp_port": smtp_p,
                 "ssl_direct": ssl,
-                "smtp_starttls": p.get("smtp_starttls", False),
+                "smtp_starttls": starttls,
                 "auth_oauth2": est_oauth,
                 "protocole": "graph" if est_oauth else "imap",
             }
@@ -43067,7 +43700,7 @@ __JS_TRADUCTION__
                 if combo_fournisseur.currentText() == "Outlook / Hotmail":
                     lbl_statut_comptes.setText("Nom et adresse obligatoires, et connexion Microsoft Graph requise (bouton ci-dessus).")
                 else:
-                    lbl_statut_comptes.setText("Nom, adresse et mot de passe sont obligatoires.")
+                    lbl_statut_comptes.setText("Nom, adresse, mot de passe et serveurs IMAP / SMTP sont obligatoires.")
                 return
             # Protection contre les doublons
             if any(x["adresse"].lower() == c["adresse"].lower() for x in COMPTES):
@@ -43094,7 +43727,7 @@ __JS_TRADUCTION__
                 if combo_fournisseur.currentText() == "Outlook / Hotmail":
                     lbl_statut_comptes.setText("Nom et adresse obligatoires, et connexion Microsoft Graph requise (bouton ci-dessus).")
                 else:
-                    lbl_statut_comptes.setText("Nom, adresse et mot de passe sont obligatoires.")
+                    lbl_statut_comptes.setText("Nom, adresse, mot de passe et serveurs IMAP / SMTP sont obligatoires.")
                 return
             COMPTES[row] = c
             sauvegarder_comptes(COMPTES)
@@ -43155,17 +43788,16 @@ __JS_TRADUCTION__
                         nb_fichiers += 1
             if nb_fichiers == 0:
                 QMessageBox.information(dlg, "Rien à vider",
-                                         "Aucun cache HTML trouvé pour ce compte.")
+                                         "Aucune page d'affichage gardée pour ce compte : rien à vider.")
                 return
             taille_mo = taille_totale / (1024 * 1024)
             rep = QMessageBox.question(
                 dlg, "Vider le cache HTML",
-                f"Supprimer les {nb_fichiers} fichier(s) .html en cache pour "
+                f"Supprimer les {nb_fichiers} page(s) d'affichage gardées pour "
                 f"{compte_cible['adresse']} ({taille_mo:.0f} Mo) ?\n\n"
-                "Les .eml (mails bruts) sont conservés — chaque mail "
-                "régénérera automatiquement son .html (plus léger, grâce au "
-                "redimensionnement des images) la prochaine fois qu'il sera "
-                "ouvert.",
+                "Vos mails sont conservés : seules les pages des mails que "
+                "vous rouvrirez seront recréées, et la place occupée par "
+                "toutes les autres sera récupérée.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
             )
@@ -43190,7 +43822,7 @@ __JS_TRADUCTION__
                 self._cle_cache_html_affichee = None
             QMessageBox.information(
                 dlg, "Cache vidé",
-                f"{nb_supprimes} fichier(s) .html supprimé(s) ({taille_mo:.0f} Mo récupérés)."
+                f"{nb_supprimes} page(s) d'affichage supprimée(s) ({taille_mo:.0f} Mo récupérés)."
             )
 
         def verifier_tous_les_comptes():
