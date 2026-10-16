@@ -20,7 +20,7 @@ Rendez-vous dans l'onglet **[Releases](../../releases)**, téléchargez le zip, 
 Les instructions détaillées (premier lancement, téléphone, désinstallation) sont dans [LISEZMOI.txt](LISEZMOI.txt).
 
 **[Mode d'emploi complet](https://courrier-adrien.github.io/courrier/mode-emploi.html)** : toutes les fonctions, avec une case de recherche (aussi accessible dans le logiciel par le bouton AIDE).
-Également disponible **[en PDF](https://courrier-adrien.github.io/courrier/mode-emploi.pdf)**, à télécharger ou à imprimer.
+Également disponible **[en PDF : COURRIER ADRIEN mode d'emploi](https://courrier-adrien.github.io/courrier/COURRIER%20ADRIEN%20mode%20d%27emploi.pdf)**, à télécharger ou à imprimer.
 
 Le programme n'est pas signé numériquement : Windows SmartScreen peut afficher un avertissement
 (« Informations complémentaires » puis « Exécuter quand même »).
