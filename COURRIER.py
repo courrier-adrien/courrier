@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-16 17h27"
+VERSION_BUILD = "2026-10-16 19h13"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4500,7 +4500,8 @@ def _refermer_porte_modem():
     appareils, _ = _lire_appareils(_adb_bloquant("devices", "-l"))
     if not appareils:
         return ("Le téléphone n'est pas joignable en ce moment : impossible de couper la "
-                "liaison. Elle sera de toute façon coupée au prochain redémarrage du téléphone.")
+                "liaison. Elle sera de toute façon coupée au prochain redémarrage du téléphone, "
+                "ou à la prochaine relance de son Débogage sans fil.")
     serie = appareils[0][0]
     _adb_bloquant("-s", serie, "usb", delai=15)
     print(f"[TELEPHONE] liaison du mode modem Wi-Fi coupée ({serie})")
@@ -4806,13 +4807,19 @@ def surveiller_porte_modem(fenetre):
         _cas, serie, boot = etat
         if boot and (lire_telephone_associe() or {}).get("porte_refusee_boot") == boot:
             return
+        # Téléphone joint en Wi-Fi (maison) : pas de proposition (17/10/2026,
+        # remonté : au retour à la maison, elle s'ajoutait à « Afficher son
+        # écran ? »). La liaison est de toute façon préparée en passant dès
+        # que l'écran est affiché (connecter_telephone, « Préparation de la
+        # liaison »). Proposée seulement quand le téléphone est branché en
+        # USB (cas à revoir avec l'auteur).
+        if ":" in serie or "._adb-tls-connect." in serie:
+            return
         etat_global["fenetre"] = True
+        # Textes de l'auteur (17/10/2026), mot pour mot : « On ne peut pas
+        # inventer des scénarii dont on ne sait rien »
         boite = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
-                            f"Votre téléphone{nom} a redémarré : la liaison du mode modem Wi-Fi "
-                            f"est coupée.\n\nLa rétablir maintenant ? Le téléphone pourra ensuite "
-                            f"s'afficher sur l'ordinateur quand il sert de point d'accès, "
-                            f"jusqu'à son prochain redémarrage.\n\n(Si l'écran du téléphone est "
-                            f"affiché, il se fermera quelques secondes.)",
+                            "Voulez-vous rétablir la liaison entre Courrier Adrien et votre téléphone ?",
                             QMessageBox.NoButton, fenetre)
         boite.setStyleSheet(style_boites_telephone())
         boite.setWindowFlag(Qt.WindowStaysOnTopHint, True)
@@ -4823,21 +4830,29 @@ def surveiller_porte_modem(fenetre):
             _ecrire_telephone_associe(porte_refusee_boot=boot)
             etat_global["fenetre"] = False
             return
-        attente_telephone(fenetre, "Rétablissement de la liaison du mode modem Wi-Fi (quelques secondes)…")
+        attente_telephone(fenetre, "Rétablissement de la liaison")
         relais_ouverture = _RelaisTelephone(fenetre)
 
         def _ouverte(nouvelle_serie):
             relais_ouverture.deleteLater()
             attente_telephone_fermer()
             etat_global["fenetre"] = False
-            _boite_telephone(fenetre,
-                             "C'est prêt : quand le téléphone servira de point d'accès Wi-Fi, "
-                             "le bouton TÉL l'affichera sans câble, jusqu'à son prochain "
-                             "redémarrage.\n\nSi le câble USB est branché, vous pouvez le "
-                             "débrancher." if nouvelle_serie else
-                             "La liaison n'a pas pu être rétablie : le téléphone ne répond plus. "
-                             "Réessayez avec le bouton TÉL.",
-                             QMessageBox.Information if nouvelle_serie else None)
+            if not nouvelle_serie:
+                _boite_telephone(fenetre, "La liaison n'a pas pu être rétablie : le téléphone ne "
+                                          "répond plus. Réessayez avec le bouton TÉL.")
+                return
+            question = QMessageBox(QMessageBox.Question, TITRE_BOITES_TELEPHONE,
+                                   "La liaison est rétablie. Voulez-vous afficher l'écran de votre téléphone ?",
+                                   QMessageBox.NoButton, fenetre)
+            question.setStyleSheet(style_boites_telephone())
+            question.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            b_afficher = question.addButton("Afficher l'écran", QMessageBox.AcceptRole)
+            question.addButton("Pas maintenant", QMessageBox.RejectRole)
+            question.exec()
+            if question.clickedButton() is b_afficher and verifier_code_telephone(fenetre):
+                attente_telephone(fenetre, "Ouverture de l'écran du téléphone…")
+                afficher_ecran_telephone(nouvelle_serie, fenetre)
+                attente_telephone_fermer(apres_ecran=True)
 
         relais_ouverture.fini.connect(_ouverte)
         _threading.Thread(target=lambda: relais_ouverture.fini.emit(_ouvrir_porte_modem(serie)),
@@ -5022,7 +5037,9 @@ class DialogueModemWifi(QDialog):
         "En partage de connexion <b>par câble USB</b>, rien de tout cela n'est nécessaire : "
         "le câble suffit (avec le Débogage USB).</p>"
         "<p><b>Bon à savoir :</b> une fois en place, la possibilité de liaison reste active "
-        "jusqu'au prochain redémarrage du téléphone, mais seuls les ordinateurs que vous "
+        "jusqu'au prochain redémarrage du téléphone ou à la prochaine relance de son Débogage "
+        "sans fil (par exemple au retour sur le Wi-Fi de la maison, avec le rallumage "
+        "automatique), mais seuls les ordinateurs que vous "
         "avez déjà autorisés peuvent l'utiliser : toute tentative d'intrusion afficherait "
         "une demande d'autorisation sur votre téléphone, il suffirait de toucher « Refuser ». "
         "Si vous voulez néanmoins couper la liaison, utilisez le bouton ci-dessous, ou "
@@ -28689,7 +28706,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 16/10/2026 17h27")
+        self.setWindowTitle("COURRIER ADRIEN — 16/10/2026 19h13")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33655,7 +33672,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 16/10/2026 à 17h27")
+        lbl_version = QLabel("Version du 16/10/2026 à 19h13")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
