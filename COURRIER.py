@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-17 22h06"
+VERSION_BUILD = "2026-10-17 22h24"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -24694,8 +24694,23 @@ class FenetreRedaction(QDialog):
                 bord_h  = ctypes.windll.user32.GetSystemMetrics(6)
             except Exception:
                 titre_h, bord_h = 26, 1
-            self.setGeometry(pos.x() + 2, pos.y() + titre_h + bord_h + 3,
-                             w - 2, h - titre_h - bord_h - 7)
+            haut = pos.y() + titre_h + bord_h + 3
+            hauteur = h - titre_h - bord_h - 7
+            # Jamais par-dessus la barre du DÉLAI (17/10/2026, demandé —
+            # depuis le bas de fenêtre en deux barres, la rédaction la
+            # recouvrait) : le bas du cadre s'arrête au-dessus de la barre
+            # d'envoi différé si elle est affichée, sinon de frame_bas. La
+            # hauteur minimale (550) cède si la place manque.
+            p = self._parent_courrier
+            barre = next((b for b in (getattr(p, "_barre_envoi_differe", None),
+                                      getattr(p, "_frame_bas", None))
+                          if b is not None and b.isVisible()), None)
+            if barre is not None:
+                limite = barre.mapToGlobal(barre.rect().topLeft()).y() - 2
+                hauteur = min(hauteur, limite - bord_h - haut)
+                if hauteur < self.minimumHeight():
+                    self.setMinimumHeight(max(hauteur, 300))
+            self.setGeometry(pos.x() + 2, haut, w - 2, hauteur)
         else:
             self.resize(1100, 700)
         # WA_StyledBackground (28/07/2026) : sans cet attribut, un QDialog
@@ -28408,7 +28423,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 22h06")
+        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 22h24")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -29456,6 +29471,8 @@ class ClientMail(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, (_dossier_inbox_pour(compte), compte))
             self.liste_comptes.addItem(item)
         self.liste_comptes.currentItemChanged.connect(self.on_compte_change)
+        self.liste_comptes.currentItemChanged.connect(self._noter_changement_selection)
+        self.liste_comptes.itemClicked.connect(self._reclic_compte_courant)
         # F2 = renommer le compte actif (19/08/2026, demandé — même
         # principe que le double-clic déjà existant sur self.btn_compte,
         # étendu au raccourci F2 classique pour tout ce qui peut être
@@ -29691,6 +29708,7 @@ class ClientMail(QMainWindow):
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: #000000; }}
         """)
         self.arbre_dossiers.currentItemChanged.connect(self.on_dossier_change)
+        self.arbre_dossiers.currentItemChanged.connect(self._noter_changement_selection)
         self.arbre_dossiers.itemDoubleClicked.connect(self.on_double_clic_arbre)
         self.arbre_dossiers.setExpandsOnDoubleClick(False)
         self.arbre_dossiers.itemClicked.connect(self.on_clic_simple_arbre)
@@ -33472,7 +33490,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 17/10/2026 à 22h06")
+        lbl_version = QLabel("Version du 17/10/2026 à 22h24")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -34038,6 +34056,32 @@ if (typeof module === 'object') {
         ou le replie, sans avoir besoin du double-clic."""
         if item and item.childCount() > 0:
             item.setExpanded(not item.isExpanded())
+        elif item is not None and self._liste_a_recharger(item):
+            # Reclic sur le dossier déjà sélectionné : voir _reclic_compte_courant
+            self.on_dossier_change(item)
+
+    def _noter_changement_selection(self, item, *_):
+        self._selection_changee = (item, time.monotonic())
+
+    def _liste_a_recharger(self, item):
+        """Vrai si `item` était DÉJÀ sélectionné avant ce clic et que la liste
+        des mails est vide ou montre un filtre 👤 / une recherche. Un clic
+        qui vient de changer la sélection est écarté : le chargement est
+        déjà lancé (liste vide le temps qu'il aboutisse)."""
+        recent = getattr(self, '_selection_changee', None)
+        if recent and recent[0] is item and time.monotonic() - recent[1] < 1.0:
+            return False
+        return bool(getattr(self, '_filtre_actif', None)) or self.liste_messages.count() == 0
+
+    def _reclic_compte_courant(self, item):
+        """Reclic sur la boîte de réception déjà sélectionnée (17/10/2026,
+        bug remonté sur une install) : currentItemChanged ne part que si la
+        sélection CHANGE. Après 👤 puis suppression de tous les mails de
+        l'expéditeur, la colonne restait vide et le clic sur la boîte de
+        réception ne faisait rien — il fallait passer par un autre dossier.
+        On relance donc le chargement si la liste est vide ou filtrée."""
+        if item is not None and item is self.liste_comptes.currentItem() and self._liste_a_recharger(item):
+            self.on_compte_change(item)
 
     def renommer_compte_btn(self):
         from PySide6.QtWidgets import QInputDialog
