@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-17 23h20"
+VERSION_BUILD = "2026-10-18 01h36"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4105,9 +4105,25 @@ CHEMINS_ADB = (
     os.path.join(DOSSIER_SCRCPY, "adb.exe"),
 )
 INFOBULLE_BOUTON_TEL = "Afficher l'écran du téléphone (Wi-Fi ou USB)"
-TITRE_FENETRE_TELEPHONE = "Téléphone"
+# Titre de la fenêtre scrcpy, donc du bouton dans la barre des tâches de
+# Windows : en majuscules depuis le 17/10/2026 (demandé). Le navigateur
+# ouvre encore la sienne sous "Téléphone" ; FindWindowW ne retrouve pas une
+# fenêtre "Téléphone" quand on cherche "TÉLÉPHONE" (testé), d'où la
+# recherche des deux titres dans _hwnd_fenetre_telephone.
+TITRE_FENETRE_TELEPHONE = "TÉLÉPHONE"
+TITRES_FENETRE_TELEPHONE = (TITRE_FENETRE_TELEPHONE, "Téléphone")
 CHEMIN_JOURNAL_SCRCPY = os.path.join(DOSSIER_APP, "journal_scrcpy.log")
 _processus_scrcpy = None
+
+
+def _hwnd_fenetre_telephone():
+    """Fenêtre scrcpy du téléphone (ouverte par COURRIER ou le navigateur), ou 0."""
+    import ctypes
+    for titre in TITRES_FENETRE_TELEPHONE:
+        hwnd = ctypes.windll.user32.FindWindowW(None, titre)
+        if hwnd:
+            return hwnd
+    return 0
 
 
 def chemin_adb():
@@ -4241,7 +4257,7 @@ def _fermer_quand_ecran_affiche(dialogue, delai=15.0, minimum=0.0):
         if not dialogue.isVisible():
             return
         ecoule = time.monotonic() - debut
-        fenetre = ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE)
+        fenetre = _hwnd_fenetre_telephone()
         visible = bool(fenetre and ctypes.windll.user32.IsWindowVisible(fenetre))
         if (visible and ecoule >= minimum) or ecoule > delai:
             dialogue.accept()
@@ -4773,7 +4789,7 @@ def surveiller_porte_modem(fenetre):
             # visible de revenir en arrière, c'était une source d'erreur ;
             # la fenêtre ne vient qu'une fois par connexion au point d'accès
             if etat_global["point_acces_propose"] == ssid_actuel \
-                    or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE):
+                    or _hwnd_fenetre_telephone():
                 etat_global["point_acces_propose"] = ssid_actuel
                 return
             etat_global["point_acces_propose"] = ssid_actuel
@@ -4952,7 +4968,7 @@ def surveiller_telephone_maison(fenetre):
         import ctypes
         if not proposition_maison_active() or _surveillance_porte["fenetre"] \
                 or _attente_telephone is not None \
-                or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE):
+                or _hwnd_fenetre_telephone():
             etat["deja_proposee"] = True
             return
         etat["deja_proposee"] = True
@@ -5017,7 +5033,7 @@ def _arreter_adb_si_inutilise():
     affiché, envoi de SMS en cours, fenêtre du téléphone ouverte."""
     import ctypes
     if not serveur_adb_actif() or envoi_sms_en_cours() \
-            or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE) \
+            or _hwnd_fenetre_telephone() \
             or _attente_telephone is not None or _surveillance_porte["fenetre"] \
             or QApplication.activeModalWidget() is not None:
         return False
@@ -5488,7 +5504,7 @@ def verifier_code_telephone(parent):
     fenêtre déjà ouverte, ou bon code saisi (éventuellement après « Code
     oublié ? » = rescanner le QR code puis nouveau code)."""
     import ctypes
-    if not code_telephone_actif() or ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE):
+    if not code_telephone_actif() or _hwnd_fenetre_telephone():
         return True
     dialogue = DialogueCodeTelephone(parent, "verifier")
     ok = dialogue.exec() == QDialog.Accepted
@@ -6418,7 +6434,7 @@ def _ramener_fenetre_telephone(serie):
     """Ramène devant la fenêtre scrcpy "Téléphone" si elle existe déjà
     (ouverte par COURRIER ou par le navigateur). Renvoie True si trouvée."""
     import ctypes, subprocess
-    fenetre = ctypes.windll.user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE)
+    fenetre = _hwnd_fenetre_telephone()
     if not fenetre:
         return False
     ctypes.windll.user32.ShowWindow(fenetre, 9)  # SW_RESTORE
@@ -6464,7 +6480,7 @@ def _centrer_fenetre_telephone_a_l_ouverture(processus, marge=8):
         etat["essais"] += 1
         if etat["essais"] > 80 or processus.poll() is not None:
             return
-        hwnd = user32.FindWindowW(None, TITRE_FENETRE_TELEPHONE)
+        hwnd = _hwnd_fenetre_telephone()
         if not hwnd or not user32.IsWindowVisible(hwnd):
             QTimer.singleShot(250, essayer)
             return
@@ -13430,14 +13446,15 @@ def extraire_message_id_eml(compte, dossier, uid):
         return ""
 
 
-LIMITE_MAILS_DOSSIER = 300  # Corbeille par défaut : au-delà, les plus anciens sont supprimés
+LIMITE_MAILS_DOSSIER = 300  # nombre proposé quand on choisit « les derniers »
 
 # Limite réglable par dossier (16/10/2026, demandé) : case « Garder : tout /
 # N derniers » dans le bandeau du dossier, pour chaque Corbeille et chaque
 # dossier Envoyés de chaque compte. 0 = tout garder (aucune suppression).
-# Par défaut : 300 pour une Corbeille (comme avant) ; TOUT pour les
-# Envoyés (avant : 300 aussi, ce qui effaçait définitivement, serveur
-# compris, les mails envoyés plus anciens sans que l'utilisateur le sache).
+# Par défaut : TOUT, Corbeilles comme Envoyés (18/10/2026, demandé —
+# avant : 300 pour une Corbeille). Rien n'est supprimé tant que
+# l'utilisateur n'a pas choisi lui-même « les derniers ». Les réglages déjà
+# enregistrés dans limites_dossiers.json sont conservés.
 FICHIER_LIMITES_DOSSIERS = os.path.join(DOSSIER_APP, "limites_dossiers.json")
 LIMITE_DOSSIER_MIN = 50
 LIMITE_DOSSIER_MAX = 5000  # au-delà, l'ouverture du dossier ralentit nettement
@@ -13459,7 +13476,7 @@ def limite_dossier(adresse, dossier):
             return valeur
     except (OSError, ValueError, AttributeError):
         pass
-    return LIMITE_MAILS_DOSSIER if _est_corbeille(dossier) else 0
+    return 0
 
 
 def enregistrer_limite_dossier(adresse, dossier, valeur):
@@ -24667,6 +24684,50 @@ JS_GRAMMALECTE = r"""
 """
 
 
+def _icone_oeil(barre):
+    """Œil dessiné (pas d'emoji : rendu variable selon les polices),
+    barré quand le mot de passe est affiché."""
+    from PySide6.QtGui import QPainter, QPainterPath
+    pix = QPixmap(32, 32)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor("#cccccc"), 2.4))
+    contour = QPainterPath()
+    contour.moveTo(3, 16)
+    contour.quadTo(16, 3, 29, 16)
+    contour.quadTo(16, 29, 3, 16)
+    p.drawPath(contour)
+    p.setBrush(QColor("#cccccc"))
+    p.drawEllipse(12, 12, 8, 8)
+    if barre:
+        p.setPen(QPen(QColor("#e08080"), 2.6))
+        p.drawLine(6, 27, 26, 5)
+    p.end()
+    return QIcon(pix)
+
+
+def ajouter_oeil_mot_de_passe(champ):
+    """Petit œil à droite d'un champ mot de passe (18/10/2026, demandé) :
+    un clic affiche le mot de passe en clair, un second le masque."""
+    action = champ.addAction(_icone_oeil(False), QLineEdit.ActionPosition.TrailingPosition)
+    action.setToolTip("Afficher le mot de passe")
+
+    def _basculer():
+        visible = champ.echoMode() == QLineEdit.EchoMode.Password
+        champ.setEchoMode(QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password)
+        action.setIcon(_icone_oeil(visible))
+        action.setToolTip("Masquer le mot de passe" if visible else "Afficher le mot de passe")
+    action.triggered.connect(_basculer)
+    champ._action_oeil = action
+
+
+def masquer_mot_de_passe(champ):
+    action = getattr(champ, "_action_oeil", None)
+    if action is not None and champ.echoMode() != QLineEdit.EchoMode.Password:
+        action.trigger()
+
+
 class FenetreRedaction(QDialog):
     reponse_envoyee = Signal(object, str, str)  # uid du mail original, date RFC2822, dossier_imap
 
@@ -28649,7 +28710,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 23h20")
+        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 01h36")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -30197,11 +30258,32 @@ class ClientMail(QMainWindow):
                     "unselect": "DÉSÉLECTIONNER", "no suggestions": "AUCUNE SUGGESTION",
                 }
                 menu = self.createStandardContextMenu()
+                # Image sous le clic droit (18/10/2026, demandé) : son
+                # « Enregistrer l'image » passe par la même boîte que le
+                # badge vert, et le dossier choisi devient le nouveau dossier
+                # par défaut du badge — jusqu'ici, seul un double-clic sur le
+                # badge permettait d'en changer, ce que personne ne devinait.
+                from PySide6.QtWebEngineCore import QWebEngineContextMenuRequest
+                requete = self.lastContextMenuRequest()
+                src_image = ""
+                if (requete is not None and requete.mediaType()
+                        == QWebEngineContextMenuRequest.MediaType.MediaTypeImage):
+                    src_image = requete.mediaUrl().toString()
                 for action in menu.actions():
                     if action.isSeparator():
                         continue
                     texte_brut = action.text().replace("&", "").strip()
                     cle = texte_brut.rstrip('.').lower()
+                    if src_image and cle in ("save image", "save image as", "enregistrer l'image"):
+                        # Action neuve à sa place : celle du menu standard
+                        # appartient à la page (partagée d'un menu à l'autre)
+                        nouvelle = QAction("ENREGISTRER L'IMAGE SOUS… (NOUVEAU DOSSIER PAR DÉFAUT)", menu)
+                        nouvelle.triggered.connect(
+                            lambda _c=False, s=src_image: fenetre_principale._enregistrer_image_badge(
+                                s, avec_boite=True, depuis_menu=True))
+                        menu.insertAction(action, nouvelle)
+                        menu.removeAction(action)
+                        continue
                     texte_traduit = TRADUCTIONS_MENU_WEB.get(cle, texte_brut.upper())
                     action.setText(texte_traduit)
                     if texte_traduit == "COPIER":
@@ -31349,6 +31431,7 @@ if (typeof module === 'object') {
         cadre_macros.setStyleSheet(
             "QFrame#cadreMacros { border: 1px solid white; background-color: #A52A2A; }")
         cadre_macros.setFixedHeight(22)
+        self._cadre_macros = cadre_macros
         self._zone_boutons_macros = QHBoxLayout(cadre_macros)
         self._zone_boutons_macros.setContentsMargins(3, 2, 3, 2)
         self._zone_boutons_macros.setSpacing(4)
@@ -33469,6 +33552,9 @@ if (typeof module === 'object') {
             btn.setFixedHeight(16)
             btn.clicked.connect(lambda checked=False, mid=macro.get("id"): self._lancer_macro(mid))
             self._zone_boutons_macros.addWidget(btn)
+        # Cadre affiché seulement s'il contient au moins une macro
+        # (18/10/2026, demandé : un cadre vide restait visible sinon)
+        self._cadre_macros.setVisible(self._zone_boutons_macros.count() > 0)
 
     def _lancer_macro(self, macro_id):
         """Déclenche une macro : ouvre la fenêtre de rédaction comme le
@@ -33716,7 +33802,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 17/10/2026 à 23h20")
+        lbl_version = QLabel("Version du 18/10/2026 à 01h36")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -42772,12 +42858,17 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         btn_ok.clicked.connect(enregistrer)
         dlg.exec()
 
-    def _boite_choix_dossier(self, titre, libelle_liste, lignes, libelle_chemin, chemin_initial, explication=""):
+    def _boite_choix_dossier(self, titre, libelle_liste, lignes, libelle_chemin, chemin_initial, explication="",
+                             nom_initial=None, extension=""):
         """Boîte de choix du dossier d'enregistrement, même apparence que
         _enregistrer_pieces_jointes (29/09/2026) : sert au badge vert des
         images (lignes = l'image) et au bouton flèche de la barre de statut
         (aucune ligne, juste le chemin). Retourne le dossier validé (créé
-        si besoin), ou None si annulé."""
+        si besoin), ou None si annulé.
+
+        nom_initial (18/10/2026, demandé) : ajoute un champ « Nom de la
+        photo » (sans l'extension, affichée à côté) ; la boîte retourne
+        alors (dossier, nom) — nom vide si l'utilisateur l'a effacé."""
         from PySide6.QtWidgets import (
             QDialog, QVBoxLayout, QHBoxLayout, QFileDialog, QLineEdit,
             QLabel as _QLabel, QFrame, QMessageBox
@@ -42847,6 +42938,24 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
                 champ_chemin.setText(os.path.normpath(rep))
         btn_parcourir.clicked.connect(parcourir)
 
+        champ_nom = None
+        if nom_initial is not None:
+            layout.addSpacing(6)
+            lbl_nom = _QLabel("Nom de la photo :")
+            lbl_nom.setStyleSheet("color: #aaaaaa;")
+            layout.addWidget(lbl_nom)
+            h_nom = QHBoxLayout()
+            champ_nom = QLineEdit(nom_initial)
+            champ_nom.setFixedHeight(24)
+            h_nom.addWidget(champ_nom, 1)
+            if extension:
+                lbl_ext = _QLabel(extension)
+                lbl_ext.setStyleSheet("color: #aaaaaa;")
+                h_nom.addWidget(lbl_ext)
+            layout.addLayout(h_nom)
+            champ_nom.selectAll()
+            QTimer.singleShot(0, champ_nom.setFocus)
+
         layout.addSpacing(8)
 
         layout_btns = QHBoxLayout()
@@ -42881,8 +42990,12 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             dlg.accept()
         btn_ok.clicked.connect(valider)
         champ_chemin.returnPressed.connect(valider)
+        if champ_nom is not None:
+            champ_nom.returnPressed.connect(valider)
 
         dlg.exec()
+        if champ_nom is not None:
+            return (resultat["dossier"], champ_nom.text().strip()) if resultat["dossier"] else None
         return resultat["dossier"]
 
     def _formater_date_fr(self, date_str):
@@ -44592,7 +44705,7 @@ __JS_TRADUCTION__
         self._src_clic_badge = src
         timer.start(QApplication.doubleClickInterval())
 
-    def _enregistrer_image_badge(self, src, avec_boite, premiere_fois=False):
+    def _enregistrer_image_badge(self, src, avec_boite, premiere_fois=False, depuis_menu=False):
         """Enregistre l'image du badge vert, directement dans le dossier
         "images" mémorisé, ou après la boîte de choix (avec_boite, ou si
         le dossier mémorisé n'existe plus)."""
@@ -44620,9 +44733,14 @@ __JS_TRADUCTION__
                 taille = ""
         elif src.startswith("data:"):
             nom = "image_" + horodatage
+            m_mime = _re.match(r'data:([^;,]+)', src)
+            extension = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+                         "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp",
+                         "image/svg+xml": ".svg"}.get(m_mime.group(1).lower() if m_mime else "", ".jpg")
             taille = f"{round(len(src.split(',', 1)[-1]) * 3 / 4 / 1024, 1)} KB"
         elif src.startswith("http"):
             nom = os.path.basename(_up.unquote(_up.urlparse(src).path)) or "image"
+            extension = os.path.splitext(nom)[1]
             taille = ""
         else:
             self.label_statut.setText("  Impossible de télécharger cette image (adresse non reconnue).")
@@ -44642,19 +44760,29 @@ __JS_TRADUCTION__
                 "faudra désormais cliquer DEUX FOIS sur le badge pour ouvrir la boîte "
                 "de dialogue et choisir un nouveau dossier. Et de nouveau vous pourrez "
                 "enregistrer vos photos en un seul clic dans ce nouveau dossier."
-            ) if premiere_fois else "",
+            ) if premiere_fois else (
+                "Le dossier choisi ici devient le nouveau dossier par défaut : "
+                "ensuite, UN SEUL clic sur le badge image enregistrera directement "
+                "les photos dans ce dossier."
+            ) if depuis_menu else "",
+            nom_initial=os.path.splitext(nom)[0] if extension and nom.endswith(extension) else nom,
+            extension=extension,
         )
         if not dossier:
             return
+        dossier, nom_choisi = dossier
         sauvegarder_dossier_enregistrement("images", dossier)
+        # Nom saisi (18/10/2026, demandé) : extension d'origine conservée,
+        # nom nettoyé comme celui d'une pièce jointe (caractères interdits)
+        nom_choisi = nom_fichier_sur(nom_choisi + extension, "") if nom_choisi else ""
         if src.startswith("file:"):
-            self._telecharger_image_fichier_local(src, dossier)
+            self._telecharger_image_fichier_local(src, dossier, nom_choisi)
         elif src.startswith("data:"):
-            self._telecharger_image_data_uri(src, dossier)
+            self._telecharger_image_data_uri(src, dossier, nom_choisi)
         else:
-            self._telecharger_image_navigateur(src, dossier)
+            self._telecharger_image_navigateur(src, dossier, nom_choisi)
 
-    def _telecharger_image_navigateur(self, url, dossier):
+    def _telecharger_image_navigateur(self, url, dossier, nom=""):
         """Image distante du badge vert (30/09/2026, lenteur remontée par
         l'utilisateur : le badge était bien plus lent que le clic droit
         "Enregistrer l'image"). Jusqu'ici passait par TelechargeurClicImage
@@ -44673,10 +44801,10 @@ __JS_TRADUCTION__
             self._dl_badge_attendus = {}
         qurl = QUrl(url)
         # clé = forme normalisée par Qt, identique à item.url().toString()
-        self._dl_badge_attendus[qurl.toString()] = dossier
+        self._dl_badge_attendus[qurl.toString()] = (dossier, nom)
         page.download(qurl)
 
-    def _telecharger_image_fichier_local(self, url_file, dossier):
+    def _telecharger_image_fichier_local(self, url_file, dossier, nom=""):
         """Copie une image déjà mise en cache localement (DOSSIER_CACHE_IMAGES)
         vers dossier — pendant de _telecharger_image_data_uri
         pour les images qui passent maintenant par le cache disque dédupliqué
@@ -44699,7 +44827,7 @@ __JS_TRADUCTION__
             print(f"[SECURITE] Copie refusée hors du cache d'images : {chemin_source}")
             return
         extension = _extension_sure(chemin_source) or ".jpg"
-        nom = f"image_{_dt.datetime.now().strftime('%Y-%m-%d_%H%M%S')}{extension}"
+        nom = nom or f"image_{_dt.datetime.now().strftime('%Y-%m-%d_%H%M%S')}{extension}"
         chemin = os.path.join(dossier, nom)
         base_chemin, ext_chemin = os.path.splitext(chemin)
         n = 1
@@ -44715,7 +44843,7 @@ __JS_TRADUCTION__
         except Exception as e:
             self._statut_temporaire(f"  Échec du téléchargement de l'image : {e}")
 
-    def _telecharger_image_data_uri(self, data_uri, dossier):
+    def _telecharger_image_data_uri(self, data_uri, dossier, nom=""):
         """Décode une image intégrée en base64 (data:...;base64,...) et
         l'enregistre dans dossier, avec
         la même protection anti-écrasement et le même son de fin que les
@@ -44737,7 +44865,7 @@ __JS_TRADUCTION__
         except Exception as e:
             self._statut_temporaire(f"  Échec du téléchargement de l'image : {e}")
             return
-        nom = f"image_{_dt.datetime.now().strftime('%Y-%m-%d_%H%M%S')}{extension}"
+        nom = nom or f"image_{_dt.datetime.now().strftime('%Y-%m-%d_%H%M%S')}{extension}"
         chemin = os.path.join(dossier, nom)
         base_chemin, ext_chemin = os.path.splitext(chemin)
         n = 1
@@ -45227,6 +45355,7 @@ __JS_TRADUCTION__
         champ_mdp      = QLineEdit()
         champ_mdp.setEchoMode(QLineEdit.EchoMode.Password)
         champ_mdp.setPlaceholderText("Mot de passe")
+        ajouter_oeil_mot_de_passe(champ_mdp)
 
         # Connexion Microsoft OAuth2 (01/09/2026) : Outlook/Hotmail n'accepte
         # plus le mot de passe classique (voir _authentifier_connexion_imap).
@@ -45334,7 +45463,7 @@ __JS_TRADUCTION__
         ligne_smtp.addWidget(champ_port_smtp)
 
         form.addRow("Nom :", champ_nom)
-        form.addRow("Adresse :", champ_adresse)
+        form.addRow("Adresse email :", champ_adresse)
         form.addRow("Mot de passe :", champ_mdp)
         form.addRow("", ligne_ms)
         form.addRow("Serveur IMAP :", ligne_imap)
@@ -45483,6 +45612,7 @@ __JS_TRADUCTION__
                 champ_nom.setText(c.get("nom", ""))
                 champ_adresse.setText(c.get("adresse", ""))
                 champ_mdp.setText(c.get("mdp", ""))
+                masquer_mot_de_passe(champ_mdp)  # autre compte : remasqué
                 champ_imap.setText(c.get("imap_host", ""))
                 champ_port_imap.setText(str(c.get("imap_port", 993)))
                 champ_smtp.setText(c.get("smtp_host", ""))
@@ -45545,6 +45675,14 @@ __JS_TRADUCTION__
         btn_verif_complete.setStyleSheet(STYLE_BOUTON)
         layout_btn_verif.addWidget(btn_verif_complete)
         layout.addLayout(layout_btn_verif)
+        # « Mise à jour des comptes » retiré de la fenêtre (18/10/2026,
+        # demandé) : son nom induisait en erreur (on croyait mettre à jour
+        # les réglages du compte). C'était une resynchronisation complète
+        # cache/serveur à lancer une seule fois (SynchroniseurCache en mode
+        # strict, qui renvoie aussi sur le serveur les mails présents en
+        # local) ; le relevé normal suffit. Code conservé
+        # (verifier_tous_les_comptes), bouton non affiché.
+        btn_verif_complete.hide()
 
         # « Vider le cache HTML » retiré de la fenêtre (16/10/2026) : depuis
         # le service de préparation des pages en arrière-plan (septembre
@@ -46810,6 +46948,13 @@ if __name__ == "__main__":
         # _telecharger_image_navigateur) : dossier "images" mémorisé.
         dossier = getattr(fenetre, '_dl_badge_attendus', {}).pop(
             item.url().toString(), None)
+        if isinstance(dossier, tuple):
+            # (dossier, nom choisi dans la boîte du badge, 18/10/2026)
+            dossier, nom_badge = dossier
+            if nom_badge:
+                if not os.path.splitext(nom_badge)[1]:
+                    nom_badge += os.path.splitext(nom_fichier)[1]
+                nom_fichier = nom_badge
         if not dossier or not os.path.isdir(dossier):
             dossier = dossier_enregistrement("telechargements")
         chemin = os.path.join(dossier, nom_fichier)
