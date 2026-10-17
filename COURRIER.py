@@ -421,7 +421,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-16 19h13"
+VERSION_BUILD = "2026-10-17 17h30"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -15392,6 +15392,7 @@ class MiseAJourYtDlp(QThread):
 class ChargeurMessages(QThread):
     messages_charges = Signal(list)
     erreur = Signal(str)
+    nouveaux_arrives = Signal(str)  # adresse — nouveau(x) mail(s) INBOX découvert(s) ici (son)
 
     def __init__(self, compte, dossier):
         super().__init__()
@@ -15804,6 +15805,25 @@ class ChargeurMessages(QThread):
             # ACTUELLEMENT affiché, dont les nouveaux mails passent par ici
             # (déclenché par l'IDLE, voir _on_changement_idle).
             _inbox_active = ids_manquants and self.dossier.strip().upper() == "INBOX"
+            # Son de nouveau mail (17/10/2026, remonté par l'utilisateur : un
+            # mail arrivé dans moto, pas de son). Le son n'était joué que par
+            # les relevés (ReleveArrierePlan, IDLE/CacheurNouveaux) ; un mail
+            # arrivé entre deux relevés et découvert ICI — en ouvrant le
+            # compte, ou par la vérification après un changement IDLE — était
+            # mis en cache en silence, et le relevé suivant le trouvait déjà
+            # "local" : jamais de son (cas du 17/10 : article RSS déposé à
+            # 11:14:21, compte ouvert à 11:15:08, relevé toutes les 5 mn).
+            # Seuls comptent les UIDs plus récents que TOUT ce qui est déjà
+            # connu localement (cache, en-têtes seuls, mails supprimés) :
+            # pas de son pour un ancien mail simplement retéléchargé. Cache
+            # vide (premier passage) : pas de son non plus.
+            _seuil_son = None
+            if _inbox_active:
+                _connus = [int(u) for u in (uids_locaux | set(entetes_seuls) | set(_tombes_ids))
+                           if str(u).isdigit()]
+                if _connus:
+                    _seuil_son = max(_connus)
+            _nb_nouveaux_son = 0
             expediteurs_spam_actif = charger_expediteurs_spam() if _inbox_active else set()
             _conn_spam_actif = [None]
             _destination_spam_actif = [None]
@@ -15900,6 +15920,10 @@ class ChargeurMessages(QThread):
                             except Exception:
                                 pass
                             continue  # ne pas ajouter aux messages/meta_cache
+
+                if (raw_complet and _seuil_son is not None
+                        and uid_str.isdigit() and int(uid_str) > _seuil_son):
+                    _nb_nouveaux_son += 1
 
                 # Statut lu : marquage local si déjà connu (re-synchronisation
                 # d'un mail déjà vu), sinon flag \Seen du serveur — un mail
@@ -16025,6 +16049,12 @@ class ChargeurMessages(QThread):
             conn = None
             t8 = time.time()
             print(f"[PERF] boucle_manquants={t7-t6:.2f}s logout={t8-t7:.2f}s TOTAL={t8-t0:.2f}s")
+            # Avant messages_charges : certains appelants lâchent leur
+            # référence au thread dès ce signal-là reçu.
+            if _nb_nouveaux_son:
+                print(f"[SON] {_adr_ctl} : {_nb_nouveaux_son} nouveau(x) mail(s) découvert(s) "
+                      f"au chargement de la liste")
+                self.nouveaux_arrives.emit(_adr_ctl)
             self.messages_charges.emit(messages)
         except Exception as e:
             self.erreur.emit(str(e))
@@ -20437,9 +20467,10 @@ class DialogueCarnetAdresses(QDialog):
                 if ids_contacts_glisses(event.mimeData()):
                     item = self.liste_dossiers.itemAt(event.position().toPoint())
                     if item and item.text() != self.DOSSIER_TOUS:
-                        self.liste_dossiers.blockSignals(True)
-                        self.liste_dossiers.setCurrentItem(item)
-                        self.liste_dossiers.blockSignals(False)
+                        # Sans bouger l'ascenseur (17/10/2026) : un dossier
+                        # survolé à moitié visible en bord de liste la
+                        # faisait défiler sous le curseur.
+                        self._selectionner_dossier_sans_defiler(self.liste_dossiers.row(item))
                         # Ctrl = copie (curseur "+"), sinon déplacement
                         copie = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
                         event.setDropAction(Qt.DropAction.CopyAction if copie else Qt.DropAction.MoveAction)
@@ -20573,10 +20604,28 @@ class DialogueCarnetAdresses(QDialog):
         except RuntimeError:
             return
         if row >= 0:
-            self.liste_dossiers.blockSignals(True)
-            self.liste_dossiers.setCurrentRow(row)
-            self.liste_dossiers.blockSignals(False)
+            # Ascenseur figé (17/10/2026, remonté : après chaque dépôt d'un
+            # contact, la liste des dossiers remontait tout en haut — pénible
+            # pour déposer plusieurs contacts à la suite dans un dossier du
+            # bas). Cause : setCurrentRow() déclenche, via l'autoScroll de
+            # QAbstractItemView (actif par défaut), un scrollTo() vers le
+            # dossier restauré ; c'est le plus souvent « Tous les contacts »,
+            # rang 0, donc la liste repartait en haut. blockSignals() n'y
+            # change rien (le défilement n'est pas un signal). On garde donc
+            # la position de l'ascenseur et on la remet juste après.
+            self._selectionner_dossier_sans_defiler(row)
         self._rafraichir_contacts()
+
+    def _selectionner_dossier_sans_defiler(self, row):
+        """Rend le dossier `row` courant sans émettre currentItemChanged ni
+        bouger l'ascenseur de la liste des dossiers (voir
+        _restaurer_dossier_avant_drag)."""
+        barre = self.liste_dossiers.verticalScrollBar()
+        position = barre.value()
+        self.liste_dossiers.blockSignals(True)
+        self.liste_dossiers.setCurrentRow(row)
+        self.liste_dossiers.blockSignals(False)
+        barre.setValue(position)
 
     def _deplacer_contacts_vers_dossier(self, ids, dossier_destination):
         """Reclasse les contacts glissés depuis la liste (un ou plusieurs,
@@ -28706,7 +28755,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 16/10/2026 19h13")
+        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 17h30")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31183,12 +31232,50 @@ if (typeof module === 'object') {
         layout_principal.addWidget(splitter)
         self.splitter = splitter
 
-        # Barre de statut en bas
+        # Bas de fenêtre en DEUX barres (17/10/2026, demandé — la barre
+        # unique coupait les textes de statut, ex. décompte du ménage
+        # automatique) :
+        # - frame_bas : barre des boutons, découpée en 3 zones calées sur
+        #   les colonnes du splitter (voir _aligner_barre_boutons) — SPAM
+        #   sous les comptes, téléchargement centré sous la liste des
+        #   mails, macros encadrées centrées sous le mail, DÉLAI à droite ;
+        # - frame_statut, tout en bas : label_statut sur toute la largeur
+        #   disponible, et à droite CONSOLE, À PROPOS, AIDE, DÉFAUT.
+        from PySide6.QtWidgets import QGridLayout
         frame_bas = QFrame()
         frame_bas.setStyleSheet("background-color: #A52A2A;")
         frame_bas.setFixedHeight(24)
         layout_bas = QHBoxLayout(frame_bas)
-        layout_bas.setContentsMargins(8, 0, 8, 0)
+        layout_bas.setContentsMargins(0, 0, 0, 0)
+        layout_bas.setSpacing(0)
+        # Les zones à largeur imposée ne doivent jamais dicter la largeur
+        # minimale de la fenêtre (même piège que label_statut plus bas) :
+        # si une colonne est trop étroite, son contenu est rogné.
+        from PySide6.QtWidgets import QLayout
+        layout_bas.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        frame_bas.setMinimumWidth(1)
+        frame_bas.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self._zone_bas_gauche = QWidget()
+        layout_zone_gauche = QHBoxLayout(self._zone_bas_gauche)
+        layout_zone_gauche.setContentsMargins(8, 0, 4, 0)
+        self._zone_bas_liste = QWidget()
+        layout_zone_liste = QHBoxLayout(self._zone_bas_liste)
+        layout_zone_liste.setContentsMargins(0, 0, 0, 0)
+        zone_bas_mail = QWidget()
+        layout_zone_mail = QGridLayout(zone_bas_mail)
+        layout_zone_mail.setContentsMargins(0, 0, 8, 0)
+        layout_bas.addWidget(self._zone_bas_gauche)
+        layout_bas.addWidget(self._zone_bas_liste)
+        layout_bas.addWidget(zone_bas_mail, 1)
+
+        frame_statut = QFrame()
+        frame_statut.setObjectName("barreStatut")
+        frame_statut.setStyleSheet(
+            "QWidget { background-color: #A52A2A; }"
+            " QFrame#barreStatut { border-top: 1px solid #6b1a1a; }")
+        frame_statut.setFixedHeight(24)
+        layout_statut = QHBoxLayout(frame_statut)
+        layout_statut.setContentsMargins(8, 0, 8, 0)
 
         # Bouton SPAM déplacé ici, tout à gauche de la barre de statut
         # (20/08/2026, demandé — il était collé à SUPPRIMER dans la barre
@@ -31206,8 +31293,8 @@ if (typeof module === 'object') {
         )
         btn_spam_bas.setFixedHeight(16)
         btn_spam_bas.clicked.connect(self.marquer_spam)
-        layout_bas.addWidget(btn_spam_bas)
-        layout_bas.addSpacing(4)
+        layout_zone_gauche.addWidget(btn_spam_bas)
+        layout_zone_gauche.addSpacing(4)
 
         # Bouton NON SPAM (21/08/2026, demandé — action inverse, pour
         # rattraper une erreur de classement) : masqué par défaut, n'est
@@ -31223,8 +31310,8 @@ if (typeof module === 'object') {
         self._btn_non_spam.setFixedHeight(16)
         self._btn_non_spam.clicked.connect(self.demarquer_spam)
         self._btn_non_spam.setVisible(False)
-        layout_bas.addWidget(self._btn_non_spam)
-        layout_bas.addSpacing(8)
+        layout_zone_gauche.addWidget(self._btn_non_spam)
+        layout_zone_gauche.addStretch(1)
 
         self.label_statut = QLabel("Connexion en cours...")
         self.label_statut.setStyleSheet("color: white; font-family: Verdana; font-size: 11px; font-weight: bold;")
@@ -31240,7 +31327,7 @@ if (typeof module === 'object') {
         self.label_statut.setMinimumWidth(0)
         self.label_statut.setMaximumWidth(16777215)
         self.label_statut.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        layout_bas.addWidget(self.label_statut, 20)
+        layout_statut.addWidget(self.label_statut, 20)
 
         # Puce de retour visuel pour la relève manuelle par compte (rond
         # devant chaque compte) — sans elle, le clic sur le rond était
@@ -31253,7 +31340,7 @@ if (typeof module === 'object') {
             " font-size: 11px; font-weight: bold; padding: 1px 6px;"
         )
         self._lbl_resultat_releve.setVisible(False)
-        layout_bas.addWidget(self._lbl_resultat_releve)
+        layout_statut.addWidget(self._lbl_resultat_releve)
 
         # Le label de file d'attente d'envoi différé a été déplacé (28/07/2026,
         # à la demande de l'utilisateur) dans sa propre ligne dédiée,
@@ -31265,7 +31352,7 @@ if (typeof module === 'object') {
         # de 400px déjà posé le 20/07/2026 sur le seul label — insuffisant
         # dès que la barre elle-même était déjà proche de sa largeur totale).
 
-        layout_bas.addStretch(1)
+        layout_statut.addSpacing(8)
 
         # Boutons de contrôle du téléchargement (stop/pause/annuler) —
         # toujours visibles (à la demande de l'utilisateur, 20/07/2026),
@@ -31293,7 +31380,8 @@ if (typeof module === 'object') {
         self._btn_dl_dossier.setToolTip(
             f"Dossier des téléchargements : {dossier_enregistrement('telechargements')}")
         self._btn_dl_dossier.clicked.connect(self._dl_choisir_dossier)
-        layout_bas.addWidget(self._btn_dl_dossier)
+        layout_zone_liste.addStretch(1)
+        layout_zone_liste.addWidget(self._btn_dl_dossier)
 
         self._btn_dl_stop = QPushButton()
         self._btn_dl_stop.setIcon(self._creer_icone_dl("stop"))
@@ -31302,7 +31390,7 @@ if (typeof module === 'object') {
         self._btn_dl_stop.setEnabled(False)
         self._btn_dl_stop.setToolTip("Arrêter le téléchargement")
         self._btn_dl_stop.clicked.connect(self._dl_stop)
-        layout_bas.addWidget(self._btn_dl_stop)
+        layout_zone_liste.addWidget(self._btn_dl_stop)
 
         self._btn_dl_pause = QPushButton()
         self._btn_dl_pause.setIcon(self._creer_icone_dl("pause"))
@@ -31311,7 +31399,7 @@ if (typeof module === 'object') {
         self._btn_dl_pause.setEnabled(False)
         self._btn_dl_pause.setToolTip("Mettre en pause / reprendre")
         self._btn_dl_pause.clicked.connect(self._dl_pause_resume)
-        layout_bas.addWidget(self._btn_dl_pause)
+        layout_zone_liste.addWidget(self._btn_dl_pause)
 
         self._btn_dl_annuler = QPushButton()
         self._btn_dl_annuler.setIcon(self._creer_icone_dl("annuler"))
@@ -31320,8 +31408,8 @@ if (typeof module === 'object') {
         self._btn_dl_annuler.setEnabled(False)
         self._btn_dl_annuler.setToolTip("Annuler le téléchargement")
         self._btn_dl_annuler.clicked.connect(self._dl_annuler)
-        layout_bas.addWidget(self._btn_dl_annuler)
-        layout_bas.addSpacing(4)
+        layout_zone_liste.addWidget(self._btn_dl_annuler)
+        layout_zone_liste.addSpacing(4)
         self._dl_item_courant = None
 
         # Barre de progression des téléchargements — masquée par défaut,
@@ -31341,8 +31429,8 @@ if (typeof module === 'object') {
         self._barre_progression_dl.setRange(0, 100)
         self._barre_progression_dl.setValue(0)
         self._barre_progression_dl.setFormat("")  # vide au repos, restera visible en permanence
-        layout_bas.addWidget(self._barre_progression_dl)
-        layout_bas.addSpacing(6)
+        layout_zone_liste.addWidget(self._barre_progression_dl)
+        layout_zone_liste.addStretch(1)
 
         STYLE_BTN_BAS = """
             QPushButton {
@@ -31358,9 +31446,18 @@ if (typeof module === 'object') {
         # déclenchées sur le mail actuellement sélectionné dans la liste) —
         # placés à gauche de DÉLAI, régénérés à chaque ouverture du
         # gestionnaire de macros pour refléter les ajouts/suppressions.
-        self._zone_boutons_macros = QHBoxLayout()
+        # Macros regroupées dans un cadre (17/10/2026, demandé). Le
+        # sélecteur par objectName évite que la bordure du cadre ne se
+        # propage aux boutons qu'il contient.
+        cadre_macros = QFrame()
+        cadre_macros.setObjectName("cadreMacros")
+        cadre_macros.setStyleSheet(
+            "QFrame#cadreMacros { border: 1px solid white; background-color: #A52A2A; }")
+        cadre_macros.setFixedHeight(22)
+        self._zone_boutons_macros = QHBoxLayout(cadre_macros)
+        self._zone_boutons_macros.setContentsMargins(3, 2, 3, 2)
         self._zone_boutons_macros.setSpacing(4)
-        layout_bas.addLayout(self._zone_boutons_macros)
+        layout_zone_mail.addWidget(cadre_macros, 0, 0, Qt.AlignmentFlag.AlignCenter)
         self._regenerer_boutons_macros(STYLE_BTN_BAS)
 
         btn_delai = QPushButton("DÉLAI")
@@ -31369,7 +31466,8 @@ if (typeof module === 'object') {
         def _ouvrir_delai():
             self._ouvrir_dialogue_delai()
         btn_delai.clicked.connect(_ouvrir_delai)
-        layout_bas.addWidget(btn_delai)
+        layout_zone_mail.addWidget(btn_delai, 0, 0,
+                                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._btn_delai = btn_delai
         self._maj_label_delai()
 
@@ -31403,7 +31501,7 @@ if (typeof module === 'object') {
             except Exception:
                 pass
         btn_console.clicked.connect(_basculer_console2)
-        layout_bas.addWidget(btn_console)
+        layout_statut.addWidget(btn_console)
 
         # Bouton À PROPOS (16/08/2026, demandé — écran affichant la licence
         # du logiciel, placé ici en bas à droite plutôt que dans la barre
@@ -31417,7 +31515,7 @@ if (typeof module === 'object') {
         btn_apropos.setStyleSheet(STYLE_BTN_BAS)
         btn_apropos.setFixedHeight(16)
         btn_apropos.clicked.connect(self.ouvrir_a_propos)
-        layout_bas.addWidget(btn_apropos)
+        layout_statut.addWidget(btn_apropos)
 
         # Bouton AIDE (13/10/2026, demandé) : ouvre le mode d'emploi HTML
         # dans le navigateur par défaut (voir ouvrir_mode_emploi). Libellé
@@ -31427,7 +31525,7 @@ if (typeof module === 'object') {
         btn_aide.setFixedHeight(16)
         btn_aide.setToolTip("Ouvrir le mode d'emploi de Courrier Adrien")
         btn_aide.clicked.connect(self.ouvrir_mode_emploi)
-        layout_bas.addWidget(btn_aide)
+        layout_statut.addWidget(btn_aide)
 
         # Bouton DÉFAUT (15/09/2026, demandé) : enregistre COURRIER auprès
         # de Windows comme application de messagerie candidate (voir
@@ -31442,7 +31540,7 @@ if (typeof module === 'object') {
             "par défaut (ouvre ensuite les réglages Windows pour confirmer "
             "le choix)")
         btn_definir_defaut.clicked.connect(self._definir_courrier_comme_appli_mail)
-        layout_bas.addWidget(btn_definir_defaut)
+        layout_statut.addWidget(btn_definir_defaut)
 
         # Ligne dédiée à l'envoi différé (28/07/2026, à la demande de
         # l'utilisateur) : ponctuelle, elle n'existe que pendant un compte à
@@ -31468,6 +31566,41 @@ if (typeof module === 'object') {
         self._maj_widget_file_envoi()
 
         layout_principal.addWidget(frame_bas)
+        layout_principal.addWidget(frame_statut)
+        self._frame_bas = frame_bas
+
+        # Recaler les zones de la barre de boutons dès que la liste ou le
+        # panneau du mail bouge ou change de taille (splitter déplacé,
+        # fenêtre redimensionnée, premier affichage).
+        class _SuiviColonnes(QObject):
+            def __init__(s, rappel, parent):
+                super().__init__(parent)
+                s._rappel = rappel
+            def eventFilter(s, objet, evenement):
+                if evenement.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+                    s._rappel()
+                return False
+        self._suivi_colonnes_bas = _SuiviColonnes(self._aligner_barre_boutons, frame_bas)
+        for i in (1, 2):
+            splitter.widget(i).installEventFilter(self._suivi_colonnes_bas)
+        frame_bas.installEventFilter(self._suivi_colonnes_bas)
+
+    def _aligner_barre_boutons(self):
+        """Cale les zones de la barre de boutons (17/10/2026) sur les
+        colonnes du splitter : zone gauche = colonne des comptes, zone
+        liste = colonne des mails (téléchargement centré dessous), le
+        reste = panneau du mail (macros centrées, DÉLAI à droite)."""
+        try:
+            from PySide6.QtCore import QPoint
+            origine = self._frame_bas.mapTo(self, QPoint(0, 0)).x()
+            debut_liste = self.splitter.widget(1).mapTo(self, QPoint(0, 0)).x() - origine
+            debut_mail = self.splitter.widget(2).mapTo(self, QPoint(0, 0)).x() - origine
+            if debut_liste <= 0 or debut_mail <= debut_liste:
+                return
+            self._zone_bas_gauche.setFixedWidth(debut_liste)
+            self._zone_bas_liste.setFixedWidth(debut_mail - debut_liste)
+        except Exception:
+            pass
 
     def _nom_imap(self, nom_affiche):
         """Retourne le nom IMAP brut (ou l'id Graph) depuis le nom
@@ -31682,6 +31815,9 @@ if (typeof module === 'object') {
         self.chargeur_messages = ChargeurMessages(compte, dossier)
         self.chargeur_messages.messages_charges.connect(lambda m: _on_charges(m, source_fiable=False))
         self.chargeur_messages.erreur.connect(self.on_erreur)
+        # Volontairement non déconnecté par _abandonner_chargeur : le son
+        # porte sa propre adresse et ne dépend pas de l'affichage en cours.
+        self.chargeur_messages.nouveaux_arrives.connect(jouer_son_nouveau_mail)
         self.chargeur_messages.start()
 
     def charger_dossiers(self):
@@ -32938,6 +33074,7 @@ if (typeof module === 'object') {
                 lambda m, c=contexte: self._on_changement_charge(m, contexte=c))
             verif.messages_charges.connect(lambda _m, t=verif: _fini(t))
             verif.erreur.connect(lambda _e, t=verif: _fini(t))
+            verif.nouveaux_arrives.connect(jouer_son_nouveau_mail)
             verif.start()
 
     def _on_changement_charge(self, messages, contexte=None):
@@ -33542,6 +33679,18 @@ if (typeof module === 'object') {
             _verrou_rss_global["en_cours"] = False
             if comptes:
                 print(f"[RSS] Nouveau contenu déposé pour : {', '.join(comptes)}")
+            # Relevé immédiat des comptes servis (17/10/2026) : sans lui, un
+            # article déposé n'était vu (et sonné) qu'au relevé suivant —
+            # jusqu'à 5 mn, voire 8 h selon le compte. Le compte affiché sur
+            # sa boîte de réception est déjà couvert par son IDLE ; les
+            # comptes Outlook (Graph) par leur polling de 60 s.
+            for adresse in comptes or []:
+                if (adresse == self.compte_actif.get("adresse", "")
+                        and self.dossier_actif == "INBOX"):
+                    continue
+                compte = next((c for c in COMPTES if c.get("adresse") == adresse), None)
+                if compte and compte.get("protocole") != "graph":
+                    self._relever_compte_arriere_plan(compte)
         # Le retrait de la référence se fait sur le signal natif "finished"
         # de Qt, jamais sur "resultat" (26/08/2026, cause probable trouvée
         # d'un plantage 0xc0000409/Qt6Core confirmé par analyse d'un fichier
@@ -33672,7 +33821,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 16/10/2026 à 19h13")
+        lbl_version = QLabel("Version du 17/10/2026 à 17h30")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -45005,7 +45154,12 @@ __JS_TRADUCTION__
             Qt.WindowType.WindowMinimizeButtonHint |
             Qt.WindowType.WindowMaximizeButtonHint
         )
-        dlg.setMinimumSize(560, 900)
+        # Hauteur minimale plafonnée à l'écran (17/10/2026, petit portable
+        # Lenovo) : 900 px imposés sur un écran moins haut, Qt comprimait la
+        # fenêtre et rognait le bas du texte des champs (voir plus bas,
+        # hauteur minimale des champs avant dlg.show()).
+        hauteur_ecran = QApplication.primaryScreen().availableGeometry().height()
+        dlg.setMinimumSize(560, min(900, hauteur_ecran - 60))
         dlg.setStyleSheet("""
             QDialog, QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
             QListWidget { background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; outline: none; }
@@ -45739,6 +45893,14 @@ __JS_TRADUCTION__
         btn_vider_cache.clicked.connect(vider_cache_html)
         btn_verif_complete.clicked.connect(verifier_tous_les_comptes)
         btn_fermer.clicked.connect(dlg.accept)
+        # Champs jamais écrasés en hauteur (17/10/2026) : la hauteur minimale
+        # d'un QLineEdit calculée par Qt ignore le padding de la feuille de
+        # style ; fenêtre comprimée, le bas des lettres était coupé. Seule la
+        # liste des comptes (avec ascenseur) absorbe désormais le manque de place.
+        for champ in (combo_fournisseur, champ_nom, champ_adresse, champ_mdp,
+                      champ_imap, champ_port_imap, champ_smtp, champ_port_smtp):
+            champ.ensurePolished()
+            champ.setMinimumHeight(champ.sizeHint().height())
         dlg.show()
         QTimer.singleShot(0, _reinitialiser_formulaire)
         self._conserver_fenetre_secondaire(dlg)
