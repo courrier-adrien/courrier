@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-17 19h58"
+VERSION_BUILD = "2026-10-17 22h06"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -10392,26 +10392,9 @@ def sauvegarder_modeles(data):
 #                                      {"type": "presse_papiers"}]}]}
 FICHIER_MACROS = os.path.join(DOSSIER_APP, "macros.json")
 
-MACRO_PAR_DEFAUT_EN_LIGNE = {
-    "id": "en_ligne",
-    "nom": "EN LIGNE",
-    "declencheur": "repondre",
-    "etapes": [
-        {"type": "texte", "valeur": "Bonjour,"},
-        {"type": "saut_ligne"},
-        {"type": "saut_ligne"},
-        {"type": "texte", "valeur": "C'est en ligne"},
-        {"type": "saut_ligne"},
-        {"type": "presse_papiers"},
-        {"type": "saut_ligne"},
-        {"type": "saut_ligne"},
-        {"type": "texte", "valeur": "Cordialement"},
-    ],
-}
-
 def charger_macros():
-    """Retourne {"macros": [...]}. Crée la macro EN LIGNE par défaut au
-    premier lancement si le fichier n'existe pas encore."""
+    """Retourne {"macros": [...]}. Aucune macro par défaut : liste vide au
+    premier lancement si le fichier n'existe pas encore (17/10/2026)."""
     if os.path.exists(FICHIER_MACROS):
         try:
             with open(FICHIER_MACROS, "r", encoding="utf-8") as f:
@@ -10420,7 +10403,7 @@ def charger_macros():
                     return data
         except Exception:
             pass
-    data = {"macros": [MACRO_PAR_DEFAUT_EN_LIGNE]}
+    data = {"macros": []}
     sauvegarder_macros(data)
     return data
 
@@ -28425,7 +28408,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 19h58")
+        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 22h06")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31083,7 +31066,7 @@ if (typeof module === 'object') {
         # Barre de progression des téléchargements — masquée par défaut,
         # affichée/mise à jour depuis _gerer_telechargement (voir __main__).
         # Placée juste avant la zone des boutons de macros (qui commence
-        # par EN LIGNE par défaut), à la demande de l'utilisateur (20/07/2026).
+        # créées par l'utilisateur), à la demande de l'utilisateur (20/07/2026).
         from PySide6.QtWidgets import QProgressBar
         self._barre_progression_dl = QProgressBar()
         self._barre_progression_dl.setFixedHeight(16)
@@ -33489,7 +33472,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 17/10/2026 à 19h58")
+        lbl_version = QLabel("Version du 17/10/2026 à 22h06")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
