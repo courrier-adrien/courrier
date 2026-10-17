@@ -96,11 +96,22 @@ import ssl
 # sur le comportement précédent (magasin Windows, via
 # ssl.create_default_context() sans argument) si certifi n'est pas installé,
 # pour ne jamais empêcher le lancement de COURRIER.
+# Magasin Windows AJOUTÉ à certifi (17/10/2026, portable Lenovo d'une
+# utilisatrice, compte Gmail : "self-signed certificate in certificate
+# chain"). Un antivirus qui analyse les mails (Avast, AVG, Kaspersky...)
+# s'intercale dans la connexion et la re-signe avec son propre certificat
+# racine, installé dans le magasin Windows mais absent de certifi. Les deux
+# listes ensemble : certifi pour un magasin Windows périmé (ci-dessus), le
+# magasin Windows pour l'antivirus — comme le fait un navigateur.
 try:
     import certifi
     CONTEXTE_SSL = ssl.create_default_context(cafile=certifi.where())
 except Exception:
     CONTEXTE_SSL = ssl.create_default_context()
+try:
+    CONTEXTE_SSL.load_default_certs()
+except Exception:
+    pass
 
 # OAuth2 pour les comptes Outlook/Hotmail (01/09/2026) : Microsoft a
 # définitivement fermé l'authentification par mot de passe (login/mdp
@@ -421,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-17 17h30"
+VERSION_BUILD = "2026-10-17 18h57"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28755,7 +28766,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 17h30")
+        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 18h57")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33821,7 +33832,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 17/10/2026 à 17h30")
+        lbl_version = QLabel("Version du 17/10/2026 à 18h57")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
