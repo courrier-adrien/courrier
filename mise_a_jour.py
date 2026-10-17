@@ -22,7 +22,7 @@ import zipfile
 
 from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QApplication, QMessageBox, QProgressBar, QProgressDialog, QStyleFactory
 
 DEPOT_GITHUB = "courrier-adrien/courrier"
 URL_API = f"https://api.github.com/repos/{DEPOT_GITHUB}/releases/latest"
@@ -414,6 +414,18 @@ class GestionnaireMiseAJour(QObject):
                                             0, total_mo, self.fenetre)
         self._progression.setWindowTitle("Mise à jour de COURRIER ADRIEN")
         self._progression.setStyleSheet("QLabel { color: white; }" + self.style_boutons)
+        # Barre aux couleurs de COURRIER (17/10/2026) : sous Windows 11, le
+        # style natif « windows11 » de Qt la réduit à un fin trait bleu.
+        # Style Fusion sur la barre seule : il anime aussi de façon fiable la
+        # barre « en cours » (décompression, plage 0..0).
+        barre = QProgressBar()
+        barre.setStyle(QStyleFactory.create("Fusion"))
+        barre.setTextVisible(False)
+        barre.setFixedHeight(16)
+        barre.setStyleSheet("QProgressBar { border: 1px solid #5a5a5a; background-color: #1a1a1a; }"
+                            " QProgressBar::chunk { background-color: #A52A2A; }")
+        self._progression.setBar(barre)
+        self._progression.setRange(0, total_mo)  # setBar ne reprend pas la plage
         # Largeur finale des l'ouverture (sinon la boite s'elargit quand le texte
         # "... 120 / 337 Mo" apparait)
         self._progression.setMinimumWidth(460)

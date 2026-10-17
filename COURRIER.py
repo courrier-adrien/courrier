@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-17 22h39"
+VERSION_BUILD = "2026-10-17 23h20"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -10392,6 +10392,28 @@ def sauvegarder_modeles(data):
 #                                      {"type": "presse_papiers"}]}]}
 FICHIER_MACROS = os.path.join(DOSSIER_APP, "macros.json")
 
+# Ancienne macro EN LIGNE créée d'office au premier lancement jusqu'au
+# 17/10/2026 (une macro personnelle de l'auteur, sans raison d'être dans la
+# version diffusée). Le macros.json des installations existantes la garde :
+# retirée au chargement si elle est restée STRICTEMENT identique (une macro
+# modifiée par l'utilisateur est la sienne, on n'y touche pas).
+ANCIENNE_MACRO_EN_LIGNE = {
+    "id": "en_ligne",
+    "nom": "EN LIGNE",
+    "declencheur": "repondre",
+    "etapes": [
+        {"type": "texte", "valeur": "Bonjour,"},
+        {"type": "saut_ligne"},
+        {"type": "saut_ligne"},
+        {"type": "texte", "valeur": "C'est en ligne"},
+        {"type": "saut_ligne"},
+        {"type": "presse_papiers"},
+        {"type": "saut_ligne"},
+        {"type": "saut_ligne"},
+        {"type": "texte", "valeur": "Cordialement"},
+    ],
+}
+
 def charger_macros():
     """Retourne {"macros": [...]}. Aucune macro par défaut : liste vide au
     premier lancement si le fichier n'existe pas encore (17/10/2026)."""
@@ -10400,6 +10422,11 @@ def charger_macros():
             with open(FICHIER_MACROS, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict) and "macros" in data:
+                    macros = [m for m in data["macros"] if m != ANCIENNE_MACRO_EN_LIGNE]
+                    if len(macros) != len(data["macros"]):
+                        data["macros"] = macros
+                        sauvegarder_macros(data)
+                        print("[MACROS] ancienne macro EN LIGNE par défaut retirée")
                     return data
         except Exception:
             pass
@@ -25106,6 +25133,9 @@ class FenetreRedaction(QDialog):
         self.webview.settings().setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         layout.addWidget(self.webview, 1)
+        # Aperçu de vérification d'une PJ (17/10/2026) : remplace le corps le
+        # temps de la vérification, le corps est seulement masqué.
+        layout.addWidget(self._construire_apercu_pj(), 1)
 
         layout_externe.addLayout(layout, 1)
 
@@ -26027,19 +26057,197 @@ class FenetreRedaction(QDialog):
             self._fichiers_joints.remove(chemin)
         except ValueError:
             pass
+        if chemin == self._apercu_pj_chemin:
+            self._fermer_apercu_pj()  # PJ retirée pendant son aperçu
         self._rafraichir_barre_pj_compose()
 
-    def _ouvrir_piece_jointe_compose(self, chemin):
-        """Ouvre le fichier joint avec le programme associé de Windows."""
-        if not os.path.isfile(chemin):
-            self.lbl_statut_envoi.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
-            self.lbl_statut_envoi.setText(f"Fichier introuvable (déplacé ou supprimé ?) : {os.path.basename(chemin)}")
+    # --- Aperçu de vérification des PJ ajoutées (17/10/2026, demandé) ---
+    # Pour les utilisateurs qui craignent d'avoir joint le mauvais fichier :
+    # un clic sur une pastille de la colonne PJ affiche le fichier À LA PLACE
+    # du corps du mail (simplement masqué, rien n'est rechargé ni perdu),
+    # avec RETOUR AU MAIL. Volontairement plus simple que la prévisualisation
+    # des PJ reçues (ClientMail._previsualiser_pj, liée au panneau de la
+    # fenêtre principale) : juste de quoi reconnaître le fichier. PDF rendu
+    # page par page par PyMuPDF, Word/Excel/PowerPoint/ODT par les mêmes
+    # convertisseurs HTML que la fenêtre de lecture.
+
+    APERCU_PJ_IMAGES = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg")
+    APERCU_PJ_TEXTES = (".txt", ".csv", ".log")
+    APERCU_PJ_DOCUMENTS = (".doc", ".docx", ".odt", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf")
+    APERCU_PJ_PAGES_PDF_MAX = 30
+
+    def _construire_apercu_pj(self):
+        """Panneau d'aperçu, masqué au départ ; la vue web est créée au
+        premier aperçu seulement (inutile de la payer à chaque rédaction)."""
+        self._apercu_pj = QWidget()
+        v = QVBoxLayout(self._apercu_pj)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        bandeau = QHBoxLayout()
+        self._lbl_apercu_pj = QLabel()
+        self._lbl_apercu_pj.setStyleSheet("color: white; font-family: Verdana; font-size: 11px; font-weight: bold;")
+        bandeau.addWidget(self._lbl_apercu_pj, 1)
+        btn_windows = QPushButton("  Ouvrir avec Windows  ")
+        btn_windows.setStyleSheet(STYLE_BOUTON)
+        btn_windows.setToolTip("Ouvrir le fichier avec son programme habituel")
+        btn_windows.clicked.connect(lambda: self._ouvrir_pj_compose_windows(self._apercu_pj_chemin))
+        bandeau.addWidget(btn_windows)
+        btn_retour = QPushButton("  RETOUR AU MAIL  ")
+        btn_retour.setStyleSheet(STYLE_BOUTON)
+        btn_retour.clicked.connect(self._fermer_apercu_pj)
+        bandeau.addWidget(btn_retour)
+        v.addLayout(bandeau)
+        self._layout_apercu_pj = v
+        self._vue_apercu_pj = None
+        self._apercu_pj_chemin = None
+        self._apercu_pj_generation = 0
+        self._apercu_pj.hide()
+        return self._apercu_pj
+
+    def _statut_pj(self, texte):
+        self.lbl_statut_envoi.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
+        self.lbl_statut_envoi.setText(texte)
+
+    def _ouvrir_pj_compose_windows(self, chemin):
+        """Ouvre le fichier joint avec le programme associé de Windows
+        (types sans aperçu, ou bouton « Ouvrir avec Windows »)."""
+        if not chemin:
+            return
+        if os.path.splitext(chemin)[1].lower() in EXTENSIONS_PJ_DANGEREUSES:
+            # Un programme ou un script s'EXÉCUTERAIT : pas de ça pour une
+            # simple vérification
+            self._statut_pj(f"Pas d'aperçu pour un programme : {os.path.basename(chemin)}")
             return
         try:
             os.startfile(chemin)
         except Exception as e:
-            self.lbl_statut_envoi.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
-            self.lbl_statut_envoi.setText(f"Impossible d'ouvrir {os.path.basename(chemin)} : {e}")
+            self._statut_pj(f"Impossible d'ouvrir {os.path.basename(chemin)} : {e}")
+
+    def _ouvrir_piece_jointe_compose(self, chemin):
+        """Clic sur une pastille PJ : aperçu de vérification dans la fenêtre."""
+        nom = os.path.basename(chemin)
+        if not os.path.isfile(chemin):
+            self._statut_pj(f"Fichier introuvable (déplacé ou supprimé ?) : {nom}")
+            return
+        ext = os.path.splitext(nom)[1].lower()
+        if ext not in self.APERCU_PJ_IMAGES + self.APERCU_PJ_TEXTES + self.APERCU_PJ_DOCUMENTS:
+            self._ouvrir_pj_compose_windows(chemin)
+            return
+        if self._vue_apercu_pj is None:
+            self._vue_apercu_pj = QWebEngineView()
+            self._vue_apercu_pj.setStyleSheet("QWebEngineView { background-color: #1e1e1e; }")
+            self._vue_apercu_pj.page().setBackgroundColor(QColor("#1e1e1e"))
+            self._layout_apercu_pj.addWidget(self._vue_apercu_pj, 1)
+        self._apercu_pj_chemin = chemin
+        self._apercu_pj_generation += 1
+        generation = self._apercu_pj_generation
+        self._lbl_apercu_pj.setText(f"Aperçu : {nom}")
+        self._lbl_apercu_pj.setToolTip(chemin)
+        self.webview.hide()
+        self._apercu_pj.show()
+
+        if ext in self.APERCU_PJ_IMAGES:
+            self._afficher_apercu_pj(
+                f'<img src="{QUrl.fromLocalFile(chemin).toString()}" '
+                f'style="display:block;margin:0 auto;max-width:100%;height:auto;">')
+            return
+        if ext in self.APERCU_PJ_TEXTES:
+            try:
+                with open(chemin, "rb") as f:
+                    texte = f.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+            except Exception as e:
+                self._afficher_apercu_pj(f"<p class='msg'>Lecture impossible : {html.escape(str(e))}</p>")
+                return
+            self._afficher_apercu_pj(f'<pre class="doc">{html.escape(texte)}</pre>')
+            return
+
+        # PDF et documents bureautiques : conversion hors du fil de l'interface
+        self._afficher_apercu_pj("<p class='msg'>Préparation de l'aperçu…</p>")
+        cm = self._parent_courrier
+        pages_max = self.APERCU_PJ_PAGES_PDF_MAX
+
+        class ConvertisseurApercu(QThread):
+            termine = Signal(str, str)  # (html, erreur)
+            def run(self):
+                try:
+                    if ext == ".pdf":
+                        import fitz, base64
+                        morceaux = []
+                        with fitz.open(chemin) as doc:
+                            for page in list(doc)[:pages_max]:
+                                png = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)).tobytes("png")
+                                morceaux.append('<img class="page" src="data:image/png;base64,'
+                                                + base64.b64encode(png).decode("ascii") + '">')
+                            if doc.page_count > pages_max:
+                                morceaux.append(f"<p class='msg'>… {doc.page_count - pages_max} page(s) de plus, "
+                                                "non affichées (Ouvrir avec Windows pour tout voir)</p>")
+                        self.termine.emit("".join(morceaux), "")
+                        return
+                    if cm is None:
+                        self.termine.emit("", "aperçu indisponible")
+                        return
+                    if ext in (".doc", ".docx"):
+                        corps = cm._doc_vers_html(chemin)
+                    elif ext == ".odt":
+                        corps = cm._odt_vers_html(chemin)
+                    elif ext in (".xls", ".xlsx"):
+                        corps = cm._xlsx_vers_html(chemin)
+                    else:
+                        corps = cm._pptx_vers_html(chemin)
+                    self.termine.emit(f'<div class="doc">{corps}</div>' if corps else "", "")
+                except Exception as e:
+                    self.termine.emit("", str(e))
+
+        def _converti(corps, erreur):
+            if generation != self._apercu_pj_generation or not self._apercu_pj.isVisible():
+                return  # autre PJ cliquée entre-temps, ou retour au mail
+            if erreur or not corps:
+                print(f"[APERCU-PJ] {nom} : {erreur or 'conversion vide'}")
+                self._afficher_apercu_pj(
+                    "<p class='msg'>Aperçu impossible pour ce fichier.<br>"
+                    "Cliquez sur « Ouvrir avec Windows » pour le vérifier.</p>")
+                return
+            self._afficher_apercu_pj(corps)
+
+        th = ConvertisseurApercu()
+        th.termine.connect(_converti)
+        # Référence gardée tant que le fil tourne (sinon détruit en cours de route)
+        self._convertisseurs_apercu = [t for t in getattr(self, "_convertisseurs_apercu", [])
+                                       if t.isRunning()] + [th]
+        th.start()
+
+    def _afficher_apercu_pj(self, corps):
+        """Écrit la page d'aperçu dans DOSSIER_APERCU puis la charge : passer
+        par un fichier (et non setHtml, limité à 2 Mo) permet les longs PDF et
+        l'accès aux images locales."""
+        page = ("<html><head><meta charset='utf-8'><style>"
+                "body{background:#1e1e1e;color:#ddd;font-family:Verdana,sans-serif;"
+                "font-size:13px;margin:0;padding:12px;}"
+                ".msg{text-align:center;margin-top:40px;}"
+                ".page{display:block;margin:0 auto 12px;max-width:100%;box-shadow:0 0 6px #000;}"
+                ".doc{background:white;color:#111;max-width:1000px;margin:0 auto;padding:20px;"
+                "font-family:Calibri,Verdana,Arial,sans-serif;font-size:11pt;line-height:1.5;"
+                "white-space:pre-wrap;overflow:auto;}"
+                "div.doc{white-space:normal;}"
+                "</style></head><body>" + corps + "</body></html>")
+        try:
+            os.makedirs(DOSSIER_APERCU, exist_ok=True)
+            fichier = os.path.join(DOSSIER_APERCU, f"courrier_apercu_redaction_{id(self)}.html")
+            with open(fichier, "w", encoding="utf-8") as f:
+                f.write(page)
+            self._vue_apercu_pj.load(QUrl.fromLocalFile(fichier))
+        except Exception as e:
+            self._statut_pj(f"Aperçu impossible : {e}")
+
+    def _fermer_apercu_pj(self):
+        """RETOUR AU MAIL : le corps réapparaît tel qu'il était."""
+        self._apercu_pj_generation += 1
+        self._apercu_pj_chemin = None
+        self._apercu_pj.hide()
+        if self._vue_apercu_pj is not None:
+            self._vue_apercu_pj.setHtml("")  # libère les images du PDF
+        self.webview.show()
+        self.webview.setFocus()
 
     def _rafraichir_barre_pj_compose(self):
         # Vider entièrement la colonne (y compris l'étirement final) avant
@@ -26068,8 +26276,8 @@ class FenetreRedaction(QDialog):
                 "background-color: #2f2f2f; border: 1px solid #5a5a5a; border-radius: 4px;"
             )
             w_chip.setToolTip((f"{nom}  ({taille})" if taille else nom)
-                              + "\nCliquer pour ouvrir et vérifier le fichier")
-            # Clic sur la pastille (hors croix rouge) = ouvrir le fichier
+                              + "\nCliquer pour vérifier le fichier")
+            # Clic sur la pastille (hors croix rouge) = aperçu du fichier
             # joint pour vérifier que c'est le bon (17/10/2026, demandé par
             # des utilisateurs peu à l'aise avec l'informatique).
             w_chip.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -28441,7 +28649,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 22h39")
+        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 23h20")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33508,7 +33716,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 17/10/2026 à 22h39")
+        lbl_version = QLabel("Version du 17/10/2026 à 23h20")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
