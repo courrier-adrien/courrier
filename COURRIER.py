@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-17 18h57"
+VERSION_BUILD = "2026-10-17 19h58"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4302,7 +4302,7 @@ def wifi_ordinateur():
 
 def _ecrire_telephone_associe(**valeurs):
     """Met à jour telephone_associe.json sans effacer les autres clés
-    (ex. "rallumage" : choix fait dans DialogueRallumageAuto)."""
+    (ex. "proposer_ecran_maison", "modem_wifi")."""
     donnees = lire_telephone_associe() or {}
     donnees.update(valeurs)
     try:
@@ -4886,8 +4886,8 @@ def surveiller_porte_modem(fenetre):
 
 
 # --- Proposition d'afficher le téléphone à la maison (15/10/2026) ---
-# Téléphone et ordinateur sur le même Wi-Fi (Débogage sans fil allumé,
-# par exemple par le rallumage automatique) : COURRIER PROPOSE d'afficher
+# Téléphone et ordinateur sur le même Wi-Fi (Débogage sans fil allumé) :
+# COURRIER PROPOSE d'afficher
 # l'écran, il ne l'affiche jamais de lui-même (philosophie de COURRIER :
 # rien de connecté sans validation). Détection par simple écoute du Wi-Fi
 # (annonce mDNS du téléphone), SANS connexion ; la connexion ne se fait
@@ -5049,8 +5049,7 @@ class DialogueModemWifi(QDialog):
         "le câble suffit (avec le Débogage USB).</p>"
         "<p><b>Bon à savoir :</b> une fois en place, la possibilité de liaison reste active "
         "jusqu'au prochain redémarrage du téléphone ou à la prochaine relance de son Débogage "
-        "sans fil (par exemple au retour sur le Wi-Fi de la maison, avec le rallumage "
-        "automatique), mais seuls les ordinateurs que vous "
+        "sans fil, mais seuls les ordinateurs que vous "
         "avez déjà autorisés peuvent l'utiliser : toute tentative d'intrusion afficherait "
         "une demande d'autorisation sur votre téléphone, il suffirait de toucher « Refuser ». "
         "Si vous voulez néanmoins couper la liaison, utilisez le bouton ci-dessous, ou "
@@ -5290,15 +5289,16 @@ class DialogueTelephoneIntrouvable(QDialog):
         wifi_tel = reseaux.get(wifi_pc, "")
         meme_wifi = (f"connecté au Wi-Fi « {html.escape(wifi_tel)} »" if wifi_tel
                      else "sur le même Wi-Fi que l'ordinateur")
+        # Le geste simple d'abord (17/10/2026, décidé avec l'auteur)
         return (f"<b>Le téléphone{' « ' + html.escape(nom) + ' »' if nom else ''} est introuvable "
-                "sur le Wi-Fi.</b><br><br>" + reseau +
-                ("<span style='color:" + COULEUR_TEL_OK + "'>Le rallumage automatique est en "
-                 "place : si le téléphone vient de se connecter au Wi-Fi ou de redémarrer, "
-                 "patientez quelques secondes, il sera détecté tout seul.</span><br><br>"
-                 if associe.get("rallumage") == "fait" else "") +
-                "Le plus souvent, le « Débogage sans fil » s'est coupé tout seul : Android le fait "
-                "après un redémarrage du téléphone ou un changement de réseau Wi-Fi.<br><br>"
-                + reactiver + "<br><br>"
+                "sur le Wi-Fi.</b><br><br>"
+                "<b>Sur le téléphone, touchez la vignette « Débogage sans fil »</b> (faites "
+                "glisser le haut de l'écran vers le bas). Il sera détecté tout seul quelques "
+                "secondes après.<br>"
+                f"<span style='color:{COULEUR_TEL_DISCRET}'>Android coupe le Débogage sans fil "
+                "après un redémarrage ou un changement de Wi-Fi : c'est normal, ce geste le "
+                "rallume.</span><br><br>" + reseau +
+                reactiver + "<br><br>"
                 f"Vérifiez aussi que le téléphone est déverrouillé et {meme_wifi}. "
                 "Ou branchez-le simplement en USB.<br><br>"
                 "<b>Le téléphone sert de modem Wi-Fi (point d'accès) ?</b> "
@@ -5831,11 +5831,11 @@ def connecter_telephone(parent=None, apres=None, si_echec=None, attendre_ecran=F
         signalait quelques secondes plus tard, avec un bouton Réessayer
         contradictoire). On reste sur la fenêtre de recherche, qui dit
         exactement ce qui se passe, et on continue de chercher : jusqu'à
-        40 s si le rallumage automatique est en place (le téléphone relance
-        son débogage sans fil toutes les 30 s), 12 s sinon. La boîte d'aide
+        12 s (le rallumage automatique par Automate, qui demandait d'attendre
+        jusqu'à 40 s, a été supprimé le 17/10/2026). La boîte d'aide
         n'arrive que si le téléphone reste introuvable. Fermer la fenêtre
         de recherche arrête tout."""
-        duree = 40 if (lire_telephone_associe() or {}).get("rallumage") == "fait" else 12
+        duree = 12
         attente_telephone_etape("Recherche du téléphone…\n"
                                 f"Cela peut prendre jusqu'à {duree} secondes : le téléphone sera "
                                 "détecté tout seul dès qu'il se signale.")
@@ -6207,342 +6207,16 @@ def ouvrir_assistant_association(parent=None, si_trouve=None, rapide=False):
     return serie
 
 
-# --- Rallumage automatique du Débogage sans fil (14/10/2026) ---
-# Android coupe le Débogage sans fil dès que le téléphone quitte le Wi-Fi
-# (et au redémarrage). Solution retenue avec l'auteur après essais
-# (MacroDroid écarté : sa version gratuite s'arrête si on ne regarde pas
-# une pub tous les 3 jours) : l'appli gratuite Automate (LlamaLab, Play
-# Store) avec un flow de 10 blocs (numéros d'Automate), testé le 14/10/2026
-# sur Samsung S20+ / Android 13, redémarrage compris (chemins vérifiés
-# dans le journal d'Automate) :
-#   1 début → 6 « Wi-Fi connected? » (Immediately, sans nom de réseau :
-#   pas besoin de la localisation) → YES → 3 « System setting get » Global
-#   development_settings_enabled → dev → 7 idem "adb_wifi_enabled" → adb →
-#   4 « If » (dev = 1 || dev = "1") && !(adb = 1 || adb = "1") && tente != 1
-#   → YES → 10 tente = 1 → 5 « System setting set » Global
-#   "adb_wifi_enabled" = 1 → 8 « Delay » 30 s (Inexact, Awake device) →
-#   retour au 6. 6 NO → 9 tente = 0 → 8. 4 NO → 11 tente =
-#   (adb = 1 || adb = "1") ? 0 : tente → 8.
-# « tente » = une seule tentative par connexion Wi-Fi : sur un réseau non
-# marqué « Toujours autoriser », Android refuse (remet adb_wifi_enabled à
-# 0) et affiche « Autoriser le débogage sans fil sur ce réseau ? » ; sans
-# elle, la question reviendrait à chaque vérification. Remise à 0 quand le
-# Wi-Fi tombe, ou quand le débogage est constaté allumé (réseau de
-# confiance : on pourra donc le rallumer après un redémarrage).
-# Vérification toutes les 30 s plutôt qu'attente d'un changement du Wi-Fi
-# (« When changed ») : après un redémarrage, Automate REPREND la règle au
-# bloc où elle attendait (« Resumed after restart »), pas au début ; avec
-# le Wi-Fi déjà connecté, aucun changement ne venait et rien ne se
-# rallumait (constaté le 14/10/2026). Automate : Settings → « Run on
-# system startup » coché, sinon la règle ne reprend pas du tout.
-# Le flow ne rallume rien quand les Options de développement sont coupées
-# (applis de banque), et Android ne rallume en silence que sur les Wi-Fi
-# « Toujours autoriser sur ce réseau ». Automate a besoin de
-# WRITE_SECURE_SETTINGS, accordée par adb (pm grant) sur clic de
-# l'utilisateur. Le .flo (357 octets, exporté du téléphone de l'auteur) est
-# embarqué ici en base64 (aucun fichier à livrer dans la build) et importé
-# par l'activité FlowImportActivity d'Automate via une adresse
-# content://media (fichier déposé dans Téléchargements). Choix de
-# l'utilisateur dans telephone_associe.json, clé "rallumage" : "fait",
-# "jamais" ou "plus_tard:AAAA-MM-JJ" (reproposé le lendemain).
-PAQUET_AUTOMATE = "com.llamalab.automate"
-NOM_FICHIER_FLOW = "Débogage sans fil auto (COURRIER).flo"
-DOSSIER_FLOW_TELEPHONE = "/sdcard/Download"
-FLOW_AUTOMATE_B64 = (
-    "TEFGbAByFgrgEAIAAPQRDA8i3BEGABjcEQ4PLsQQCAAk6A8UHzLeEQoAMKwQEA08AyAA0AE/8AAAAAAAANAB"
-    "QD4AAAAAAADKAUAAAAAAAAAA1AEQYWRiX3dpZmlfZW5hYmxlZNQBATHQAT/wAAAAAAAAzAEFdGVudGXoDxYf"
-    "Pg/wAfoBkAL0AcwBA2FkYtABP/AAAAAAAAD0ASvUAQEx0AEAAAAAAAAAAB8f3gHeAfoBkAL0AcwBA2RldtAB"
-    "P/AAAAAAAAD0AT/UAQExjAL6AZAC9AEr0AE/8AAAAAAAAPQBK9QBATGOAh/QAT/wAAAAAAAAEcoBQAAAAAAA"
-    "AADUARBhZGJfd2lmaV9lbmFibGVkKxHKAUAAAAAAAAAA1AEcZGV2ZWxvcG1lbnRfc2V0dGluZ3NfZW5hYmxl"
-    "ZD/oDxIfJg/QAQAAAAAAAAAAHxEAAAAAAAAAAAAAAAAABQkNAwcPYQsh")
-
-
-def _etat_automate(serie):
-    """(Automate installé ?, permission WRITE_SECURE_SETTINGS accordée ?)
-    sur le profil principal. Bloquant. « --user 0 » obligatoire : sur
-    Samsung, le Dossier sécurisé (profil 150) est interdit à adb."""
-    installe = f"package:{PAQUET_AUTOMATE}" in _adb_bloquant(
-        "-s", serie, "shell", f"pm list packages --user 0 {PAQUET_AUTOMATE}", delai=10)
-    autorise = False
-    if installe:
-        for ligne in _adb_bloquant("-s", serie, "shell", f"dumpsys package {PAQUET_AUTOMATE}",
-                                   delai=15).splitlines():
-            # "granted=true" seul = profil principal ; ", userId=150" = Dossier sécurisé
-            if "WRITE_SECURE_SETTINGS: granted=true" in ligne and \
-                    ("userId=" not in ligne or "userId=0" in ligne):
-                autorise = True
-                break
-    return installe, autorise
-
-
-def _chemin_shell(chemin):
-    """Chemin entre apostrophes pour le shell du téléphone."""
-    return "'" + chemin.replace("'", "'\\''") + "'"
-
-
-class _RelaisRallumage(QObject):
-    etat = Signal(bool, bool)   # Automate installé ?, autorisé ?
-    envoi = Signal(str, str)    # adresse content:// du flow (ou ""), message d'erreur
-
-
-class DialogueRallumageAuto(QDialog):
-    """Met en place, étape par étape et à la main de l'utilisateur, le
-    rallumage automatique du Débogage sans fil par Automate (voir plus haut)."""
-
-    EXPLICATION = (
-        "<p><b>Ne plus avoir à rallumer le Débogage sans fil à la main</b></p>"
-        "<p>Android coupe le Débogage sans fil dès que le téléphone quitte le Wi-Fi ou "
-        "redémarre. COURRIER peut le faire <b>rallumer tout seul</b> quand le téléphone "
-        "revient sur un Wi-Fi, grâce à <b>Automate</b> : une appli gratuite, sans limite de "
-        "durée (éditeur LlamaLab, Play Store).</p>"
-        "<p><b>Pourquoi c'est la solution la plus sûre :</b><br>"
-        "&nbsp;• dès que vous partez, le Débogage sans fil reste coupé comme Android le "
-        "prévoit : rien n'est ouvert hors de chez vous ;<br>"
-        "&nbsp;• il ne se rallume sans rien demander que sur les Wi-Fi où vous avez coché "
-        "« Toujours autoriser sur ce réseau » ; ailleurs, Android vous demande la "
-        "permission, une seule fois par connexion (touchez « Refuser » si vous ne "
-        "voulez pas) ;<br>"
-        "&nbsp;• il ne se rallume jamais quand les Options de développement sont coupées "
-        "(certaines applis de banque l'exigent) ;<br>"
-        "&nbsp;• la règle ne fait rien d'autre, et n'a besoin ni de votre position, ni de "
-        "vos contacts, ni de vos messages ;<br>"
-        "&nbsp;• vous validez chaque étape vous-même, et tout se défait en désinstallant "
-        "Automate.</p>"
-    )
-    CONSIGNES_IMPORT = (
-        "<b>Sur le téléphone</b> (Automate est en anglais) :<br>"
-        "1. Touchez <b>IMPORT</b>.<br>"
-        "2. Ouvrez la règle « Débogage sans fil auto (COURRIER) » si elle ne s'ouvre pas "
-        "toute seule, puis touchez <b>START</b>.<br>"
-        "3. Automate propose des autorisations. Acceptez <i>afficher des notifications</i>, "
-        "<i>modify system settings</i>, <i>ignore app hibernation</i> (puis désactivez "
-        "« Suppr. autoris. si appli. inutilisée ») et <i>ignore battery optimizations</i>.<br>"
-        "&nbsp;&nbsp;&nbsp;Pour <i>accéder à la position en arrière-plan</i>, touchez "
-        "<b>NEVER</b> : la règle n'en a pas besoin.<br>"
-        "4. Le bouton <b>STOP (1)</b> indique que la règle tourne.<br>"
-        "5. Pour qu'elle reparte après un redémarrage : menu <b>☰</b> d'Automate → "
-        "<b>Settings</b> → tout en bas, cochez <b>Run on system startup</b>. Automate "
-        "affiche un avertissement général (un flow mal fait pourrait bloquer le téléphone "
-        "au démarrage) : il ne concerne pas cette règle, qui ne fait que rallumer le "
-        "Débogage sans fil. Touchez <b>ENABLE</b>."
-    )
-
-    def __init__(self, parent, serie):
-        super().__init__(parent)
-        self.setWindowTitle("Rallumage automatique du Débogage sans fil")
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # devant l'écran du téléphone (scrcpy)
-        self.setStyleSheet(style_boites_telephone())
-        self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
-        self.serie = serie
-        self._fini = False
-        self._installe = self._autorise = False
-        self._uri_flow = ""
-        self._relais = _RelaisRallumage(self)
-        self._relais.etat.connect(self._maj_etat)
-        self._relais.envoi.connect(self._flow_envoye)
-
-        explication = QLabel(self.EXPLICATION)
-        explication.setTextFormat(Qt.RichText)
-        explication.setWordWrap(True)
-        explication.setFixedWidth(620)
-
-        def _etape(numero, texte):
-            marque = QLabel(f"{numero}.")
-            marque.setFixedWidth(28)
-            marque.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
-            libelle = QLabel(texte)
-            libelle.setTextFormat(Qt.RichText)
-            libelle.setWordWrap(True)
-            return marque, libelle
-
-        self.marque1, lib1 = _etape(1, "<b>Installer Automate</b> (gratuit) : sur le téléphone, "
-                                       "vérifiez que l'éditeur est <b>LlamaLab</b> et touchez "
-                                       "<b>Installer</b>.")
-        self.btn_installer = QPushButton("Ouvrir le Play Store sur le téléphone")
-        self.btn_installer.clicked.connect(self._ouvrir_play_store)
-        self.marque2, lib2 = _etape(2, "<b>Autoriser Automate à rallumer le Débogage sans "
-                                       "fil.</b> Cette autorisation (« modifier les paramètres "
-                                       "sécurisés ») ne peut être donnée que depuis "
-                                       "l'ordinateur ; elle disparaît si Automate est "
-                                       "désinstallé.")
-        self.btn_autoriser = QPushButton("Donner l'autorisation")
-        self.btn_autoriser.clicked.connect(self._autoriser)
-        self.marque3, lib3 = _etape(3, "<b>Installer la règle dans Automate.</b>")
-        self.btn_envoyer = QPushButton("Envoyer la règle au téléphone")
-        self.btn_envoyer.clicked.connect(self._envoyer_flow)
-        self.lbl_consignes = QLabel()
-        self.lbl_consignes.setTextFormat(Qt.RichText)
-        self.lbl_consignes.setWordWrap(True)
-        self.lbl_consignes.hide()
-
-        grille = QVBoxLayout()
-        for marque, libelle, bouton in ((self.marque1, lib1, self.btn_installer),
-                                        (self.marque2, lib2, self.btn_autoriser),
-                                        (self.marque3, lib3, self.btn_envoyer)):
-            bouton.setAutoDefault(False)
-            ligne = QHBoxLayout()
-            ligne.addWidget(marque)
-            ligne.addWidget(libelle, 1)
-            ligne.addWidget(bouton)
-            grille.addLayout(ligne)
-        grille.addWidget(self.lbl_consignes)
-
-        self.btn_fait = QPushButton("C'est fait")
-        self.btn_fait.clicked.connect(self._termine)
-        self.btn_fait.hide()
-        btn_deja = QPushButton("C'est déjà en place")
-        btn_deja.clicked.connect(self._termine)
-        btn_plus_tard = QPushButton("Plus tard")
-        btn_plus_tard.clicked.connect(self._plus_tard)
-        btn_jamais = QPushButton("Ne plus proposer")
-        btn_jamais.clicked.connect(self._jamais)
-        boutons = QHBoxLayout()
-        boutons.addWidget(btn_deja)
-        boutons.addStretch()
-        for b in (self.btn_fait, btn_plus_tard, btn_jamais):
-            boutons.addWidget(b)
-        for b in (self.btn_fait, btn_deja, btn_plus_tard, btn_jamais):
-            b.setAutoDefault(False)
-
-        principal = QVBoxLayout(self)
-        principal.addWidget(explication)
-        principal.addSpacing(6)
-        principal.addLayout(grille)
-        principal.addSpacing(8)
-        principal.addLayout(boutons)
-
-        self._maj_etat(False, False)
-        _threading.Thread(target=self._surveiller, daemon=True).start()
-
-    def showEvent(self, evenement):
-        super().showEvent(evenement)
-        # Passer devant la fenêtre de l'écran du téléphone (scrcpy)
-        self.raise_()
-        self.activateWindow()
-
-    def done(self, resultat):
-        self._fini = True
-        super().done(resultat)
-
-    def _surveiller(self):
-        """Fil de fond : suit l'installation et l'autorisation d'Automate."""
-        while not self._fini:
-            etat = _etat_automate(self.serie)
-            if self._fini:
-                return
-            try:
-                self._relais.etat.emit(*etat)
-            except RuntimeError:
-                return
-            time.sleep(2)
-
-    def _maj_etat(self, installe, autorise):
-        self._installe, self._autorise = installe, autorise
-        for marque, fait, numero in ((self.marque1, installe, 1), (self.marque2, autorise, 2)):
-            marque.setText("✔" if fait else f"{numero}.")
-            marque.setStyleSheet(f"color: {COULEUR_TEL_OK}; font-weight: bold;" if fait else "")
-        self.btn_installer.setEnabled(not installe)
-        self.btn_installer.setText("Installé" if installe else "Ouvrir le Play Store sur le téléphone")
-        self.btn_autoriser.setEnabled(installe and not autorise)
-        self.btn_autoriser.setText("Autorisé" if autorise else "Donner l'autorisation")
-        self.btn_envoyer.setEnabled(installe and autorise)
-
-    def _shell(self, commande, delai=15):
-        return _adb_bloquant("-s", self.serie, "shell", commande, delai=delai)
-
-    def _ouvrir_play_store(self):
-        def _travail():
-            self._shell("input keyevent KEYCODE_WAKEUP")
-            self._shell(f"am start --user 0 -a android.intent.action.VIEW -p com.android.vending "
-                        f"-d market://details?id={PAQUET_AUTOMATE}")
-        _threading.Thread(target=_travail, daemon=True).start()
-
-    def _autoriser(self):
-        self.btn_autoriser.setEnabled(False)
-        print("[TELEPHONE] autorisation WRITE_SECURE_SETTINGS accordée à Automate (clic utilisateur)")
-        _threading.Thread(target=lambda: self._shell(
-            f"pm grant --user 0 {PAQUET_AUTOMATE} android.permission.WRITE_SECURE_SETTINGS"),
-            daemon=True).start()
-
-    def _envoyer_flow(self):
-        import base64, tempfile
-        self.btn_envoyer.setEnabled(False)
-        self.btn_envoyer.setText("Envoi…")
-
-        def _travail():
-            uri, erreur = "", ""
-            local = os.path.join(tempfile.gettempdir(), "courrier_debogage_sans_fil.flo")
-            distant = f"{DOSSIER_FLOW_TELEPHONE}/{NOM_FICHIER_FLOW}"
-            try:
-                with open(local, "wb") as f:
-                    f.write(base64.b64decode(FLOW_AUTOMATE_B64))
-                _adb_bloquant("-s", self.serie, "push", local, distant, delai=20)
-                # Référencé par Android (comme les photos des MMS) : Automate
-                # ne peut lire qu'un fichier qui a une adresse content://
-                reel = self._shell(f"readlink -f {_chemin_shell(distant)}").strip()
-                self._shell(f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
-                            f"-d {_chemin_shell('file://' + reel)}")
-                for _ in range(10):
-                    time.sleep(0.5)
-                    trouve = re.search(r"_id=(\d+)", self._shell(
-                        "content query --uri content://media/external/downloads --projection _id "
-                        f"--where \"_data='{reel}'\""))
-                    if trouve:
-                        uri = f"content://media/external/downloads/{trouve.group(1)}"
-                        break
-                if uri:
-                    self._shell("input keyevent KEYCODE_WAKEUP")
-                    self._shell(f"am start --user 0 -a android.intent.action.VIEW "
-                                f"-t application/vnd.com.llamalab.automate.flow -d {uri} "
-                                f"--grant-read-uri-permission -n {PAQUET_AUTOMATE}/.FlowImportActivity")
-                else:
-                    erreur = (f"La règle est dans les Téléchargements du téléphone, mais Automate "
-                              f"n'a pas pu l'ouvrir tout seul. Sur le téléphone : appli « Mes "
-                              f"fichiers » → Téléchargements → touchez « {NOM_FICHIER_FLOW} ».")
-            except Exception as exc:
-                erreur = f"Envoi impossible : {exc}"
-            finally:
-                try:
-                    os.remove(local)
-                except OSError:
-                    pass
-            try:
-                self._relais.envoi.emit(uri, erreur)
-            except RuntimeError:
-                pass
-
-        _threading.Thread(target=_travail, daemon=True).start()
-
-    def _flow_envoye(self, uri, erreur):
-        self._uri_flow = uri
-        self.btn_envoyer.setText("Renvoyer la règle")
-        self.btn_envoyer.setEnabled(True)
-        consignes = self.CONSIGNES_IMPORT
-        if erreur:
-            consignes = f"<span style='color:{COULEUR_TEL_ERREUR}'>{html.escape(erreur)}</span><br><br>" \
-                        + consignes
-        self.lbl_consignes.setText(consignes)
-        self.lbl_consignes.show()
-        self.btn_fait.show()
-        self.btn_fait.setDefault(True)
-        self.adjustSize()
-
-    def _termine(self):
-        _ecrire_telephone_associe(rallumage="fait")
-        print("[TELEPHONE] rallumage automatique en place")
-        if self._uri_flow:  # la règle est importée : on retire le fichier des Téléchargements
-            uri = self._uri_flow
-            _threading.Thread(target=lambda: self._shell(f"content delete --uri {uri}"),
-                              daemon=True).start()
-        self.accept()
-
-    def _plus_tard(self):
-        _ecrire_telephone_associe(rallumage="plus_tard:" + time.strftime("%Y-%m-%d"))
-        self.reject()
-
-    def _jamais(self):
-        _ecrire_telephone_associe(rallumage="jamais")
-        self.reject()
+# --- Rallumage automatique du Débogage sans fil : SUPPRIMÉ le 17/10/2026 ---
+# Il passait par l'appli Automate (LlamaLab) et une règle livrée avec
+# COURRIER. Retiré, décidé avec l'auteur après l'installation sur un Oppo :
+# appli en anglais, 4-5 autorisations, réglage caché propre à chaque marque
+# (« Désactiver la surveillance des autorisations »), question de la
+# position, droit sensible (WRITE_SECURE_SETTINGS) confié à une appli tierce
+# -- tout cela pour éviter un geste de 2 secondes. Le parcours normal :
+# TÉL ; si le téléphone est introuvable, toucher la vignette « Débogage sans
+# fil », il est détecté tout seul. Ceux qui l'avaient installé peuvent
+# simplement désinstaller Automate (rien d'autre à défaire).
 
 
 # Rappel avant l'oubli au bout de 7 jours (14/10/2026, demandé) : quand
@@ -6597,7 +6271,7 @@ def verifier_rappel_7_jours(fenetre):
 
 def afficher_puis_proposer(fenetre):
     """apres() pour connecter_telephone : ouvre l'écran du téléphone, puis
-    (6 s après) les propositions de réglages (code, rallumage, modem)."""
+    (6 s après) les propositions de réglages (code, modem)."""
     def _apres(serie):
         afficher_ecran_telephone(serie, fenetre)
         QTimer.singleShot(6000, lambda: proposer_reglages_telephone(fenetre, serie))
@@ -6605,34 +6279,19 @@ def afficher_puis_proposer(fenetre):
 
 
 def proposer_reglages_telephone(parent, serie):
-    """Après une connexion réussie par TÉL : propose, une fois chacun et
-    jamais les deux d'affilée, le rallumage automatique puis le mode modem
-    Wi-Fi (15/10/2026). Les deux restent accessibles par le ▾ de TÉL."""
+    """Après une connexion réussie par TÉL : propose, une fois chacun, la
+    protection par code puis le mode modem Wi-Fi (15/10/2026). Tous deux
+    restent accessibles par ⚙ à côté de TÉL."""
     # D'abord la protection par code (15/10/2026), la plus importante
     if proposer_code_telephone(parent):
         return
     associe = lire_telephone_associe() or {}
-    choix = associe.get("rallumage", "")
-    if not (choix in ("fait", "jamais") or choix == "plus_tard:" + time.strftime("%Y-%m-%d")):
-        proposer_rallumage_auto(parent, serie)
-        return
     if "modem_wifi" not in associe:
         dialogue = DialogueModemWifi(parent)
         dialogue.exec()
         if "modem_wifi" not in (lire_telephone_associe() or {}):
             _ecrire_telephone_associe(modem_wifi=False)  # Annuler = non (▾ pour changer d'avis)
         dialogue.deleteLater()
-
-
-def proposer_rallumage_auto(parent, serie):
-    """Propose DialogueRallumageAuto après une connexion réussie, sauf si
-    c'est déjà fait, refusé pour toujours, ou remis à plus tard aujourd'hui."""
-    choix = (lire_telephone_associe() or {}).get("rallumage", "")
-    if choix in ("fait", "jamais") or choix == "plus_tard:" + time.strftime("%Y-%m-%d"):
-        return
-    dialogue = DialogueRallumageAuto(parent, serie)
-    dialogue.exec()
-    dialogue.deleteLater()
 
 
 class FenetreModeEmploi(QDialog):
@@ -28766,7 +28425,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 18h57")
+        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 19h58")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -29495,7 +29154,7 @@ class ClientMail(QMainWindow):
                 _retablir()
                 afficher_ecran_telephone(serie, self)
                 # Une fois l'écran du téléphone affiché : proposer (une
-                # fois chacun) le rallumage automatique puis le mode modem Wi-Fi
+                # fois chacun) la protection par code puis le mode modem Wi-Fi
                 QTimer.singleShot(6000, lambda: proposer_reglages_telephone(self, serie))
             connecter_telephone(self, _connecte, si_echec=_retablir, attendre_ecran=True)
         btn_tel.clicked.connect(_ouvrir_telephone)
@@ -29528,8 +29187,6 @@ class ClientMail(QMainWindow):
             titre = menu.addAction("Réglages :")
             titre.setEnabled(False)
             menu.addAction("   Associer un téléphone (ou rescanner le QR code)…", _associer)
-            menu.addAction("   Réglage du rallumage automatique…",
-                           lambda: connecter_telephone(self, lambda s: DialogueRallumageAuto(self, s).exec()))
             menu.addAction("   Protection par code…", lambda: DialogueProtectionCode(self).exec())
             menu.addAction("   Réglage du mode modem Wi-Fi…", lambda: DialogueModemWifi(self).exec())
             # Case à cocher : défait un « Ne plus demander » (15/10/2026)
@@ -33832,7 +33489,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 17/10/2026 à 18h57")
+        lbl_version = QLabel("Version du 17/10/2026 à 19h58")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
