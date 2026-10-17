@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-17 22h24"
+VERSION_BUILD = "2026-10-17 22h39"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -26029,6 +26029,18 @@ class FenetreRedaction(QDialog):
             pass
         self._rafraichir_barre_pj_compose()
 
+    def _ouvrir_piece_jointe_compose(self, chemin):
+        """Ouvre le fichier joint avec le programme associé de Windows."""
+        if not os.path.isfile(chemin):
+            self.lbl_statut_envoi.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
+            self.lbl_statut_envoi.setText(f"Fichier introuvable (déplacé ou supprimé ?) : {os.path.basename(chemin)}")
+            return
+        try:
+            os.startfile(chemin)
+        except Exception as e:
+            self.lbl_statut_envoi.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
+            self.lbl_statut_envoi.setText(f"Impossible d'ouvrir {os.path.basename(chemin)} : {e}")
+
     def _rafraichir_barre_pj_compose(self):
         # Vider entièrement la colonne (y compris l'étirement final) avant
         # de reconstruire dans l'ordre.
@@ -26055,7 +26067,13 @@ class FenetreRedaction(QDialog):
             w_chip.setStyleSheet(
                 "background-color: #2f2f2f; border: 1px solid #5a5a5a; border-radius: 4px;"
             )
-            w_chip.setToolTip(f"{nom}  ({taille})" if taille else nom)
+            w_chip.setToolTip((f"{nom}  ({taille})" if taille else nom)
+                              + "\nCliquer pour ouvrir et vérifier le fichier")
+            # Clic sur la pastille (hors croix rouge) = ouvrir le fichier
+            # joint pour vérifier que c'est le bon (17/10/2026, demandé par
+            # des utilisateurs peu à l'aise avec l'informatique).
+            w_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            w_chip.mousePressEvent = lambda event, c=chemin: self._ouvrir_piece_jointe_compose(c)
             hbox = QHBoxLayout(w_chip)
             hbox.setContentsMargins(4, 4, 4, 4)
             hbox.setSpacing(5)
@@ -28423,7 +28441,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 22h24")
+        self.setWindowTitle("COURRIER ADRIEN — 17/10/2026 22h39")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33490,7 +33508,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 17/10/2026 à 22h24")
+        lbl_version = QLabel("Version du 17/10/2026 à 22h39")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
