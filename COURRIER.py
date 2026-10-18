@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-18 12h04"
+VERSION_BUILD = "2026-10-18 20h38"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28719,7 +28719,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 12h04")
+        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 20h38")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33811,7 +33811,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 18/10/2026 à 12h04")
+        lbl_version = QLabel("Version du 18/10/2026 à 20h38")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -45383,9 +45383,7 @@ __JS_TRADUCTION__
         form.setSpacing(8)
 
         champ_nom      = QLineEdit()
-        champ_nom.setPlaceholderText("Ex: Mon compte Free")
         champ_adresse  = QLineEdit()
-        champ_adresse.setPlaceholderText("Ex: prenom@free.fr")
         champ_mdp      = QLineEdit()
         champ_mdp.setEchoMode(QLineEdit.EchoMode.Password)
         champ_mdp.setPlaceholderText("Mot de passe")
@@ -45476,12 +45474,10 @@ __JS_TRADUCTION__
         champ_adresse.textChanged.connect(lambda _t: _maj_visibilite_oauth())
 
         champ_imap     = QLineEdit()
-        champ_imap.setPlaceholderText("Ex: imap.free.fr")
         champ_port_imap = QLineEdit()
         champ_port_imap.setPlaceholderText("993")
         champ_port_imap.setFixedWidth(70)
         champ_smtp     = QLineEdit()
-        champ_smtp.setPlaceholderText("Ex: smtp.free.fr")
         champ_port_smtp = QLineEdit()
         champ_port_smtp.setPlaceholderText("465")
         champ_port_smtp.setFixedWidth(70)
