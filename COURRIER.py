@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-18 02h23"
+VERSION_BUILD = "2026-10-18 12h04"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -6987,6 +6987,18 @@ class ThreadEnvoiSMS(QThread):
             self._adb(f"rm -f {distante}")
         self._uris, self._images_distantes = [], []
 
+    def _champ_saisie(self, racine):
+        """Zone de saisie du message : celle de Messages Samsung, sinon la
+        zone de saisie de l'écran (Messages Google, Oppo...). 18/10/2026,
+        remonté sur un Oppo : seule celle de Samsung était cherchée pour
+        vérifier le départ, un SMS bien parti était annoncé « non parti »
+        (et REPRENDRE le renvoyait une 2e fois)."""
+        champ = self._chercher(racine, fin_id=":id/message_edit_text")
+        if champ is None:
+            champ = next((n for n in racine.iter("node")
+                          if n.get("class") == "android.widget.EditText"), None)
+        return champ
+
     def _envoyer_un(self, numero, texte, uri_image=""):
         """True si envoyé, sinon message d'erreur. uri_image : photo jointe
         (MMS), sinon simple SMS."""
@@ -7014,10 +7026,7 @@ class ThreadEnvoiSMS(QThread):
                     or self._chercher(racine, fin_id=":id/attach_content_view") is not None)
 
         def _bouton_si_pret(racine):
-            champ = self._chercher(racine, fin_id=":id/message_edit_text")
-            if champ is None:
-                champ = next((n for n in racine.iter("node")
-                              if n.get("class") == "android.widget.EditText"), None)
+            champ = self._champ_saisie(racine)
             if champ is None or not self._signature(champ.get("text")).startswith(signature[:8]):
                 return None
             if uri_image and not _image_jointe(racine):
@@ -7033,7 +7042,7 @@ class ThreadEnvoiSMS(QThread):
         self._adb(f"input tap {x} {y}")
 
         def _parti(racine):
-            champ = self._chercher(racine, fin_id=":id/message_edit_text")
+            champ = self._champ_saisie(racine)
             if champ is None:
                 return None
             if signature and self._signature(champ.get("text")).startswith(signature[:8]):
@@ -7067,8 +7076,8 @@ class ThreadEnvoiSMS(QThread):
             self._adb(f"input tap {x} {y}")
             time.sleep(1)
             racine = self._ecran()
-        champ = racine is not None and self._chercher(racine, fin_id=":id/message_edit_text")
-        if champ is not None and champ is not False:
+        champ = self._champ_saisie(racine) if racine is not None else None
+        if champ is not None:
             x, y = self._centre(champ)
             self._adb(f"input tap {x} {y}; input keycombination 113 29; input keyevent KEYCODE_DEL")
 
@@ -28710,7 +28719,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 02h23")
+        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 12h04")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33802,7 +33811,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 18/10/2026 à 02h23")
+        lbl_version = QLabel("Version du 18/10/2026 à 12h04")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
