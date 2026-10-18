@@ -173,7 +173,7 @@
 <section id="installation">
   <h2>2. Installation et premier lancement</h2>
   <ol>
-    <li>Décompressez tout le dossier où vous voulez (Bureau, Documents…). <b>Ne déplacez pas</b> <code>COURRIER ADRIEN.exe</code> seul : il a besoin du dossier <code>_internal</code> placé à côté de lui.</li>
+    <li>Installez Courrier Adrien dans <code>C:\COURRIER</code> : créez ce dossier et décompressez-y tout le zip. Le programme est alors <code>C:\COURRIER\COURRIER ADRIEN\COURRIER ADRIEN.exe</code>. <b>Ne déplacez pas</b> <code>COURRIER ADRIEN.exe</code> seul : il a besoin du dossier <code>_internal</code> placé à côté de lui.</li>
     <li>Double-cliquez sur <code>COURRIER ADRIEN.exe</code>.</li>
     <li>Si Windows affiche « Windows a protégé votre ordinateur » (SmartScreen), cliquez sur <b>Informations complémentaires</b>, puis sur <b>Exécuter quand même</b>. Ce message apparaît parce que le programme n'est pas signé numériquement. Certains antivirus peuvent aussi le signaler à tort.</li>
   </ol>
@@ -354,8 +354,22 @@
   </table>
   <ul>
     <li>Sur un mail auquel vous avez répondu, la mention <b>« Vous avez répondu le… »</b> est cliquable : elle affiche votre réponse.</li>
-    <li>Sur les photos, un <b>badge de téléchargement</b> enregistre l'image en un clic.</li>
     <li>Les traceurs invisibles insérés dans certaines newsletters (« pixels espions ») ne bloquent pas l'affichage.</li>
+  </ul>
+  <h3>Enregistrer les photos</h3>
+  <p>Sur chaque photo d'un mail (ou d'une page web ouverte dans Courrier Adrien), un <b>badge de téléchargement</b> permet de l'enregistrer.</p>
+  <table>
+    <tr><th>Geste</th><th>Effet</th></tr>
+    <tr><td><b>Tout premier clic</b> sur le badge</td><td>Une fenêtre demande le dossier où ranger les photos. Ce dossier devient le <b>dossier par défaut</b>.</td></tr>
+    <tr><td><b>Un clic</b> sur le badge</td><td>La photo est enregistrée aussitôt dans le dossier par défaut, sans fenêtre.</td></tr>
+    <tr><td><b>Double-clic</b> sur le badge</td><td>Une fenêtre permet de choisir <b>un autre dossier pour cette photo seulement</b>, et de la <b>renommer</b>. Le dossier par défaut <b>ne change pas</b> : le clic suivant enregistrera de nouveau dans le dossier par défaut.</td></tr>
+    <tr><td><b>Clic droit</b> sur la photo, puis <b>« ENREGISTRER L'IMAGE SOUS… (NOUVEAU DOSSIER PAR DÉFAUT) »</b></td><td>Même fenêtre, mais le dossier choisi <b>devient le nouveau dossier par défaut</b> : les clics suivants sur le badge enregistreront dans ce dossier.</td></tr>
+  </table>
+  <p>Dans cette fenêtre :</p>
+  <ul>
+    <li><b>Nom de la photo</b> : le nom proposé est déjà sélectionné, il suffit de taper le nouveau nom. L'extension (.jpg, .png…) est conservée. Si une photo porte déjà ce nom, rien n'est écrasé : la nouvelle est numérotée, par exemple « vacances (1).jpg ».</li>
+    <li><span class="btn">Parcourir</span> : choisir le dossier dans l'Explorateur.</li>
+    <li><span class="btn">Ouvrir le dossier</span> : ouvre le dossier indiqué dans l'Explorateur, pour voir ce qu'il contient, sans fermer la fenêtre.</li>
   </ul>
 </section>
 
@@ -667,6 +681,22 @@
     <li><b>Sauvegarde :</b> copiez ce dossier.</li>
     <li><b>Désinstallation :</b> supprimez le dossier décompressé, puis le dossier <code>%LOCALAPPDATA%\COURRIER</code>. Aucune clé de registre n'est créée lors d'un lancement normal.</li>
   </ul>
+  <h3>Utiliser Courrier Adrien sur un autre ordinateur</h3>
+  <p>Pour retrouver sur un autre PC vos comptes, vos mails et tous vos réglages sans tout reconfigurer :</p>
+  <ol>
+    <li>Fermez Courrier Adrien sur les deux PC.</li>
+    <li>Sur l'ancien PC, copiez le dossier <code>%LOCALAPPDATA%\COURRIER</code> (sur une clé USB, par exemple).</li>
+    <li>Sur le nouveau PC, installez Courrier Adrien dans <code>C:\COURRIER</code> (<a href="#installation">section 2</a>), puis collez le dossier copié dans <code>%LOCALAPPDATA%</code> (collez ce chemin dans la barre d'adresse de l'Explorateur pour l'ouvrir), en remplaçant le dossier <code>COURRIER</code> s'il existe déjà.</li>
+    <li>Lancez Courrier Adrien.</li>
+  </ol>
+  <p><b>Exception : les mots de passe.</b> Pour votre sécurité, ils sont chiffrés par Windows et ne peuvent être lus que sur le PC où ils ont été saisis. Sur le nouveau PC, il faut donc les ressaisir une fois :</p>
+  <ul>
+    <li>comptes classiques (Infomaniak, Gmail, Free, Orange…) : <span class="btn">COMPTES</span>, sélectionnez le compte, retapez le mot de passe, puis <b>Modifier</b> ;</li>
+    <li>comptes Outlook / Hotmail : <span class="btn">COMPTES</span>, sélectionnez le compte, puis <b>Se connecter avec Microsoft</b> ;</li>
+    <li>si vous utilisez Claude pour la correction ou la traduction : ressaisissez votre clé dans ses réglages (<a href="#langue">section 12</a>).</li>
+  </ul>
+  <p>De même, l'autorisation donnée par votre <b>téléphone</b> concerne l'ancien PC : reliez-le de nouveau au nouveau PC avec <span class="btn">TÉL</span> (<a href="#tel">section 21</a>).</p>
+  <p>Utilisez bien <code>%LOCALAPPDATA%</code> plutôt qu'un chemin comme <code>C:\Users\…\AppData\Local</code> : le nom d'utilisateur Windows change souvent d'un PC à l'autre.</p>
 </section>
 
 <section id="majs">
@@ -687,7 +717,7 @@
   <p>Si d'autres fenêtres de Courrier Adrien sont ouvertes, par exemple un mail en cours de rédaction, il ne les ferme pas d'office : il vous les liste. Choisissez <b>Je les ferme</b> (il proposera de redémarrer dès qu'elles seront fermées) ou <b>À la fermeture de COURRIER ADRIEN</b> (la mise à jour s'installera quand vous quitterez le logiciel).</p>
   <div class="note"><b>Vos comptes, vos mails et vos réglages sont conservés.</b> Seul le programme est remplacé ; le dossier <code>%LOCALAPPDATA%\COURRIER</code> n'est jamais touché. Le mode d'emploi, lui, est mis à jour en même temps.</div>
   <ul>
-    <li><b>Emplacement :</b> pour que la mise à jour automatique fonctionne, placez Courrier Adrien dans un dossier où vous pouvez écrire (Bureau, Documents…), pas dans « Program Files ». Sinon, il vous le signale et ouvre la page de téléchargement.</li>
+    <li><b>Emplacement :</b> pour que la mise à jour automatique fonctionne, laissez Courrier Adrien dans <code>C:\COURRIER</code> (voir <a href="#installation">section 2</a>), pas dans « Program Files ». Sinon, il vous le signale et ouvre la page de téléchargement.</li>
     <li><b>En cas d'échec</b> (téléchargement interrompu, fichiers bloqués par un antivirus…), rien n'est modifié : l'ancienne version reste en place, et la mise à jour vous sera proposée à nouveau au prochain démarrage. Vous pouvez aussi la télécharger à la main sur la page des versions de Courrier Adrien, indiquée dans le message.</li>
   </ul>
 </section>

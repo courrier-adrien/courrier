@@ -406,7 +406,7 @@ class GestionnaireMiseAJour(QObject):
                 f"{self.installation}\n\n"
                 f"La mise à jour automatique ne peut pas le modifier. Téléchargez la "
                 f"nouvelle version à la main (la page va s'ouvrir), ou déplacez le "
-                f"dossier de COURRIER ADRIEN dans Documents par exemple.").exec()
+                f"dossier de COURRIER ADRIEN dans C:\\COURRIER.").exec()
             QDesktopServices.openUrl(QUrl(URL_PAGE))
             return
         total_mo = max(1, self.info["taille"] // (1024 * 1024))

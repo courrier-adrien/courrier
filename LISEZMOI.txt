@@ -7,7 +7,9 @@ En cas de plantage, joignez si possible les fichiers journal.txt et
 crash_traceback.txt du dossier %LOCALAPPDATA%\COURRIER (voir VOS DONNEES).
 
 INSTALLATION
-  1. Decompressez tout le dossier ou vous voulez (Bureau, Documents...).
+  1. Installez COURRIER dans C:\COURRIER : creez ce dossier et decompressez-y
+     tout le zip. Le programme est alors
+     C:\COURRIER\COURRIER ADRIEN\COURRIER ADRIEN.exe
      Ne deplacez pas COURRIER ADRIEN.exe seul : il a besoin du dossier _internal.
   2. Double-cliquez sur COURRIER ADRIEN.exe.
   3. Si Windows affiche "Windows a protege votre ordinateur" (SmartScreen) :
@@ -68,12 +70,25 @@ MISES A JOUR
   vous la propose. "Installer maintenant" la telecharge, puis COURRIER se
   ferme et redemarre tout seul, a jour. Vos comptes, mails et reglages
   (dossier %LOCALAPPDATA%\COURRIER) ne sont jamais touches.
-  Pour que cela fonctionne, laissez le dossier de COURRIER dans un endroit
-  ou vous pouvez ecrire (Bureau, Documents...), pas dans "Program Files".
+  Pour que cela fonctionne, laissez COURRIER dans C:\COURRIER (voir
+  INSTALLATION), pas dans "Program Files".
 
 DESINSTALLATION
   Supprimez le dossier decompresse, puis le dossier %LOCALAPPDATA%\COURRIER.
   Aucune cle de registre n'est creee au lancement normal.
+
+UTILISER COURRIER SUR UN AUTRE ORDINATEUR
+  1. Fermez COURRIER sur les deux PC.
+  2. Copiez le dossier %LOCALAPPDATA%\COURRIER de l'ancien PC.
+  3. Sur le nouveau PC, installez COURRIER dans C:\COURRIER (voir
+     INSTALLATION), puis collez le dossier copie dans %LOCALAPPDATA%
+     (en remplacant le dossier COURRIER s'il existe deja).
+  Vos comptes, mails et reglages sont retrouves. SEULE EXCEPTION : les mots
+  de passe, chiffres par Windows et lisibles uniquement sur le PC ou ils ont
+  ete saisis. Ressaisissez-les une fois dans COMPTES (compte selectionne,
+  mot de passe, Modifier ; pour Outlook/Hotmail : Se connecter avec
+  Microsoft), ainsi que la cle Claude si vous l'utilisez.
+  Le telephone (TEL) est aussi a relier de nouveau au nouveau PC.
 
 LICENCE
   PolyForm Noncommercial 1.0.0 : usage non commercial uniquement.

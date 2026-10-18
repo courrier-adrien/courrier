@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-18 01h36"
+VERSION_BUILD = "2026-10-18 02h23"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28710,7 +28710,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 01h36")
+        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 02h23")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33802,7 +33802,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 18/10/2026 à 01h36")
+        lbl_version = QLabel("Version du 18/10/2026 à 02h23")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -42928,7 +42928,23 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         btn_parcourir.setFixedHeight(24)
         h_chemin.addWidget(champ_chemin, 1)
         h_chemin.addWidget(btn_parcourir)
+        # Ouvrir le dossier (18/10/2026, demandé) : voir dans l'Explorateur
+        # ce que contient le dossier de destination, sans fermer la boîte
+        btn_ouvrir_dossier = QPushButton("  Ouvrir le dossier  ")
+        btn_ouvrir_dossier.setStyleSheet(STYLE_BOUTON)
+        btn_ouvrir_dossier.setFixedHeight(24)
+        btn_ouvrir_dossier.setToolTip("Ouvrir ce dossier dans l'Explorateur Windows")
+        h_chemin.addWidget(btn_ouvrir_dossier)
         layout.addLayout(h_chemin)
+
+        def ouvrir_dossier():
+            dossier = champ_chemin.text().strip()
+            if dossier and os.path.isdir(dossier):
+                os.startfile(dossier)
+            else:
+                QMessageBox.information(dlg, "Dossier introuvable",
+                                        f"Ce dossier n'existe pas (encore) :\n{dossier}")
+        btn_ouvrir_dossier.clicked.connect(ouvrir_dossier)
 
         def parcourir():
             rep = QFileDialog.getExistingDirectory(
@@ -44681,7 +44697,9 @@ __JS_TRADUCTION__
           - tout premier clic (aucun dossier "images" mémorisé) : boîte de
             choix du dossier, avec un texte explicatif ;
           - ensuite, UN clic : enregistrement direct dans ce dossier ;
-          - DEUX clics : boîte de choix pour changer de dossier.
+          - DEUX clics : boîte de choix (dossier et nom) pour CETTE photo,
+            sans changer le dossier par défaut (18/10/2026, demandé) — c'est
+            le clic droit « Enregistrer l'image sous… » qui le change.
         Le badge envoie un appel par clic (JS du corps du mail et des pages
         externes) : le double-clic est donc reconnu ici, en retardant le
         clic simple du délai de double-clic de Windows."""
@@ -44756,22 +44774,29 @@ __JS_TRADUCTION__
                 "dossier de destination de votre téléchargement.\n\n"
                 "Désormais il vous suffira d'UN SEUL clic sur le badge pour enregistrer "
                 "automatiquement les photos dans le dossier que vous avez choisi.\n\n"
-                "ATTENTION : si vous voulez modifier ce dossier de destination, il vous "
-                "faudra désormais cliquer DEUX FOIS sur le badge pour ouvrir la boîte "
-                "de dialogue et choisir un nouveau dossier. Et de nouveau vous pourrez "
-                "enregistrer vos photos en un seul clic dans ce nouveau dossier."
+                "Pour enregistrer UNE photo ailleurs, ou sous un autre nom : cliquez "
+                "DEUX FOIS sur le badge. Le dossier par défaut ne change pas.\n\n"
+                "Pour CHANGER le dossier par défaut : clic droit sur l'image, puis "
+                "« ENREGISTRER L'IMAGE SOUS… (NOUVEAU DOSSIER PAR DÉFAUT) »."
             ) if premiere_fois else (
                 "Le dossier choisi ici devient le nouveau dossier par défaut : "
                 "ensuite, UN SEUL clic sur le badge image enregistrera directement "
                 "les photos dans ce dossier."
-            ) if depuis_menu else "",
+            ) if depuis_menu else (
+                "Le dossier choisi ici ne sert que pour cette photo : le dossier par "
+                "défaut du badge ne change pas. Pour le changer : clic droit sur "
+                "l'image, puis « ENREGISTRER L'IMAGE SOUS… (NOUVEAU DOSSIER PAR DÉFAUT) »."
+            ),
             nom_initial=os.path.splitext(nom)[0] if extension and nom.endswith(extension) else nom,
             extension=extension,
         )
         if not dossier:
             return
         dossier, nom_choisi = dossier
-        sauvegarder_dossier_enregistrement("images", dossier)
+        # Seuls le tout premier clic et le clic droit fixent le dossier par
+        # défaut (18/10/2026, demandé) ; le double-clic = cette photo seulement
+        if premiere_fois or depuis_menu:
+            sauvegarder_dossier_enregistrement("images", dossier)
         # Nom saisi (18/10/2026, demandé) : extension d'origine conservée,
         # nom nettoyé comme celui d'une pièce jointe (caractères interdits)
         nom_choisi = nom_fichier_sur(nom_choisi + extension, "") if nom_choisi else ""
