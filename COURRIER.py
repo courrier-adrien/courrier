@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-19 17h54"
+VERSION_BUILD = "2026-10-19 19h32"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -7179,7 +7179,9 @@ class ThreadEnvoiSMS(QThread):
             pass
 
 
-TEXTE_AIDE_PIECES_JOINTES = "Cliquez pour rechercher vos pièces jointes ou faites-les glisser directement"
+TEXTE_AIDE_PIECES_JOINTES = ("Cliquez pour rechercher vos pièces jointes ou faites-les glisser directement. "
+                             "Vous pouvez aussi cliquer sur vos pièces jointes pour les "
+                             "prévisualiser avant de les envoyer")
 STYLE_GROS_BOUTON_PJ = """
     QPushButton {
         background-color: #A52A2A; color: white; border: none;
@@ -28719,7 +28721,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 17h54")
+        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 19h32")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33811,7 +33813,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 19/10/2026 à 17h54")
+        lbl_version = QLabel("Version du 19/10/2026 à 19h32")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
