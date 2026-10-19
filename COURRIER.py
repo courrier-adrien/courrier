@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-19 19h32"
+VERSION_BUILD = "2026-10-19 22h31"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -1234,8 +1234,8 @@ FICHIER_COMPTES = os.path.join(DOSSIER_APP, "comptes.json")
 # Compte factice du tout premier lancement : l'appli suppose qu'il existe toujours au
 # moins un compte (COMPTES[0], et "impossible de supprimer le dernier compte"). Il
 # ne contient aucun identifiant et pointe vers un port local ferme ; la fenetre
-# COMPTES s'ouvre toute seule au demarrage pour le remplacer par le vrai compte.
-ADRESSE_COMPTE_FACTICE = "nouveau@exemple.org"
+# COMPTES s'ouvre toute seule au demarrage ; il est retire des que le vrai compte
+# est ajoute (ADRESSE_COMPTE_FACTICE, definie dans COURRIER.py).
 COMPTES_DEFAUT = [
     {
         "nom": "A CONFIGURER",
@@ -1251,6 +1251,18 @@ COMPTES_DEFAUT = [
         "protocole": "imap",
     },
 ]
+
+# Adresse du compte factice « A CONFIGURER » que la version diffusée crée au
+# tout premier lancement (voir BUILD_DIFFUSION\patch.py) : il est retiré
+# automatiquement dès que l'utilisateur ajoute son vrai compte.
+ADRESSE_COMPTE_FACTICE = "nouveau@exemple.org"
+
+def est_compte_factice(compte):
+    """Vrai pour le compte « A CONFIGURER » : gardé en interne (l'appli
+    suppose au moins un compte) mais jamais affiché dans les listes de
+    comptes (19/10/2026, demandé : les nouveaux utilisateurs créaient le leur
+    et se retrouvaient avec deux comptes, dont celui-ci)."""
+    return compte.get("adresse") == ADRESSE_COMPTE_FACTICE
 
 def _memoire_processus_actuel_mo():
     """Renvoie la mémoire RSS (working set) du processus Python actuel, en
@@ -19420,6 +19432,8 @@ class DialogueAbonnementsRSS(QDialog):
         item_a_selectionner = None
         total_flux = 0
         for c in COMPTES:
+            if est_compte_factice(c):
+                continue
             adresse = c.get("adresse", "")
             nom_affiche = noms.get(adresse) or (c.get("nom") or adresse).split(" - ")[0]
             nb = sum(1 for f in flux_liste if f.get("compte") == adresse)
@@ -27333,7 +27347,7 @@ class GestionnaireModeles(QDialog):
         noms = charger_noms_comptes()
         self._comptes_affiches = [
             (noms.get(c["adresse"], c["nom"].split(" - ")[0]), c["adresse"])
-            for c in COMPTES
+            for c in COMPTES if not est_compte_factice(c)
         ]
         self.adresse_courante = self._comptes_affiches[0][1] if self._comptes_affiches else None
         self.emplacement_courant = "nouveau"
@@ -28721,7 +28735,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 19h32")
+        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 22h31")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -29747,7 +29761,7 @@ class ClientMail(QMainWindow):
         # n'était que décoratif, sans rôle fonctionnel.)
 
         self.liste_comptes = QListWidget()
-        self.liste_comptes.setFixedHeight(len(COMPTES) * 32 + 4)
+        self.liste_comptes.setFixedHeight(sum(not est_compte_factice(c) for c in COMPTES) * 32 + 4)
         self.liste_comptes.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.liste_comptes.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.liste_comptes.setStyleSheet("""
@@ -29768,6 +29782,7 @@ class ClientMail(QMainWindow):
             item = QListWidgetItem(QIcon(self._pixmap_rond("#666666")), f"  {nom}")
             item.setData(Qt.ItemDataRole.UserRole, (_dossier_inbox_pour(compte), compte))
             self.liste_comptes.addItem(item)
+            item.setHidden(est_compte_factice(compte))
         self.liste_comptes.currentItemChanged.connect(self.on_compte_change)
         self.liste_comptes.currentItemChanged.connect(self._noter_changement_selection)
         self.liste_comptes.itemClicked.connect(self._reclic_compte_courant)
@@ -29791,10 +29806,7 @@ class ClientMail(QMainWindow):
         self.liste_comptes.setAcceptDrops(True)
         self.liste_comptes.viewport().setAcceptDrops(True)
         self.liste_comptes.viewport().installEventFilter(self)
-        def _ajuster_hauteur_liste_comptes():
-            h = self.liste_comptes.sizeHintForRow(0) * self.liste_comptes.count() + 2
-            self.liste_comptes.setFixedHeight(h)
-        QTimer.singleShot(200, _ajuster_hauteur_liste_comptes)
+        QTimer.singleShot(200, self._ajuster_hauteur_liste_comptes)
         layout_dossiers.addWidget(self.liste_comptes)
 
         # Filet noir via paintEvent
@@ -33813,7 +33825,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 19/10/2026 à 19h32")
+        lbl_version = QLabel("Version du 19/10/2026 à 22h31")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -45034,6 +45046,8 @@ __JS_TRADUCTION__
         lignes = []  # (adresse, checkbox, champ_chemin)
 
         for compte in COMPTES:
+            if est_compte_factice(compte):
+                continue
             adresse = compte["adresse"]
             config = sons.get(adresse, {})
 
@@ -45313,8 +45327,17 @@ __JS_TRADUCTION__
         layout.addWidget(lbl_liste)
 
         liste = QListWidget()
-        for c in COMPTES:
-            liste.addItem(QListWidgetItem(f"  {c['nom']}  —  {c['adresse']}"))
+
+        def _remplir_liste():
+            # Une ligne par compte, dans l'ordre de COMPTES (les numéros de
+            # ligne servent d'index) ; le compte factice y est masqué.
+            liste.clear()
+            for c in COMPTES:
+                item = QListWidgetItem(f"  {c['nom']}  —  {c['adresse']}")
+                liste.addItem(item)
+                item.setHidden(est_compte_factice(c))
+
+        _remplir_liste()
         layout.addWidget(liste)
 
         # Monter/Descendre (17/08/2026, demandé — même principe que pour
@@ -45338,9 +45361,7 @@ __JS_TRADUCTION__
                 return
             COMPTES[row], COMPTES[nouvelle_row] = COMPTES[nouvelle_row], COMPTES[row]
             sauvegarder_comptes(COMPTES)
-            liste.clear()
-            for c in COMPTES:
-                liste.addItem(QListWidgetItem(f"  {c['nom']}  —  {c['adresse']}"))
+            _remplir_liste()
             liste.setCurrentRow(nouvelle_row)
             self._maj_liste_comptes()
 
@@ -45851,6 +45872,15 @@ __JS_TRADUCTION__
                 lbl_statut_comptes.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
                 lbl_statut_comptes.setText(f"Ce compte existe déjà : {c['adresse']}")
                 return
+            # Compte factice « A CONFIGURER » (version diffusée) retiré dès
+            # qu'un vrai compte existe (19/10/2026, demandé : il déroutait
+            # les nouveaux utilisateurs, qui ne savaient pas quoi en faire).
+            factice_actif = False
+            for i in reversed(range(len(COMPTES))):
+                if COMPTES[i].get("adresse") == ADRESSE_COMPTE_FACTICE:
+                    factice_actif |= ADRESSE_COMPTE_FACTICE == self.compte_actif.get("adresse", "")
+                    COMPTES.pop(i)
+                    liste.takeItem(i)
             COMPTES.append(c)
             sauvegarder_comptes(COMPTES)
             liste.addItem(QListWidgetItem(f"  {c['nom']}  —  {c['adresse']}"))
@@ -45858,6 +45888,10 @@ __JS_TRADUCTION__
             champ_nom.clear(); champ_adresse.clear(); champ_mdp.clear()
             lbl_statut_comptes.setStyleSheet("color: #80c080; font-family: Verdana; font-size: 11px;")
             lbl_statut_comptes.setText(f"Compte ajouté : {c['adresse']}")
+            # Comme après une suppression : la fenêtre principale bascule sur
+            # le compte restant au lieu de garder l'arborescence du factice.
+            if factice_actif and self.liste_comptes.count() > 0:
+                self.liste_comptes.setCurrentRow(0)
 
         def modifier():
             row = liste.currentRow()
@@ -46121,6 +46155,12 @@ __JS_TRADUCTION__
             item = QListWidgetItem(QIcon(self._pixmap_rond("#666666")), f"  {nom}")
             item.setData(Qt.ItemDataRole.UserRole, (_dossier_inbox_pour(compte), compte))
             self.liste_comptes.addItem(item)
+            item.setHidden(est_compte_factice(compte))
+        self._ajuster_hauteur_liste_comptes()
+
+    def _ajuster_hauteur_liste_comptes(self):
+        """Hauteur de la liste = ses seules lignes visibles (le compte
+        factice « A CONFIGURER » y est masqué)."""
         # Formule précise (29/07/2026), identique à celle utilisée une seule
         # fois au démarrage (_ajuster_hauteur_liste_comptes) : l'ancienne
         # approximation "32px par ligne" ne correspond pas exactement à la
@@ -46130,7 +46170,9 @@ __JS_TRADUCTION__
         # prochain redémarrage (seul moment où la correction précise
         # s'appliquait). En recalculant ici de la même façon, l'espacement
         # reste juste immédiatement, sans attendre un redémarrage.
-        h = self.liste_comptes.sizeHintForRow(0) * self.liste_comptes.count() + 2
+        lignes = [i for i in range(self.liste_comptes.count())
+                  if not self.liste_comptes.item(i).isHidden()]
+        h = (self.liste_comptes.sizeHintForRow(lignes[0]) * len(lignes) if lignes else 0) + 2
         self.liste_comptes.setFixedHeight(h)
 
     # Liste des navigateurs recherchés sur le disque pour le petit menu de
