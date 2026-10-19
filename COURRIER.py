@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-18 20h38"
+VERSION_BUILD = "2026-10-19 17h54"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28719,7 +28719,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 18/10/2026 20h38")
+        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 17h54")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33811,7 +33811,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 18/10/2026 à 20h38")
+        lbl_version = QLabel("Version du 19/10/2026 à 17h54")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -34220,6 +34220,10 @@ if (typeof module === 'object') {
             if modele_sel is not None:
                 modele_sel.blockSignals(False)
             arbre.blockSignals(False)
+        # Suivre le dossier déplacé (19/10/2026, remonté par l'utilisateur) :
+        # arrivé au bord de la zone visible, il disparaissait et il fallait
+        # remonter l'arbre à la barre de défilement avant de continuer.
+        arbre.scrollToItem(item)
         arbre.viewport().update()
 
         # Reconstruire l'ordre complet par parcours en profondeur de l'arbre
@@ -44515,9 +44519,52 @@ __JS_TRADUCTION__
                 if motif:
                     print(f"[FENETRE] message Windows : {motif}")
                     QTimer.singleShot(500, lambda m=motif: self._journal_fenetre(f"500 ms après « {m} »", True))
+                    if any(mot in motif for mot in self._MOTIFS_CADRE_A_REFAIRE):
+                        self._programmer_rafraichissement_cadre()
         except Exception:
             pass
         return super().nativeEvent(type_evenement, message)
+
+    # Image de la fenêtre décalée vers le haut (18-19/10/2026, Dell et écran 34") :
+    # après la mise en veille puis le réveil de l'écran, Windows affiche parfois
+    # le contenu de COURRIER remonté de la hauteur de la barre de titre (23 px),
+    # qui recouvre alors la barre des boutons. Qt n'y voit rien (géométrie
+    # inchangée) et un simple recalcul du cadre (SWP_FRAMECHANGED) ne suffit pas
+    # (essayé en direct le 19/10) ; un VRAI changement de taille, si : on agrandit
+    # la fenêtre d'1 pixel puis on la remet à sa taille, 1, 4 et 10 s après ces
+    # événements (le temps que l'affichage soit stabilisé). Sans effet visible,
+    # y compris fenêtre agrandie (vérifié : reste agrandie, même place).
+    _MOTIFS_CADRE_A_REFAIRE = ("résolution", "échelle", "écran ALLUMÉ", "sortie de veille",
+                               "zone de travail")
+
+    def _programmer_rafraichissement_cadre(self):
+        for delai in (1000, 4000, 10000):
+            QTimer.singleShot(delai, self._rafraichir_cadre_windows)
+
+    def _rafraichir_cadre_windows(self):
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u32 = ctypes.windll.user32
+            hwnd = int(self.winId())
+            if u32.IsIconic(hwnd):
+                return
+            r = wintypes.RECT()
+            u32.GetWindowRect(hwnd, ctypes.byref(r))
+            largeur, hauteur = r.right - r.left, r.bottom - r.top
+            SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x2, 0x4, 0x10
+            drapeaux = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+            u32.SetWindowPos(hwnd, None, 0, 0, largeur, hauteur + 1, drapeaux)
+
+            def _remettre():
+                try:
+                    u32.SetWindowPos(hwnd, None, 0, 0, largeur, hauteur, drapeaux)
+                    print("[FENETRE] image de la fenêtre refaite (taille +1 px puis rétablie)")
+                except Exception as ex:
+                    print(f"[FENETRE] rétablissement de la taille impossible : {ex}")
+            QTimer.singleShot(150, _remettre)
+        except Exception as ex:
+            print(f"[FENETRE] réfection de l'image de la fenêtre impossible : {ex}")
 
     def _decrire_message_fenetre(self, msg):
         import ctypes
@@ -45679,7 +45726,7 @@ __JS_TRADUCTION__
         # Boutons
         layout_btn = QHBoxLayout()
         btn_ajouter   = QPushButton(" Ajouter ")
-        btn_modifier  = QPushButton(" Modifier ")
+        btn_modifier  = QPushButton(" Valider modification ")
         btn_supprimer = QPushButton(" Supprimer ")
         btn_vider_cache = QPushButton(" Vider le cache HTML ")
         # Infobulle reformulée (16/10/2026) pour l'utilisateur : l'ancienne

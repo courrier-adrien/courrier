@@ -186,6 +186,8 @@ if (-not $deCote) {
         Ecrire-Resultat "ECHEC`nLa copie de la nouvelle version a échoué ($erreur). L'ancienne version a été remise en place."
     }
 }
+# Fichiers en place : la fenetre de patience l'annonce (voir SCRIPT_PATIENCE)
+try { Set-Content -LiteralPath (Join-Path (Split-Path -Parent $Patience) "installee") -Value "1" } catch {}
 if ($Relancer -eq 1) {
     $nouveau = Start-Process -FilePath $exe -WorkingDirectory $Installation -PassThru
     # La fenetre de patience reste affichee jusqu'a l'apparition de COURRIER (2 min maxi)
@@ -198,8 +200,10 @@ if ($Relancer -eq 1) {
 '''
 
 # Fenetre de patience affichee pendant la fermeture, le remplacement et le redemarrage
-# (aux couleurs de COURRIER, barre rouge animee). Se ferme quand le script principal
-# (IdScript) est termine, c'est-a-dire une fois le nouveau COURRIER affiche.
+# (aux couleurs de COURRIER, barre rouge animee). Se ferme des que le nouveau COURRIER
+# est affiche (il cree le fichier "courrier_pret" a cote de ce script, 18/10/2026 :
+# avant, elle restait un moment par-dessus un COURRIER deja ouvert, et l'on croyait
+# l'installation inachevee), sinon quand le script principal (IdScript) est termine.
 SCRIPT_PATIENCE = r'''
 param([int]$IdScript, [int]$Relancer)
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -248,6 +252,7 @@ $piste.Controls.Add($bloc)
 
 $script:x = -90
 $script:ticks = 0
+$script:installee = $false
 $minuterie = New-Object System.Windows.Forms.Timer
 $minuterie.Interval = 25
 $minuterie.Add_Tick({
@@ -257,7 +262,16 @@ $minuterie.Add_Tick({
     $script:ticks++
     # Toutes les 0,5 s : le script principal est-il termine ? (securite : 5 min maxi)
     if ($script:ticks % 20 -eq 0) {
-        if (-not (Get-Process -Id $IdScript -ErrorAction SilentlyContinue) -or $script:ticks -gt 12000) {
+        if (-not $script:installee -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot "installee"))) {
+            $script:installee = $true
+            if ($Relancer -eq 1) {
+                $texte.Text = "La mise à jour est installée.`nOuverture de COURRIER ADRIEN..."
+            } else {
+                $texte.Text = "La mise à jour est installée."
+            }
+        }
+        if ((Test-Path -LiteralPath (Join-Path $PSScriptRoot "courrier_pret")) -or
+            -not (Get-Process -Id $IdScript -ErrorAction SilentlyContinue) -or $script:ticks -gt 12000) {
             $minuterie.Stop()
             $f.Close()
         }
@@ -293,8 +307,19 @@ class GestionnaireMiseAJour(QObject):
     # ---------- demarrage ----------
     def demarrer(self):
         QApplication.instance().aboutToQuit.connect(self._arreter_threads)
+        # Premier tour de la boucle Qt = fenetre principale affichee : la fenetre
+        # de patience d'une mise a jour qui vient de s'installer peut se fermer
+        QTimer.singleShot(0, self._signaler_courrier_pret)
         QTimer.singleShot(3000, self._annoncer_resultat_precedent)
         QTimer.singleShot(DELAI_VERIFICATION_MS, self.verifier)
+
+    def _signaler_courrier_pret(self):
+        if os.path.isdir(self.dossier_travail):
+            try:
+                with open(os.path.join(self.dossier_travail, "courrier_pret"), "w") as f:
+                    f.write("1")
+            except OSError:
+                pass
 
     def _arreter_threads(self):
         """A la fermeture : un QThread detruit en cours d'execution fait planter Qt."""
@@ -565,6 +590,11 @@ class GestionnaireMiseAJour(QObject):
                     f.write(contenu)
             if os.path.exists(self.fichier_resultat):
                 os.remove(self.fichier_resultat)
+            for signal in ("installee", "courrier_pret"):
+                try:
+                    os.remove(os.path.join(self.dossier_travail, signal))
+                except OSError:
+                    pass
             subprocess.Popen(
                 ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
                  "-WindowStyle", "Hidden", "-File", script,
