@@ -34,7 +34,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version='version_info.txt',
-    icon='ressources\\courrier.ico',
+    icon='ressources\\ICONES\\courrier.ico',
 )
 coll = COLLECT(
     exe,

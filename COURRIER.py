@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-19 22h50"
+VERSION_BUILD = "2026-10-20 13h37"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -503,6 +503,9 @@ def _installer_ressources_embarquees():
 
 
 _installer_ressources_embarquees()
+
+# Toutes les icônes de l'interface sont rangées dans ce sous-dossier (20/10/2026).
+DOSSIER_ICONES = os.path.join(DOSSIER_APP, "ICONES")
 
 # Extensions des PJ vidéo : icône ICONES\icone_video.png et prévisualisation
 # dans le panneau de lecture via Qt Multimedia (voir _previsualiser_video).
@@ -3040,7 +3043,7 @@ def enregistrer_client_mail_windows():
     pythonw = os.path.join(sys.exec_prefix, "pythonw.exe")
     if not os.path.exists(pythonw):
         pythonw = sys.executable  # repli : python.exe (garde la console visible)
-    icone = os.path.join(DOSSIER_APP, "courrier.ico")
+    icone = os.path.join(DOSSIER_ICONES, "courrier.ico")
     if not os.path.exists(icone):
         icone = pythonw
     commande_ouverture = f'"{pythonw}" "{chemin_script}"'
@@ -17539,8 +17542,8 @@ class WidgetOrganiser(QWidget):
         self.arbre.setHeaderHidden(True)
         self.arbre.setRootIsDecorated(True)
         self.arbre.setIndentation(16)
-        fleche_droite = os.path.join(DOSSIER_APP, "arrow_right.png").replace("\\", "/")
-        fleche_bas = os.path.join(DOSSIER_APP, "arrow_down.png").replace("\\", "/")
+        fleche_droite = os.path.join(DOSSIER_ICONES, "arrow_right.png").replace("\\", "/")
+        fleche_bas = os.path.join(DOSSIER_ICONES, "arrow_down.png").replace("\\", "/")
         self.arbre.setStyleSheet(f"""
             QTreeWidget {{ background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; outline: none; font-family: Verdana; font-size: 11px; }}
             QTreeWidget::item {{ padding: 5px 6px; border-bottom: 1px solid #2f2f2f; }}
@@ -17576,7 +17579,7 @@ class WidgetOrganiser(QWidget):
         # Copié de DialogueOrganiser
         self.arbre.blockSignals(True)
         self.arbre.clear()
-        icone_dossier_path = os.path.join(DOSSIER_APP, "folder.png")
+        icone_dossier_path = os.path.join(DOSSIER_ICONES, "folder.png")
         icone_dossier = QIcon(icone_dossier_path) if os.path.exists(icone_dossier_path) else QIcon()
         noeuds = {}
         for d in self.dossiers:
@@ -17718,8 +17721,8 @@ class DialogueOrganiser(QDialog):
         self.arbre.setHeaderHidden(True)
         self.arbre.setRootIsDecorated(True)
         self.arbre.setIndentation(16)
-        fleche_droite = os.path.join(DOSSIER_APP, "arrow_right.png").replace("\\", "/")
-        fleche_bas = os.path.join(DOSSIER_APP, "arrow_down.png").replace("\\", "/")
+        fleche_droite = os.path.join(DOSSIER_ICONES, "arrow_right.png").replace("\\", "/")
+        fleche_bas = os.path.join(DOSSIER_ICONES, "arrow_down.png").replace("\\", "/")
         self.arbre.setStyleSheet(f"""
             QTreeWidget {{
                 background-color: #1e1e1e; color: white;
@@ -17775,7 +17778,7 @@ class DialogueOrganiser(QDialog):
         self.arbre.blockSignals(True)
         self.arbre.clear()
 
-        icone_dossier_path = os.path.join(DOSSIER_APP, "folder.png")
+        icone_dossier_path = os.path.join(DOSSIER_ICONES, "folder.png")
         icone_dossier = QIcon(icone_dossier_path) if os.path.exists(icone_dossier_path) else QIcon()
 
         noeuds = {}
@@ -18000,8 +18003,8 @@ class DialogueNouveauDossierImap(QDialog):
         self.map_affiche_vers_brut = {}
         self.setWindowTitle(f"Nouveau dossier IMAP — {compte.get('adresse', '')}")
         self.setMinimumSize(380, 480)
-        fleche_droite = os.path.join(DOSSIER_APP, "arrow_right.png").replace("\\", "/")
-        fleche_bas = os.path.join(DOSSIER_APP, "arrow_down.png").replace("\\", "/")
+        fleche_droite = os.path.join(DOSSIER_ICONES, "arrow_right.png").replace("\\", "/")
+        fleche_bas = os.path.join(DOSSIER_ICONES, "arrow_down.png").replace("\\", "/")
         self.setStyleSheet(f"""
             QDialog {{ background-color: #2a2a2a; }}
             QWidget {{ background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }}
@@ -18090,7 +18093,7 @@ class DialogueNouveauDossierImap(QDialog):
         racine.setData(0, Qt.ItemDataRole.UserRole, "")  # chaîne vide = racine (distinct de None = rien sélectionné)
         racine.setForeground(0, QColor("#aaaaaa"))
 
-        icone_dossier_path = os.path.join(DOSSIER_APP, "folder.png")
+        icone_dossier_path = os.path.join(DOSSIER_ICONES, "folder.png")
         icone_dossier = QIcon(icone_dossier_path) if os.path.exists(icone_dossier_path) else QIcon()
         noeuds = {}  # clé = nom affiché décodé (ce que dossiers_charges émet)
         for d in sorted(dossiers):
@@ -18190,8 +18193,8 @@ class DialogueSupprimerDossierImap(QDialog):
         self.a_des_enfants = set()
         self.setWindowTitle(f"Supprimer un dossier IMAP — {compte.get('adresse', '')}")
         self.setMinimumSize(380, 480)
-        fleche_droite = os.path.join(DOSSIER_APP, "arrow_right.png").replace("\\", "/")
-        fleche_bas = os.path.join(DOSSIER_APP, "arrow_down.png").replace("\\", "/")
+        fleche_droite = os.path.join(DOSSIER_ICONES, "arrow_right.png").replace("\\", "/")
+        fleche_bas = os.path.join(DOSSIER_ICONES, "arrow_down.png").replace("\\", "/")
         self.setStyleSheet(f"""
             QDialog {{ background-color: #2a2a2a; }}
             QWidget {{ background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }}
@@ -18274,7 +18277,7 @@ class DialogueSupprimerDossierImap(QDialog):
                 self.a_des_enfants.add(parent_key)
 
         noeuds = {}
-        icone_dossier_path = os.path.join(DOSSIER_APP, "folder.png")
+        icone_dossier_path = os.path.join(DOSSIER_ICONES, "folder.png")
         icone_dossier = QIcon(icone_dossier_path) if os.path.exists(icone_dossier_path) else QIcon()
         for d in sorted(dossiers):
             parties = d.split(".")
@@ -18394,8 +18397,8 @@ class DialogueRenommerDossierImap(QDialog):
         self.dossier_cible = dossier_cible
         self.setWindowTitle(f"Renommer un dossier IMAP — {compte.get('adresse', '')}")
         self.setMinimumSize(380, 500)
-        fleche_droite = os.path.join(DOSSIER_APP, "arrow_right.png").replace("\\", "/")
-        fleche_bas = os.path.join(DOSSIER_APP, "arrow_down.png").replace("\\", "/")
+        fleche_droite = os.path.join(DOSSIER_ICONES, "arrow_right.png").replace("\\", "/")
+        fleche_bas = os.path.join(DOSSIER_ICONES, "arrow_down.png").replace("\\", "/")
         self.setStyleSheet(f"""
             QDialog {{ background-color: #2a2a2a; }}
             QWidget {{ background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }}
@@ -18491,7 +18494,7 @@ class DialogueRenommerDossierImap(QDialog):
     def _on_dossiers_charges(self, dossiers):
         self.arbre.clear()
         noeuds = {}
-        icone_dossier_path = os.path.join(DOSSIER_APP, "folder.png")
+        icone_dossier_path = os.path.join(DOSSIER_ICONES, "folder.png")
         icone_dossier = QIcon(icone_dossier_path) if os.path.exists(icone_dossier_path) else QIcon()
         for d in sorted(dossiers):
             parties = d.split(".")
@@ -20151,7 +20154,7 @@ class DialogueCarnetAdresses(QDialog):
         carnet = charger_carnet()
         dossiers = sorted(carnet.get("dossiers", []), key=cle_tri_alpha)
 
-        icone_dossier_path = os.path.join(DOSSIER_APP, "folder.png")
+        icone_dossier_path = os.path.join(DOSSIER_ICONES, "folder.png")
         icone_dossier = QIcon(icone_dossier_path) if os.path.exists(icone_dossier_path) else QIcon()
 
         self.liste_dossiers.addItem(QListWidgetItem(self.DOSSIER_TOUS))
@@ -28264,7 +28267,7 @@ class FenetrePhotosIntrouvables(QWidget):
             QHeaderView::section { background-color: #A52A2A; color: white; font-weight: bold;
                                    font-family: Verdana; font-size: 11px; padding: 4px; border: none; }
         """)
-        icone = os.path.join(DOSSIER_APP, "courrier.ico")
+        icone = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(icone):
             self.setWindowIcon(QIcon(icone))
         couche = QVBoxLayout(self)
@@ -28463,7 +28466,7 @@ class FenetreConsole(QWidget):
                            text-align: center; font-family: Verdana; font-size: 10px; height: 16px; }
             QProgressBar::chunk { background-color: #A52A2A; }
         """)
-        icone = os.path.join(DOSSIER_APP, "courrier.ico")
+        icone = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(icone):
             self.setWindowIcon(QIcon(icone))
         couche = QVBoxLayout(self)
@@ -28737,8 +28740,8 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 22h50")
-        _ico = os.path.join(DOSSIER_APP, "courrier.ico")
+        self.setWindowTitle("COURRIER ADRIEN — 20/10/2026 13h37")
+        _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
         self._nettoyer_dossier_apercu()
@@ -29987,8 +29990,8 @@ class ClientMail(QMainWindow):
         self.arbre_dossiers.setHeaderHidden(True)
         self.arbre_dossiers.setRootIsDecorated(True)
         self.arbre_dossiers.setIndentation(16)
-        fleche_droite = os.path.join(DOSSIER_APP, "arrow_right.png").replace("\\", "/")
-        fleche_bas = os.path.join(DOSSIER_APP, "arrow_down.png").replace("\\", "/")
+        fleche_droite = os.path.join(DOSSIER_ICONES, "arrow_right.png").replace("\\", "/")
+        fleche_bas = os.path.join(DOSSIER_ICONES, "arrow_down.png").replace("\\", "/")
         self.arbre_dossiers.setStyleSheet(f"""
             QTreeWidget {{
                 background-color: #252525; color: white;
@@ -30459,7 +30462,7 @@ class ClientMail(QMainWindow):
         # Se désactive pour file:// (le corps du mail a déjà son propre
         # badge, pas besoin de le dupliquer) — ne s'applique donc qu'aux
         # pages web réellement externes.
-        _chemin_icone_img_ext = os.path.join(DOSSIER_APP, "icone_img.png")
+        _chemin_icone_img_ext = os.path.join(DOSSIER_ICONES, "icone_img.png")
         if os.path.exists(_chemin_icone_img_ext):
             try:
                 import base64 as _base64_icone_ext
@@ -31946,7 +31949,7 @@ if (typeof module === 'object') {
         self.arbre_dossiers.blockSignals(True)
         self.arbre_dossiers.clear()
 
-        icone_dossier_path = os.path.join(DOSSIER_APP, "folder.png")
+        icone_dossier_path = os.path.join(DOSSIER_ICONES, "folder.png")
         icone_dossier = QIcon(icone_dossier_path) if os.path.exists(icone_dossier_path) else QIcon()
 
         noms = charger_noms_comptes()
@@ -33827,7 +33830,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 19/10/2026 à 22h50")
+        lbl_version = QLabel("Version du 20/10/2026 à 13h37")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -39330,7 +39333,7 @@ if (typeof module === 'object') {
     @staticmethod
     def _chemin_icone_pour_type(nom):
         """Retourne le chemin complet de l'icône PNG selon l'extension.
-        Pour ajouter un type : déposer icone_xxx.png dans DOSSIER_APP et
+        Pour ajouter un type : déposer icone_xxx.png dans DOSSIER_ICONES et
         ajouter les extensions correspondantes dans le dict ci-dessous."""
         ext = os.path.splitext(nom)[1].lower()
         mapping = {
@@ -39359,23 +39362,23 @@ if (typeof module === 'object') {
             ".webp": "icone_img.png",
             ".tif":  "icone_img.png",
             ".tiff": "icone_img.png",
-            # Vidéos (25/09/2026) : icône rangée dans le sous-dossier ICONES
-            ".mp4":  os.path.join("ICONES", "icone_video.png"),
-            ".m4v":  os.path.join("ICONES", "icone_video.png"),
-            ".mov":  os.path.join("ICONES", "icone_video.png"),
-            ".avi":  os.path.join("ICONES", "icone_video.png"),
-            ".mkv":  os.path.join("ICONES", "icone_video.png"),
-            ".wmv":  os.path.join("ICONES", "icone_video.png"),
-            ".webm": os.path.join("ICONES", "icone_video.png"),
-            ".mpg":  os.path.join("ICONES", "icone_video.png"),
-            ".mpeg": os.path.join("ICONES", "icone_video.png"),
-            ".3gp":  os.path.join("ICONES", "icone_video.png"),
-            ".flv":  os.path.join("ICONES", "icone_video.png"),
-            ".ogv":  os.path.join("ICONES", "icone_video.png"),
+            # Vidéos (25/09/2026)
+            ".mp4":  "icone_video.png",
+            ".m4v":  "icone_video.png",
+            ".mov":  "icone_video.png",
+            ".avi":  "icone_video.png",
+            ".mkv":  "icone_video.png",
+            ".wmv":  "icone_video.png",
+            ".webm": "icone_video.png",
+            ".mpg":  "icone_video.png",
+            ".mpeg": "icone_video.png",
+            ".3gp":  "icone_video.png",
+            ".flv":  "icone_video.png",
+            ".ogv":  "icone_video.png",
         }
         nom_fichier = mapping.get(ext)
         if nom_fichier:
-            return os.path.join(DOSSIER_APP, nom_fichier)
+            return os.path.join(DOSSIER_ICONES, nom_fichier)
         return None
 
     def _charger_pj_arriere_plan(self, uid, dossier_item):
@@ -39463,7 +39466,7 @@ if (typeof module === 'object') {
         # Icônes par type de fichier — réutilise le même mapping PNG que la
         # fenêtre de rédaction (_chemin_icone_pour_type / vos fichiers
         # icone_pdf.png, icone_word.png, icone_excel.png, icone_img.png,
-        # icone_zip.png dans DOSSIER_APP), intégrées en data URI base64
+        # icone_zip.png dans DOSSIER_ICONES), intégrées en data URI base64
         # plutôt qu'en file:// (plus fiable dans CEF). Fallback en texte
         # entre crochets ([PDF], [DOC]...) si le fichier PNG est absent —
         # cohérent avec le fallback déjà utilisé dans la fenêtre de
@@ -43974,7 +43977,7 @@ __JS_TRADUCTION__
         # Icône "image" déjà utilisée ailleurs dans l'appli (pièces jointes
         # de type image) réutilisée ici pour la pastille de téléchargement
         # en un clic — confirmé présent dans le dossier COURRIER2.
-        _chemin_icone_img = os.path.join(DOSSIER_APP, "icone_img.png")
+        _chemin_icone_img = os.path.join(DOSSIER_ICONES, "icone_img.png")
         if os.path.exists(_chemin_icone_img):
             _icone_img_html = (
                 '<img src="file:///' + _chemin_icone_img.replace("\\", "/")
@@ -46917,7 +46920,7 @@ if __name__ == "__main__":
     _palette.setColor(QPalette.ColorGroup.Inactive, QPalette.ColorRole.Highlight, _rouge)
     _palette.setColor(QPalette.ColorGroup.Inactive, QPalette.ColorRole.HighlightedText, QColor("white"))
     app.setPalette(_palette)
-    _ico = os.path.join(DOSSIER_APP, "courrier.ico")
+    _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
     if os.path.exists(_ico):
         app.setWindowIcon(QIcon(_ico))
 
