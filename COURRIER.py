@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-19 22h31"
+VERSION_BUILD = "2026-10-19 22h50"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -1231,6 +1231,13 @@ def sauvegarder_intervalle_compte(adresse, minutes):
 
 FICHIER_COMPTES = os.path.join(DOSSIER_APP, "comptes.json")
 
+# Adresse du compte factice « A CONFIGURER » que la version diffusée crée au
+# tout premier lancement (voir BUILD_DIFFUSION\patch.py) : il est retiré
+# automatiquement dès que l'utilisateur ajoute son vrai compte. Définie AVANT
+# COMPTES_DEFAUT, que la version diffusée construit avec (sinon NameError au
+# démarrage de l'exe, 19/10/2026).
+ADRESSE_COMPTE_FACTICE = "nouveau@exemple.org"
+
 # Compte factice du tout premier lancement : l'appli suppose qu'il existe toujours au
 # moins un compte (COMPTES[0], et "impossible de supprimer le dernier compte"). Il
 # ne contient aucun identifiant et pointe vers un port local ferme ; la fenetre
@@ -1251,11 +1258,6 @@ COMPTES_DEFAUT = [
         "protocole": "imap",
     },
 ]
-
-# Adresse du compte factice « A CONFIGURER » que la version diffusée crée au
-# tout premier lancement (voir BUILD_DIFFUSION\patch.py) : il est retiré
-# automatiquement dès que l'utilisateur ajoute son vrai compte.
-ADRESSE_COMPTE_FACTICE = "nouveau@exemple.org"
 
 def est_compte_factice(compte):
     """Vrai pour le compte « A CONFIGURER » : gardé en interne (l'appli
@@ -28735,7 +28737,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 22h31")
+        self.setWindowTitle("COURRIER ADRIEN — 19/10/2026 22h50")
         _ico = os.path.join(DOSSIER_APP, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33825,7 +33827,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 19/10/2026 à 22h31")
+        lbl_version = QLabel("Version du 19/10/2026 à 22h50")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
