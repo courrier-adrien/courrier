@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-20 13h37"
+VERSION_BUILD = "2026-10-20 18h14"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28740,7 +28740,7 @@ class FenetreConsole(QWidget):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 20/10/2026 13h37")
+        self.setWindowTitle("COURRIER ADRIEN — 20/10/2026 18h14")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -29441,12 +29441,6 @@ class ClientMail(QMainWindow):
         layout_haut.addWidget(btn_controle)
         layout_haut.addSpacing(3)
 
-        btn_supprimer_barre = QPushButton("SUPPRIMER")
-        btn_supprimer_barre.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_supprimer_barre.clicked.connect(self.supprimer_message)
-        layout_haut.addWidget(btn_supprimer_barre)
-        layout_haut.addSpacing(3)
-
         btn_comptes = QPushButton("COMPTES")
         btn_comptes.setStyleSheet(STYLE_BOUTON_HAUT)
         btn_comptes.clicked.connect(self.gerer_comptes)
@@ -29686,6 +29680,12 @@ class ClientMail(QMainWindow):
             btn.clicked.connect(slot)
             layout_haut.addWidget(btn)
             layout_haut.addSpacing(3)
+
+        # SUPPRIMER tout à droite, après RENVOYER (20/10/2026, demandé)
+        btn_supprimer_barre = QPushButton("SUPPRIMER")
+        btn_supprimer_barre.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_supprimer_barre.clicked.connect(self.supprimer_message)
+        layout_haut.addWidget(btn_supprimer_barre)
 
         # Barre adaptée à la largeur (10/10/2026, affichage Windows 125 % :
         # les boutons ne tenaient plus et Qt coupait leur texte, ex.
@@ -33830,7 +33830,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 20/10/2026 à 13h37")
+        lbl_version = QLabel("Version du 20/10/2026 à 18h14")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
