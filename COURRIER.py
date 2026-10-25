@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-20 18h14"
+VERSION_BUILD = "2026-10-25 15h01"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -1550,6 +1550,23 @@ def _sauvegarder_cache_oauth(adresse, cache):
         except Exception as e:
             print(f"Erreur sauvegarde cache OAuth ({adresse}) : {e}")
 
+def _session_http_msal():
+    """Session requests pour MSAL (25/10/2026) : requests ne fait confiance
+    qu'à certifi, donc refuse le certificat d'un antivirus qui analyse le
+    HTTPS (ESET, règle COURRIER du 20/10/2026 : synchro Outlook en
+    CERTIFICATE_VERIFY_FAILED). Même confiance que CONTEXTE_SSL."""
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    class _AdaptateurContexteSSL(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            kwargs["ssl_context"] = CONTEXTE_SSL
+            return super().init_poolmanager(*args, **kwargs)
+
+    session = requests.Session()
+    session.mount("https://", _AdaptateurContexteSSL())
+    return session
+
 def _app_msal_pour(adresse):
     """Retourne (app_msal, cache) — le cache est retourné à part car
     has_state_changed doit être vérifié APRÈS l'appel qui a pu le modifier
@@ -1563,7 +1580,7 @@ def _app_msal_pour(adresse):
     cache = _charger_cache_oauth(adresse)
     app = msal.PublicClientApplication(
         CLIENT_ID_OAUTH_OUTLOOK, authority=AUTORITE_OAUTH_OUTLOOK,
-        token_cache=cache,
+        token_cache=cache, http_client=_session_http_msal(),
     )
     return app, cache
 
@@ -14874,12 +14891,27 @@ class ExtracteurVideoWeb(QThread):
             options = {"quiet": True, "no_warnings": True, "skip_download": True,
                        "socket_timeout": 15, "playlistend": 10, "noprogress": True}
             import http.cookiejar as _cj
-            with yt_dlp.YoutubeDL(options) as ydl:
+            # yt-dlp ne fait confiance qu'à certifi : un antivirus qui analyse
+            # le HTTPS (ESET, règle COURRIER du 20/10/2026) re-signe avec sa
+            # racine du magasin Windows -> CERTIFICATE_VERIFY_FAILED. Second
+            # essai avec le magasin Windows ("no-certifi"), comme CONTEXTE_SSL.
+            # (copies : yt-dlp ajoute lui-même compat_opts au dict reçu)
+            for magasin_windows in (False, True):
+                essai = dict(options, compat_opts=["no-certifi"]) if magasin_windows else dict(options)
+                ydl = yt_dlp.YoutubeDL(essai)
                 for nom, valeur, domaine, chemin, securise, expire in self.cookies:
                     ydl.cookiejar.set_cookie(_cj.Cookie(
                         0, nom, valeur, None, False, domaine, True, domaine.startswith("."),
                         chemin, True, securise, expire, expire is None, None, None, {}))
-                info = ydl.extract_info(self.url_page, download=False)
+                try:
+                    info = ydl.extract_info(self.url_page, download=False)
+                    break
+                except Exception as e:
+                    ydl.close()
+                    if "CERTIFICATE_VERIFY_FAILED" not in str(e) or magasin_windows:
+                        raise
+                    print(f"[VIDEO-WEB] certificat refusé avec certifi, essai avec le magasin Windows")
+            with ydl:
                 entrees = [e for e in (info.get("entries") or [info]) if e] if info else []
                 for e in entrees[:10]:
                     url, entetes = self._choisir_flux(e)
@@ -28737,10 +28769,56 @@ class FenetreConsole(QWidget):
             f"{_t.strftime('%H:%M:%S')}")
 
 
+def creer_cadre_presse_papiers(style_bouton):
+    """Cadre COPIER / COUPER / COLLER de la barre du bas (25/10/2026,
+    demandé, même encadré blanc que les macros ; repris dans photos,
+    navigateur et explorateur). Chaque bouton rejoue Ctrl+C / Ctrl+X /
+    Ctrl+V au clavier : l'effet est exactement celui du raccourci là où
+    se trouvait l'utilisateur (champ de saisie, page web, mails ou
+    fichiers sélectionnés...). Les boutons ne prennent pas le focus ; si
+    le clic l'a quand même déplacé côté Windows (page web), on le rend à
+    la fenêtre qui l'avait à l'appui du bouton."""
+    import ctypes
+    user32 = ctypes.WinDLL("user32")  # instance à part : argtypes sans effet ailleurs
+    user32.GetFocus.restype = ctypes.c_void_p
+    user32.SetFocus.argtypes = [ctypes.c_void_p]
+    cadre = QFrame()
+    cadre.setObjectName("cadrePressePapiers")
+    cadre.setStyleSheet(
+        "QFrame#cadrePressePapiers { border: 1px solid white; background-color: #A52A2A; }")
+    cadre.setFixedHeight(22)
+    layout = QHBoxLayout(cadre)
+    layout.setContentsMargins(3, 2, 3, 2)
+    layout.setSpacing(4)
+    focus_avant = [None]
+
+    def _memoriser_focus():
+        focus_avant[0] = user32.GetFocus()
+
+    def _rejouer(vk):
+        if focus_avant[0] and user32.GetFocus() != focus_avant[0]:
+            user32.SetFocus(focus_avant[0])
+        for touche, drapeau in ((0x11, 0), (vk, 0), (vk, 2), (0x11, 2)):  # 0x11 = Ctrl, 2 = relâchée
+            user32.keybd_event(touche, 0, drapeau, 0)
+
+    for libelle, vk, raccourci in (("COPIER", 0x43, "Ctrl+C"),
+                                   ("COUPER", 0x58, "Ctrl+X"),
+                                   ("COLLER", 0x56, "Ctrl+V")):
+        btn = QPushButton(libelle)
+        btn.setStyleSheet(style_bouton)
+        btn.setFixedHeight(16)
+        btn.setToolTip(f"{libelle.capitalize()} ({raccourci})")
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.pressed.connect(_memoriser_focus)
+        btn.clicked.connect(lambda _=False, vk=vk: _rejouer(vk))
+        layout.addWidget(btn)
+    return cadre
+
+
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 20/10/2026 18h14")
+        self.setWindowTitle("COURRIER ADRIEN — 25/10/2026 15h01")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31242,10 +31320,10 @@ if (typeof module === 'object') {
         # automatique) :
         # - frame_bas : barre des boutons, découpée en 3 zones calées sur
         #   les colonnes du splitter (voir _aligner_barre_boutons) — SPAM
-        #   sous les comptes, téléchargement centré sous la liste des
-        #   mails, macros encadrées centrées sous le mail, DÉLAI à droite ;
+        #   puis téléchargement sous les comptes, macros encadrées centrées
+        #   sous le mail, COPIER / COUPER / COLLER à l'extrême droite ;
         # - frame_statut, tout en bas : label_statut sur toute la largeur
-        #   disponible, et à droite CONSOLE, À PROPOS, AIDE, DÉFAUT.
+        #   disponible, et à droite DÉLAI, CONSOLE, À PROPOS, AIDE, DÉFAUT.
         from PySide6.QtWidgets import QGridLayout
         frame_bas = QFrame()
         frame_bas.setStyleSheet("background-color: #A52A2A;")
@@ -31316,7 +31394,6 @@ if (typeof module === 'object') {
         self._btn_non_spam.clicked.connect(self.demarquer_spam)
         self._btn_non_spam.setVisible(False)
         layout_zone_gauche.addWidget(self._btn_non_spam)
-        layout_zone_gauche.addStretch(1)
 
         self.label_statut = QLabel("Connexion en cours...")
         self.label_statut.setStyleSheet("color: white; font-family: Verdana; font-size: 11px; font-weight: bold;")
@@ -31385,8 +31462,10 @@ if (typeof module === 'object') {
         self._btn_dl_dossier.setToolTip(
             f"Dossier des téléchargements : {dossier_enregistrement('telechargements')}")
         self._btn_dl_dossier.clicked.connect(self._dl_choisir_dossier)
-        layout_zone_liste.addStretch(1)
-        layout_zone_liste.addWidget(self._btn_dl_dossier)
+        # Gestionnaire de téléchargement juste à droite de SPAM / NON SPAM
+        # (25/10/2026, demandé) ; il était centré sous la liste des mails.
+        layout_zone_gauche.addSpacing(8)
+        layout_zone_gauche.addWidget(self._btn_dl_dossier)
 
         self._btn_dl_stop = QPushButton()
         self._btn_dl_stop.setIcon(self._creer_icone_dl("stop"))
@@ -31395,7 +31474,7 @@ if (typeof module === 'object') {
         self._btn_dl_stop.setEnabled(False)
         self._btn_dl_stop.setToolTip("Arrêter le téléchargement")
         self._btn_dl_stop.clicked.connect(self._dl_stop)
-        layout_zone_liste.addWidget(self._btn_dl_stop)
+        layout_zone_gauche.addWidget(self._btn_dl_stop)
 
         self._btn_dl_pause = QPushButton()
         self._btn_dl_pause.setIcon(self._creer_icone_dl("pause"))
@@ -31404,7 +31483,7 @@ if (typeof module === 'object') {
         self._btn_dl_pause.setEnabled(False)
         self._btn_dl_pause.setToolTip("Mettre en pause / reprendre")
         self._btn_dl_pause.clicked.connect(self._dl_pause_resume)
-        layout_zone_liste.addWidget(self._btn_dl_pause)
+        layout_zone_gauche.addWidget(self._btn_dl_pause)
 
         self._btn_dl_annuler = QPushButton()
         self._btn_dl_annuler.setIcon(self._creer_icone_dl("annuler"))
@@ -31413,8 +31492,8 @@ if (typeof module === 'object') {
         self._btn_dl_annuler.setEnabled(False)
         self._btn_dl_annuler.setToolTip("Annuler le téléchargement")
         self._btn_dl_annuler.clicked.connect(self._dl_annuler)
-        layout_zone_liste.addWidget(self._btn_dl_annuler)
-        layout_zone_liste.addSpacing(4)
+        layout_zone_gauche.addWidget(self._btn_dl_annuler)
+        layout_zone_gauche.addSpacing(4)
         self._dl_item_courant = None
 
         # Barre de progression des téléchargements — masquée par défaut,
@@ -31434,8 +31513,8 @@ if (typeof module === 'object') {
         self._barre_progression_dl.setRange(0, 100)
         self._barre_progression_dl.setValue(0)
         self._barre_progression_dl.setFormat("")  # vide au repos, restera visible en permanence
-        layout_zone_liste.addWidget(self._barre_progression_dl)
-        layout_zone_liste.addStretch(1)
+        layout_zone_gauche.addWidget(self._barre_progression_dl)
+        layout_zone_gauche.addStretch(1)
 
         STYLE_BTN_BAS = """
             QPushButton {
@@ -31446,6 +31525,12 @@ if (typeof module === 'object') {
             }
             QPushButton:hover { background-color: #c03030; }
         """
+
+        # COPIER / COUPER / COLLER (25/10/2026, demandé) : à l'extrême droite
+        # de la ligne, à la place qu'occupait DÉLAI (même case de grille que
+        # les macros centrées).
+        layout_zone_mail.addWidget(creer_cadre_presse_papiers(STYLE_BTN_BAS), 0, 0,
+                                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         # Boutons de macros simples (un par macro définie dans macros.json,
         # déclenchées sur le mail actuellement sélectionné dans la liste) —
@@ -31467,14 +31552,27 @@ if (typeof module === 'object') {
         self._regenerer_boutons_macros(STYLE_BTN_BAS)
 
         btn_delai = QPushButton("DÉLAI")
-        btn_delai.setStyleSheet(STYLE_BTN_BAS)
+        # Orange (25/10/2026, demandé) comme BADGE et NAVIGATEUR 2 cochés dans
+        # le navigateur : signale que le délai d'envoi est en service — il
+        # l'est toujours depuis le retrait du mode « aucun » (25/09/2026).
+        btn_delai.setStyleSheet(STYLE_BTN_BAS + """
+            QPushButton, QPushButton:hover { background-color: #DAA520; color: black; }
+        """)
         btn_delai.setFixedHeight(16)
         def _ouvrir_delai():
             self._ouvrir_dialogue_delai()
         btn_delai.clicked.connect(_ouvrir_delai)
-        layout_zone_mail.addWidget(btn_delai, 0, 0,
-                                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Ligne du bas, juste à gauche de CONSOLE (25/10/2026, demandé) ; il
+        # était auparavant à droite des macros, sous la zone du mail.
+        layout_statut.addWidget(btn_delai)
         self._btn_delai = btn_delai
+
+        # Tirets entre DÉLAI, CONSOLE, À PROPOS, AIDE, DÉFAUT et FERMER
+        # (25/10/2026, demandé)
+        def _tiret():
+            tiret = QLabel("-")
+            tiret.setStyleSheet("color: white; font-family: Verdana; font-size: 11px; font-weight: bold;")
+            return tiret
         self._maj_label_delai()
 
         btn_console = QPushButton("CONSOLE")
@@ -31507,6 +31605,7 @@ if (typeof module === 'object') {
             except Exception:
                 pass
         btn_console.clicked.connect(_basculer_console2)
+        layout_statut.addWidget(_tiret())
         layout_statut.addWidget(btn_console)
 
         # Bouton À PROPOS (16/08/2026, demandé — écran affichant la licence
@@ -31521,6 +31620,7 @@ if (typeof module === 'object') {
         btn_apropos.setStyleSheet(STYLE_BTN_BAS)
         btn_apropos.setFixedHeight(16)
         btn_apropos.clicked.connect(self.ouvrir_a_propos)
+        layout_statut.addWidget(_tiret())
         layout_statut.addWidget(btn_apropos)
 
         # Bouton AIDE (13/10/2026, demandé) : ouvre le mode d'emploi HTML
@@ -31531,6 +31631,7 @@ if (typeof module === 'object') {
         btn_aide.setFixedHeight(16)
         btn_aide.setToolTip("Ouvrir le mode d'emploi de Courrier Adrien")
         btn_aide.clicked.connect(self.ouvrir_mode_emploi)
+        layout_statut.addWidget(_tiret())
         layout_statut.addWidget(btn_aide)
 
         # Bouton DÉFAUT (15/09/2026, demandé) : enregistre COURRIER auprès
@@ -31546,7 +31647,19 @@ if (typeof module === 'object') {
             "par défaut (ouvre ensuite les réglages Windows pour confirmer "
             "le choix)")
         btn_definir_defaut.clicked.connect(self._definir_courrier_comme_appli_mail)
+        layout_statut.addWidget(_tiret())
         layout_statut.addWidget(btn_definir_defaut)
+
+        # Bouton FERMER tout à droite de la barre de statut (25/10/2026,
+        # demandé, comme dans la fenêtre PDF) : même effet que la croix.
+        btn_fermer_bas = QPushButton("FERMER")
+        btn_fermer_bas.setStyleSheet(STYLE_BTN_BAS)
+        btn_fermer_bas.setFixedHeight(16)
+        btn_fermer_bas.setToolTip("Fermer COURRIER")
+        btn_fermer_bas.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_fermer_bas.clicked.connect(self.close)
+        layout_statut.addWidget(_tiret())
+        layout_statut.addWidget(btn_fermer_bas)
 
         # Ligne dédiée à l'envoi différé (28/07/2026, à la demande de
         # l'utilisateur) : ponctuelle, elle n'existe que pendant un compte à
@@ -31593,9 +31706,12 @@ if (typeof module === 'object') {
 
     def _aligner_barre_boutons(self):
         """Cale les zones de la barre de boutons (17/10/2026) sur les
-        colonnes du splitter : zone gauche = colonne des comptes, zone
-        liste = colonne des mails (téléchargement centré dessous), le
-        reste = panneau du mail (macros centrées, DÉLAI à droite)."""
+        colonnes du splitter : zone gauche = colonne des comptes (SPAM et
+        téléchargement), zone liste = colonne des mails (vide), le reste =
+        panneau du mail (macros centrées, COPIER / COUPER / COLLER à droite).
+        Chaque zone garde au moins la largeur de ses boutons (25/10/2026) :
+        si la colonne est plus étroite, la zone déborde sur la suivante
+        plutôt que de rogner les boutons."""
         try:
             from PySide6.QtCore import QPoint
             origine = self._frame_bas.mapTo(self, QPoint(0, 0)).x()
@@ -31603,8 +31719,11 @@ if (typeof module === 'object') {
             debut_mail = self.splitter.widget(2).mapTo(self, QPoint(0, 0)).x() - origine
             if debut_liste <= 0 or debut_mail <= debut_liste:
                 return
-            self._zone_bas_gauche.setFixedWidth(debut_liste)
-            self._zone_bas_liste.setFixedWidth(debut_mail - debut_liste)
+            largeur_gauche = max(debut_liste, self._zone_bas_gauche.minimumSizeHint().width())
+            largeur_liste = max(debut_mail - largeur_gauche,
+                                self._zone_bas_liste.minimumSizeHint().width())
+            self._zone_bas_gauche.setFixedWidth(largeur_gauche)
+            self._zone_bas_liste.setFixedWidth(largeur_liste)
         except Exception:
             pass
 
@@ -33830,7 +33949,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 20/10/2026 à 18h14")
+        lbl_version = QLabel("Version du 25/10/2026 à 15h01")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -36502,6 +36621,12 @@ if (typeof module === 'object') {
                 try:
                     he = _dt3.datetime.fromisoformat(e["heure_envoi"])
                     restant = int((he - maintenant).total_seconds())
+                    if e.get("echec"):
+                        # Envoi déjà raté (PC hors ligne...) : on le dit,
+                        # le motif exact est dans l'info-bulle.
+                        nouvel_essai = f"nouvel essai dans {restant}s" if restant > 0 else "nouvel essai..."
+                        msgs.append(f"(⚠ non parti, {nouvel_essai}) {e.get('sujet','(sans sujet)')[:40]}")
+                        continue
                     if restant > 0:
                         decompte = f"{restant}s"
                     else:
@@ -36515,7 +36640,9 @@ if (typeof module === 'object') {
             # barre de statut aux côtés d'autres éléments) — la troncature
             # reste nécessaire pour éviter un texte démesuré avec de
             # nombreux envois en attente, mais peut être bien plus généreuse.
-            self._lbl_file_envoi.setToolTip(texte_complet.strip())
+            echecs = [f"« {e.get('sujet', '')} » : {e['echec']}" for e in file if e.get("echec")]
+            self._lbl_file_envoi.setToolTip(texte_complet.strip()
+                                            + ("\n\nDernière erreur :\n" + "\n".join(echecs) if echecs else ""))
             self._lbl_file_envoi.setText(texte_complet[:160] + ("…" if len(texte_complet) > 160 else ""))
             self._barre_envoi_differe.show()
 
@@ -36529,12 +36656,23 @@ if (typeof module === 'object') {
         if not file:
             return
         now = _dt4.datetime.now()
-        a_envoyer = [e for e in file if _dt4.datetime.fromisoformat(e["heure_envoi"]) <= now]
-        restants  = [e for e in file if _dt4.datetime.fromisoformat(e["heure_envoi"]) > now]
+        # Un mail reste dans file_envoi.json jusqu'à ce que son envoi ait
+        # RÉUSSI (22/10/2026) : auparavant il en était retiré dès le
+        # lancement, et un échec (PC hors ligne...) était ignoré — le mail
+        # disparaissait sans laisser de trace, ni dans la file ni dans les
+        # Brouillons. Les envois en cours sont mémorisés ici pour ne pas
+        # relancer le même mail toutes les 15 s pendant qu'il part.
+        if not hasattr(self, '_ids_envoi_en_cours'):
+            self._ids_envoi_en_cours = set()
+        a_envoyer = [e for e in file
+                     if _dt4.datetime.fromisoformat(e["heure_envoi"]) <= now
+                     and e.get("id") not in self._ids_envoi_en_cours]
         for entree in a_envoyer:
             try:
                 compte = next((c for c in COMPTES if c["adresse"] == entree["compte_adresse"]), None)
                 if not compte:
+                    self._reporter_envoi_differe(entree.get("id"), "Compte introuvable : "
+                                                 + str(entree.get("compte_adresse", "")))
                     continue
                 def decouper(t):
                     return [a.strip() for a in re.split(r"[;,\n\r]+", t) if a.strip()]
@@ -36604,8 +36742,13 @@ if (typeof module === 'object') {
 
                 def _apres_envoi_differe(succes, message_erreur, th=envoyeur,
                                           cpt=compte, ent=entree):
+                    self._ids_envoi_en_cours.discard(ent.get("id"))
                     if not succes:
+                        # Le mail reste en file : nouvel essai dans une
+                        # minute, jusqu'à ce que la connexion revienne.
+                        self._reporter_envoi_differe(ent.get("id"), message_erreur)
                         return
+                    self._retirer_de_file_envoi(ent.get("id"))
                     # Marquer le mail d'origine comme "répondu", exactement
                     # comme pour un envoi immédiat — c'est ici que se
                     # produisait le manque le plus flagrant : un envoi
@@ -36661,12 +36804,38 @@ if (typeof module === 'object') {
                 # connecté ses signaux laissait une fenêtre, même brève, où
                 # un aller-retour SMTP anormalement rapide pouvait émettre
                 # termine avant que _apres_envoi_differe soit branché dessus.
+                self._ids_envoi_en_cours.add(entree.get("id"))
                 envoyeur.start()
-            except Exception:
-                pass
+            except Exception as e:
+                self._reporter_envoi_differe(entree.get("id"), str(e))
+
+    def _retirer_de_file_envoi(self, mail_id):
+        """Retire de la file un mail dont l'envoi différé a réussi."""
+        file = charger_file_envoi()
+        restants = [e for e in file if e.get("id") != mail_id]
         if len(restants) != len(file):
             sauvegarder_file_envoi(restants)
-            self._maj_widget_file_envoi()
+        self._maj_widget_file_envoi()
+
+    def _reporter_envoi_differe(self, mail_id, motif, minutes=1):
+        """Envoi différé raté : le mail reste en file, reprogrammé un peu
+        plus tard, avec le motif de l'échec (affiché dans la barre du bas).
+        Si l'utilisateur l'a rouvert ou annulé entre-temps, il n'est plus
+        dans la file et il n'y a rien à faire."""
+        import datetime as _dt6
+        file = charger_file_envoi()
+        for e in file:
+            if e.get("id") == mail_id:
+                e["heure_envoi"] = (_dt6.datetime.now()
+                                    + _dt6.timedelta(minutes=minutes)).isoformat()
+                e["echec"] = (motif or "erreur inconnue").strip()
+                e["tentatives"] = int(e.get("tentatives", 0)) + 1
+                sauvegarder_file_envoi(file)
+                print(f"[ENVOI-DIFFERE] échec n°{e['tentatives']} pour "
+                      f"« {e.get('sujet', '')} » ({e.get('compte_adresse', '')}) : "
+                      f"{e['echec']} — nouvel essai dans {minutes} mn")
+                break
+        self._maj_widget_file_envoi()
 
     def _annuler_mail_file(self, mail_id):
         """Annule un mail en attente depuis son id."""
@@ -36712,6 +36881,11 @@ if (typeof module === 'object') {
         modifie). S'il n'est ni renvoyé ni remis en file depuis la fenêtre
         de rédaction, il est simplement annulé — fermer la fenêtre sans
         rien faire suffit à le supprimer définitivement."""
+        if mail_id in getattr(self, '_ids_envoi_en_cours', set()):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Envoi en cours",
+                                    "Ce mail est en train de partir, il ne peut plus être modifié.")
+            return
         file = charger_file_envoi()
         entree = next((e for e in file if e.get("id") == mail_id), None)
         if entree is None:
@@ -38716,6 +38890,9 @@ if (typeof module === 'object') {
         toujours visible)."""
         if hasattr(self, '_btn_non_spam'):
             self._btn_non_spam.setVisible(self._dossier_actif_est_spam())
+            # La zone de SPAM porte aussi le téléchargement (25/10/2026) :
+            # recalculer sa largeur minimale avec ou sans NON SPAM.
+            self._aligner_barre_boutons()
 
     def demarquer_spam(self):
         """Bouton NON SPAM : inverse de marquer_spam, remet en boîte de
@@ -39375,6 +39552,15 @@ if (typeof module === 'object') {
             ".3gp":  "icone_video.png",
             ".flv":  "icone_video.png",
             ".ogv":  "icone_video.png",
+            # Audio (25/10/2026)
+            ".mp3":  "icone_audio.png",
+            ".wav":  "icone_audio.png",
+            ".flac": "icone_audio.png",
+            ".ogg":  "icone_audio.png",
+            ".m4a":  "icone_audio.png",
+            ".aac":  "icone_audio.png",
+            ".wma":  "icone_audio.png",
+            ".opus": "icone_audio.png",
         }
         nom_fichier = mapping.get(ext)
         if nom_fichier:
@@ -44551,8 +44737,13 @@ __JS_TRADUCTION__
     # inchangée) et un simple recalcul du cadre (SWP_FRAMECHANGED) ne suffit pas
     # (essayé en direct le 19/10) ; un VRAI changement de taille, si : on agrandit
     # la fenêtre d'1 pixel puis on la remet à sa taille, 1, 4 et 10 s après ces
-    # événements (le temps que l'affichage soit stabilisé). Sans effet visible,
-    # y compris fenêtre agrandie (vérifié : reste agrandie, même place).
+    # événements (le temps que l'affichage soit stabilisé).
+    # Fenêtre AGRANDIE (23/10/2026, défaut revenu sur le Dell) : Windows ignore
+    # alors tout changement de taille (mesuré : rien ne bouge) — la correction
+    # ne faisait rien en plein écran. On y reproduit le geste qui répare,
+    # restaurer puis agrandir, sans que ça se voie : restaurée sur le rectangle
+    # agrandi raccourci d'1 px, puis ré-agrandie, puis position restaurée
+    # d'origine remise (en deux temps : sinon Qt passe un instant par elle).
     _MOTIFS_CADRE_A_REFAIRE = ("résolution", "échelle", "écran ALLUMÉ", "sortie de veille",
                                "zone de travail")
 
@@ -44570,6 +44761,9 @@ __JS_TRADUCTION__
                 return
             r = wintypes.RECT()
             u32.GetWindowRect(hwnd, ctypes.byref(r))
+            if u32.IsZoomed(hwnd):
+                self._refaire_image_fenetre_agrandie(hwnd, r)
+                return
             largeur, hauteur = r.right - r.left, r.bottom - r.top
             SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x2, 0x4, 0x10
             drapeaux = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
@@ -44584,6 +44778,53 @@ __JS_TRADUCTION__
             QTimer.singleShot(150, _remettre)
         except Exception as ex:
             print(f"[FENETRE] réfection de l'image de la fenêtre impossible : {ex}")
+
+    def _refaire_image_fenetre_agrandie(self, hwnd, r):
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+
+        class PLACEMENT(ctypes.Structure):
+            _fields_ = [("length", wintypes.UINT), ("flags", wintypes.UINT),
+                        ("showCmd", wintypes.UINT), ("ptMin", wintypes.POINT),
+                        ("ptMax", wintypes.POINT), ("rcNormal", wintypes.RECT)]
+
+        def lire():
+            pl = PLACEMENT()
+            pl.length = ctypes.sizeof(PLACEMENT)
+            u32.GetWindowPlacement(hwnd, ctypes.byref(pl))
+            return pl
+
+        # Ré-agrandir met la fenêtre au premier plan : rendre la main ensuite
+        # à l'application qui y était (écran réveillé pendant qu'on était ailleurs)
+        premier_plan = u32.GetForegroundWindow()
+        origine = lire()
+        normale_origine = wintypes.RECT(origine.rcNormal.left, origine.rcNormal.top,
+                                        origine.rcNormal.right, origine.rcNormal.bottom)
+        etape = lire()
+        etape.rcNormal = wintypes.RECT(r.left, r.top, r.right, r.bottom - 1)
+        SW_SHOWNOACTIVATE, SW_MAXIMIZE = 4, 3
+        etape.showCmd = SW_SHOWNOACTIVATE
+        u32.SetWindowPlacement(hwnd, ctypes.byref(etape))
+
+        def _reagrandir():
+            try:
+                u32.ShowWindow(hwnd, SW_MAXIMIZE)
+                QTimer.singleShot(150, _remettre_normale)
+            except Exception as ex:
+                print(f"[FENETRE] ré-agrandissement impossible : {ex}")
+
+        def _remettre_normale():
+            try:
+                fin = lire()
+                fin.rcNormal = normale_origine
+                u32.SetWindowPlacement(hwnd, ctypes.byref(fin))
+                if premier_plan and premier_plan != hwnd:
+                    u32.SetForegroundWindow(premier_plan)
+                print("[FENETRE] image de la fenêtre agrandie refaite (restaurée -1 px puis ré-agrandie)")
+            except Exception as ex:
+                print(f"[FENETRE] remise de la position restaurée impossible : {ex}")
+        QTimer.singleShot(150, _reagrandir)
 
     def _decrire_message_fenetre(self, msg):
         import ctypes
@@ -44611,6 +44852,13 @@ __JS_TRADUCTION__
             if wp == 0x8013 and msg.lParam:
                 # POWERBROADCAST_SETTING : GUID (16) + DataLength (4) + Data
                 donnee = ctypes.c_uint32.from_address(msg.lParam + 20).value
+                # Windows envoie l'état actuel dès l'abonnement (au lancement) : ce
+                # premier « allumé » n'est pas un réveil, et le prendre pour tel
+                # recadrait la fenêtre 3 fois à chaque ouverture (25/10/2026)
+                precedent = getattr(self, '_etat_ecran_connu', None)
+                self._etat_ecran_connu = donnee
+                if donnee == 1 and precedent in (None, 1):
+                    return "écran allumé (état actuel, pas un réveil)"
                 return {0: "écran ÉTEINT (veille)", 1: "écran ALLUMÉ", 2: "écran assombri"}.get(
                     donnee, f"état d'écran {donnee}")
             return {4: "mise en veille du PC", 7: "sortie de veille du PC (utilisateur)",
