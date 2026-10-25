@@ -432,7 +432,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-25 15h01"
+VERSION_BUILD = "2026-10-25 19h30"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -3151,6 +3151,16 @@ FICHIER_RSS = os.path.join(DOSSIER_APP, "abonnements_rss.json")
 # des 2555 observés) réduit fortement ce risque sans faire grossir le
 # fichier de façon déraisonnable (quelques centaines de Ko tout au plus).
 NB_MAX_ITEMS_VUS_PAR_FLUX = 5000
+
+def _marquer_bouton_actif(bouton, actif):
+    """Passe un bouton de la barre du haut en orange (actif) ou le remet en
+    rouge : la feuille de style suit la propriété "actif", qu'il faut
+    réappliquer (unpolish/polish) quand elle change."""
+    if bool(bouton.property("actif")) == actif:
+        return
+    bouton.setProperty("actif", actif)
+    bouton.style().unpolish(bouton)
+    bouton.style().polish(bouton)
 
 def charger_abonnements_rss():
     """Retourne {"flux": [{"id", "url", "nom", "compte", "items_vus": [str, ...]}, ...]}"""
@@ -25218,6 +25228,12 @@ class FenetreRedaction(QDialog):
         self.btn_langue.setFixedWidth(self.btn_langue.sizeHint().width())
         barre_forme.addWidget(self.btn_langue)
 
+        # Copier / Couper / Coller propres à cette fenêtre (25/10/2026,
+        # demandé), indépendants de ceux de la fenêtre principale : l'action
+        # se fait ici sans aller-retour par elle. Orange comme les autres
+        # tant qu'une copie ou une coupe attend d'être collée.
+        barre_forme.addWidget(creer_cadre_presse_papiers(STYLE_BOUTON, barre_redaction=True))
+
         layout.addWidget(conteneur_forme)
 
         # Corps du mail (CEF) — la colonne de pièces jointes, elle, est
@@ -28769,7 +28785,7 @@ class FenetreConsole(QWidget):
             f"{_t.strftime('%H:%M:%S')}")
 
 
-def creer_cadre_presse_papiers(style_bouton):
+def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     """Cadre COPIER / COUPER / COLLER de la barre du bas (25/10/2026,
     demandé, même encadré blanc que les macros ; repris dans photos,
     navigateur et explorateur). Chaque bouton rejoue Ctrl+C / Ctrl+X /
@@ -28777,48 +28793,198 @@ def creer_cadre_presse_papiers(style_bouton):
     se trouvait l'utilisateur (champ de saisie, page web, mails ou
     fichiers sélectionnés...). Les boutons ne prennent pas le focus ; si
     le clic l'a quand même déplacé côté Windows (page web), on le rend à
-    la fenêtre qui l'avait à l'appui du bouton."""
+    la fenêtre qui l'avait à l'appui du bouton.
+
+    COPIER ou COUPER reste orange (25/10/2026, demandé) tant qu'une copie
+    ou une coupe attend d'être collée : allumé quand le presse-papiers
+    change (COUPER pour une coupe par ce bouton ou des fichiers coupés
+    dans l'Explorateur ou Ctrl+X reconnu aux touches encore enfoncées,
+    COPIER sinon, Ctrl+C au clavier ou autre appli compris), éteint quand
+    il se vide ou, pour une coupe, une fois collée (COLLER ou Ctrl+V). Un
+    clic sur COPIER ou COUPER allumé l'éteint et vide le presse-papiers,
+    sans rien copier ni couper. Le focus revient à la fenêtre où l'on
+    était (Rédiger...), pas à la fenêtre principale.
+
+    barre_redaction=True (25/10/2026, demandé) : mêmes boutons, propres à
+    une fenêtre Rédiger, sans encadré et au format de sa barre de mise en
+    forme (« Copier »...) — l'action y reste, sans passer par la fenêtre
+    principale. Une copie faite dans une fenêtre Rédiger n'allume que ses
+    propres boutons."""
     import ctypes
     user32 = ctypes.WinDLL("user32")  # instance à part : argtypes sans effet ailleurs
     user32.GetFocus.restype = ctypes.c_void_p
     user32.SetFocus.argtypes = [ctypes.c_void_p]
+    user32.GetAsyncKeyState.restype = ctypes.c_short
     cadre = QFrame()
-    cadre.setObjectName("cadrePressePapiers")
-    cadre.setStyleSheet(
-        "QFrame#cadrePressePapiers { border: 1px solid white; background-color: #A52A2A; }")
-    cadre.setFixedHeight(22)
+    cadre.setObjectName("cadrePressePapiersRedaction" if barre_redaction else "cadrePressePapiers")
     layout = QHBoxLayout(cadre)
-    layout.setContentsMargins(3, 2, 3, 2)
     layout.setSpacing(4)
+    if barre_redaction:
+        layout.setContentsMargins(0, 0, 0, 0)
+    else:
+        cadre.setStyleSheet(
+            "QFrame#cadrePressePapiers { border: 1px solid white; background-color: #A52A2A; }")
+        cadre.setFixedHeight(22)
+        layout.setContentsMargins(3, 2, 3, 2)
     focus_avant = [None]
+    fenetre_avant = [None]  # autre fenêtre de COURRIER à réactiver (Rédiger...)
+    boutons = {}
+    attente = [None]  # "COPIER"/"COUPER" cliqué, en attente du presse-papiers
+    coupe_signalee = [0.0]  # time.monotonic() du dernier Ctrl+X repéré
+    style_actif = style_bouton + """
+        QPushButton[actif="true"], QPushButton[actif="true"]:hover {
+            background-color: #DAA520; color: black; }
+    """
+
+    # Fenêtre où l'on était avant le clic : cliquer un bouton du bas active
+    # la fenêtre principale AVANT que le bouton ne réagisse. Si on venait
+    # d'une autre fenêtre de COURRIER (Rédiger...) à l'instant, c'est elle
+    # qu'on réactive, pour que l'action s'y fasse et qu'on y reste.
+    fenetres_actives = {"actuelle": None, "precedente": None, "depuis": 0.0}
+
+    def _fenetre_active_changee(fenetre):
+        if fenetre is None:
+            return  # passage par une autre appli : on garde la dernière
+        if fenetre is not fenetres_actives["actuelle"]:
+            fenetres_actives["precedente"] = fenetres_actives["actuelle"]
+            fenetres_actives["actuelle"] = fenetre
+            fenetres_actives["depuis"] = time.monotonic()
+    QApplication.instance().focusWindowChanged.connect(_fenetre_active_changee)
 
     def _memoriser_focus():
         focus_avant[0] = user32.GetFocus()
+        fenetre_bouton = cadre.window().windowHandle()
+        precedente = fenetres_actives["precedente"]
+        fenetre_avant[0] = None
+        if (fenetres_actives["actuelle"] is fenetre_bouton and precedente is not None
+                and precedente is not fenetre_bouton and precedente.isVisible()
+                and time.monotonic() - fenetres_actives["depuis"] < 0.5):
+            fenetre_avant[0] = precedente
 
-    def _rejouer(vk):
-        if focus_avant[0] and user32.GetFocus() != focus_avant[0]:
+    def _rendre_focus():
+        if fenetre_avant[0] is not None:
+            fenetre_avant[0].requestActivate()
+        elif focus_avant[0] and user32.GetFocus() != focus_avant[0]:
             user32.SetFocus(focus_avant[0])
-        for touche, drapeau in ((0x11, 0), (vk, 0), (vk, 2), (0x11, 2)):  # 0x11 = Ctrl, 2 = relâchée
-            user32.keybd_event(touche, 0, drapeau, 0)
+
+    def _allumer(libelle):
+        try:
+            for nom in ("COPIER", "COUPER"):
+                _marquer_bouton_actif(boutons[nom], nom == libelle)
+        except RuntimeError:  # fenêtre déjà détruite (minuteur en retard)
+            pass
+
+    def _presse_papiers_change():
+        donnees = QApplication.clipboard().mimeData()
+        if donnees is None or not donnees.formats():
+            _allumer(None)
+            return
+        # attente gardée jusqu'à son délai : une page web peut changer le
+        # presse-papiers en plusieurs fois pour une seule coupe
+        libelle = attente[0] or "COPIER"
+        # Ctrl+X au clavier dans une autre appli : le presse-papiers ne
+        # distingue pas une coupe d'une copie, mais Ctrl et X sont encore
+        # enfoncés quand il change (0x11 = Ctrl, 0x58 = X)
+        if (user32.GetAsyncKeyState(0x11) & 0x8000
+                and user32.GetAsyncKeyState(0x58) & 0x8000):
+            coupe_signalee[0] = time.monotonic()
+        # Coupe signalée (touches ci-dessus, Ctrl+X dans COURRIER, bouton
+        # COUPER) : vaut aussi pour les changements qui suivent de près
+        if time.monotonic() - coupe_signalee[0] < 1.5:
+            libelle = "COUPER"
+        # Fichiers coupés dans l'Explorateur : DropEffect 2 (déplacer)
+        effet = donnees.data('application/x-qt-windows-mime;value="Preferred DropEffect"')
+        if len(effet) >= 1 and effet[0] in (b"\x02", 2):
+            libelle = "COUPER"
+        # Seule la barre de la fenêtre d'où vient la copie s'allume
+        # (25/10/2026, demandé) : celle d'une fenêtre Rédiger si c'est elle
+        # qui est active, sinon celle de la fenêtre principale (copie faite
+        # ailleurs dans COURRIER ou dans une autre appli)
+        active = QApplication.activeWindow()
+        if attente[0]:
+            concernee = True  # bouton de cette barre-ci
+        elif barre_redaction:
+            concernee = active is cadre.window()
+        else:
+            concernee = (active is None
+                         or active.findChild(QFrame, "cadrePressePapiersRedaction") is None)
+        _allumer(libelle if concernee else None)
+
+    class _SurveillantCtrlX(QObject):
+        """Ctrl+X tapé dans n'importe quelle fenêtre de COURRIER (fenêtre
+        Rédiger comprise) : noté avant même que la page ne coupe. Ctrl+V
+        éteint COUPER comme le bouton COLLER."""
+        def eventFilter(self, obj, event):
+            if (event.type() in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride)
+                    and event.key() == Qt.Key.Key_X
+                    and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                coupe_signalee[0] = time.monotonic()
+            # Ctrl+V : une coupe collée n'est plus en suspens
+            if (event.type() == QEvent.Type.KeyPress
+                    and event.key() == Qt.Key.Key_V
+                    and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                    and boutons["COUPER"].property("actif")):
+                QTimer.singleShot(300, lambda: _allumer(None))
+            return False
+
+    def _rejouer(libelle, vk):
+        if libelle in ("COPIER", "COUPER") and boutons[libelle].property("actif"):
+            # Bouton allumé : l'éteindre et vider le presse-papiers
+            QApplication.clipboard().clear()
+            _allumer(None)
+            _rendre_focus()
+            return
+        if libelle in ("COPIER", "COUPER"):
+            attente[0] = libelle
+            if libelle == "COUPER":
+                coupe_signalee[0] = time.monotonic()
+            QTimer.singleShot(1500, lambda: attente.__setitem__(0, None))
+        elif boutons["COUPER"].property("actif"):
+            # La coupe est collée : plus rien en suspens
+            QTimer.singleShot(300, lambda: _allumer(None))
+        _rendre_focus()
+
+        def _touches():
+            for touche, drapeau in ((0x11, 0), (vk, 0), (vk, 2), (0x11, 2)):  # 0x11 = Ctrl, 2 = relâchée
+                user32.keybd_event(touche, 0, drapeau, 0)
+        if fenetre_avant[0] is not None:
+            QTimer.singleShot(100, _touches)  # le temps que la fenêtre soit réactivée
+        else:
+            _touches()
 
     for libelle, vk, raccourci in (("COPIER", 0x43, "Ctrl+C"),
                                    ("COUPER", 0x58, "Ctrl+X"),
                                    ("COLLER", 0x56, "Ctrl+V")):
-        btn = QPushButton(libelle)
-        btn.setStyleSheet(style_bouton)
-        btn.setFixedHeight(16)
+        btn = QPushButton(f" {libelle.capitalize()} " if barre_redaction else libelle)
+        btn.setStyleSheet(style_actif)
+        if not barre_redaction:
+            btn.setFixedHeight(16)
         btn.setToolTip(f"{libelle.capitalize()} ({raccourci})")
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.pressed.connect(_memoriser_focus)
-        btn.clicked.connect(lambda _=False, vk=vk: _rejouer(vk))
+        btn.clicked.connect(lambda _=False, libelle=libelle, vk=vk: _rejouer(libelle, vk))
         layout.addWidget(btn)
+        boutons[libelle] = btn
+    QApplication.clipboard().dataChanged.connect(_presse_papiers_change)
+    cadre._surveillant_ctrl_x = _SurveillantCtrlX(cadre)
+    QApplication.instance().installEventFilter(cadre._surveillant_ctrl_x)
+
+    # Fenêtre Rédiger fermée : plus de réaction au presse-papiers
+    def _deconnecter(*_):
+        for signal, slot in ((QApplication.clipboard().dataChanged, _presse_papiers_change),
+                             (QApplication.instance().focusWindowChanged, _fenetre_active_changee)):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+    cadre.destroyed.connect(_deconnecter)
     return cadre
 
 
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 25/10/2026 15h01")
+        self.setWindowTitle("COURRIER ADRIEN — 25/10/2026 19h30")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -29495,6 +29661,28 @@ class ClientMail(QMainWindow):
         layout_haut.setContentsMargins(6, 0, 6, 0)
         layout_haut.setSpacing(0)
 
+        # Boutons « actifs » en orange (25/10/2026, demandé), comme DÉLAI
+        # dans la barre du bas : ceux qui font tourner quelque chose — CHRONO
+        # (autre tri que l'ordre d'arrivée possible) toujours, RECHERCHER
+        # pendant une recherche (✕ affiché), RSS to Email s'il y a des flux abonnés, TODO s'il reste une tâche
+        # programmée à venir. Puis TÉL (écran du téléphone affiché), SMS
+        # (fenêtre SMS ouverte) et MAILING (MAILING lancé et pas refermé) ;
+        # INTERNET jamais, il ne fait qu'ouvrir le navigateur par défaut.
+        # NOUVEAU, RÉPONDRE, RÉP. À TOUS, TRANSFERT et RENVOYER tant qu'une
+        # fenêtre de rédaction ouverte par eux est ouverte (SUPPRIMER jamais).
+        # Et chaque bouton qui ouvre une fenêtre de COURRIER (COMPTES, SPAM,
+        # MACROS...) tant que cette fenêtre est ouverte (_suivre_fenetre).
+        # Propriété "actif" posée par _marquer_bouton_actif.
+        STYLE_BOUTON_HAUT_ACTIF = """
+            QPushButton[actif="true"] {
+                background-color: #DAA520; color: black;
+                border-bottom-color: #8a6510; border-right-color: #8a6510;
+            }
+            QPushButton[actif="true"]:pressed {
+                border-bottom-color: #8a6510; border-right-color: #8a6510;
+            }
+        """
+
         # Style compact dédié à la barre du haut : padding horizontal réduit
         # et libellés sans espaces de remplissage (le CSS s'en charge déjà),
         # pour que les 16 boutons tiennent sans déborder même avec MACROS
@@ -29509,20 +29697,102 @@ class ClientMail(QMainWindow):
                 border-bottom: 1px solid #6b1a1a; border-right: 1px solid #6b1a1a;
                 padding-top: 7px; padding-left: 9px;
             }
-        """
+        """ + STYLE_BOUTON_HAUT_ACTIF
 
         # Groupe gauche : outils — CONTRÔLE tout à gauche (10/10/2026, demandé)
         btn_controle = QPushButton("CONTRÔLE")
         btn_controle.setStyleSheet(STYLE_BOUTON_HAUT)
         btn_controle.setToolTip("Poste de contrôle : ce que fait COURRIER, compte par compte")
-        btn_controle.clicked.connect(self.ouvrir_console)
+        btn_controle.clicked.connect(self._suivre_fenetre(btn_controle, self.ouvrir_console))
         layout_haut.addWidget(btn_controle)
         layout_haut.addSpacing(3)
 
         btn_comptes = QPushButton("COMPTES")
         btn_comptes.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_comptes.clicked.connect(self.gerer_comptes)
+        btn_comptes.clicked.connect(self._suivre_fenetre(btn_comptes, self.gerer_comptes))
         layout_haut.addWidget(btn_comptes)
+        layout_haut.addSpacing(3)
+
+        btn_spam = QPushButton("SPAM")
+        btn_spam.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_spam.clicked.connect(self._suivre_fenetre(btn_spam, self.gerer_spam))
+        layout_haut.addWidget(btn_spam)
+        layout_haut.addSpacing(3)
+
+        btn_macros = QPushButton("MACROS")
+        btn_macros.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_macros.clicked.connect(self._suivre_fenetre(btn_macros, self.ouvrir_gestionnaire_macros))
+        layout_haut.addWidget(btn_macros)
+        layout_haut.addSpacing(3)
+
+        btn_modeles = QPushButton("MODÈLES")
+        btn_modeles.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_modeles.clicked.connect(self._suivre_fenetre(btn_modeles, self.ouvrir_gestionnaire_modeles))
+        layout_haut.addWidget(btn_modeles)
+        layout_haut.addSpacing(3)
+
+        btn_sons = QPushButton("SONS")
+        btn_sons.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_sons.clicked.connect(self._suivre_fenetre(btn_sons, self.gerer_sons))
+        layout_haut.addWidget(btn_sons)
+        layout_haut.addSpacing(3)
+
+        btn_carnet = QPushButton("ADRESSES")
+        btn_carnet.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_carnet.clicked.connect(self._suivre_fenetre(btn_carnet, self.ouvrir_carnet_adresses))
+        layout_haut.addWidget(btn_carnet)
+        layout_haut.addSpacing(3)
+
+        btn_mailing = QPushButton("MAILING")
+        btn_mailing.setStyleSheet(STYLE_BOUTON_HAUT)
+        def _ouvrir_mailing():
+            import subprocess, sys
+            from PySide6.QtWidgets import QMessageBox
+            chemin_mailing = os.path.join(DOSSIER_APP, "MAILING.py")
+            if getattr(sys, "frozen", False) or os.path.exists(chemin_mailing):
+                try:
+                    # sys.executable n'est PAS fiable ici : quand COURRIER est
+                    # lancé via COURRIER.exe (lanceur, qui exécute ce
+                    # fichier via runpy dans son propre process PyInstaller),
+                    # sys.executable pointe vers COURRIER.exe lui-même et non
+                    # vers un interpréteur Python. Le relancer avec MAILING.py
+                    # en argument démarrait en réalité une 2e instance de
+                    # COURRIER, aussitôt fermée en silence par le verrou
+                    # d'instance unique (aucune erreur, aucune fenêtre). On
+                    # vise donc explicitement le pythonw.exe du venv, avec
+                    # repli sur sys.executable si absent (lancement direct du
+                    # .py en dehors du lanceur, ex. pendant les tests).
+                    chemin_pythonw_venv = os.path.join(
+                        DOSSIER_APP, "venv", "Scripts", "pythonw.exe"
+                    )
+                    executable_mailing = (
+                        chemin_pythonw_venv
+                        if os.path.exists(chemin_pythonw_venv)
+                        else sys.executable
+                    )
+                    chemin_log_mailing = os.path.join(DOSSIER_APP_LOGS, "mailing_lancement.txt")
+                    fichier_log_mailing = open(chemin_log_mailing, "w", encoding="utf-8")
+                    self._processus_mailing = subprocess.Popen(
+                        ([sys.executable, "--mailing"] if getattr(sys, "frozen", False)
+                         else [executable_mailing, chemin_mailing]),
+                        stdout=fichier_log_mailing,
+                        stderr=fichier_log_mailing,
+                        cwd=DOSSIER_APP,
+                    )
+                except Exception as e:
+                    QMessageBox.warning(None, "MAILING", f"Échec du lancement :\n{e}")
+            else:
+                QMessageBox.warning(None, "MAILING", f"Fichier introuvable :\n{chemin_mailing}")
+        btn_mailing.clicked.connect(lambda: (_ouvrir_mailing(), self._maj_boutons_actifs_rapides()))
+        layout_haut.addWidget(btn_mailing)
+        self._btn_mailing = btn_mailing
+        layout_haut.addSpacing(3)
+
+        btn_rss = QPushButton("RSS to Email")
+        btn_rss.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_rss.clicked.connect(self._suivre_fenetre(btn_rss, self.ouvrir_abonnements_rss))
+        layout_haut.addWidget(btn_rss)
+        self._btn_rss = btn_rss
         layout_haut.addSpacing(3)
 
         # TÉL (07/10/2026) : écran du téléphone, comme le bouton téléphone
@@ -29546,6 +29816,7 @@ class ClientMail(QMainWindow):
             connecter_telephone(self, _connecte, si_echec=_retablir, attendre_ecran=True)
         btn_tel.clicked.connect(_ouvrir_telephone)
         layout_haut.addWidget(btn_tel)
+        self._btn_tel = btn_tel
         # ⚙ à côté de TÉL (15/10/2026) : réglages du téléphone à tout moment
         # (les fenêtres proposées d'elles-mêmes ne le sont qu'une fois).
         # D'abord une flèche ▾, remplacée par ⚙ : « Mode modem Wi-Fi » y
@@ -29609,105 +29880,21 @@ class ClientMail(QMainWindow):
         btn_sms.setToolTip("Envoyer des SMS par le téléphone relié")
         btn_sms.clicked.connect(lambda: ouvrir_fenetre_sms(self))
         layout_haut.addWidget(btn_sms)
+        self._btn_sms = btn_sms
         layout_haut.addSpacing(3)
 
-        btn_mailing = QPushButton("MAILING")
-        btn_mailing.setStyleSheet(STYLE_BOUTON_HAUT)
-        def _ouvrir_mailing():
-            import subprocess, sys
-            from PySide6.QtWidgets import QMessageBox
-            chemin_mailing = os.path.join(DOSSIER_APP, "MAILING.py")
-            if getattr(sys, "frozen", False) or os.path.exists(chemin_mailing):
-                try:
-                    # sys.executable n'est PAS fiable ici : quand COURRIER est
-                    # lancé via COURRIER.exe (lanceur, qui exécute ce
-                    # fichier via runpy dans son propre process PyInstaller),
-                    # sys.executable pointe vers COURRIER.exe lui-même et non
-                    # vers un interpréteur Python. Le relancer avec MAILING.py
-                    # en argument démarrait en réalité une 2e instance de
-                    # COURRIER, aussitôt fermée en silence par le verrou
-                    # d'instance unique (aucune erreur, aucune fenêtre). On
-                    # vise donc explicitement le pythonw.exe du venv, avec
-                    # repli sur sys.executable si absent (lancement direct du
-                    # .py en dehors du lanceur, ex. pendant les tests).
-                    chemin_pythonw_venv = os.path.join(
-                        DOSSIER_APP, "venv", "Scripts", "pythonw.exe"
-                    )
-                    executable_mailing = (
-                        chemin_pythonw_venv
-                        if os.path.exists(chemin_pythonw_venv)
-                        else sys.executable
-                    )
-                    chemin_log_mailing = os.path.join(DOSSIER_APP_LOGS, "mailing_lancement.txt")
-                    fichier_log_mailing = open(chemin_log_mailing, "w", encoding="utf-8")
-                    subprocess.Popen(
-                        ([sys.executable, "--mailing"] if getattr(sys, "frozen", False)
-                         else [executable_mailing, chemin_mailing]),
-                        stdout=fichier_log_mailing,
-                        stderr=fichier_log_mailing,
-                        cwd=DOSSIER_APP,
-                    )
-                except Exception as e:
-                    QMessageBox.warning(None, "MAILING", f"Échec du lancement :\n{e}")
-            else:
-                QMessageBox.warning(None, "MAILING", f"Fichier introuvable :\n{chemin_mailing}")
-        btn_mailing.clicked.connect(_ouvrir_mailing)
-        layout_haut.addWidget(btn_mailing)
-        layout_haut.addSpacing(3)
-
-        btn_macros = QPushButton("MACROS")
-        btn_macros.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_macros.clicked.connect(self.ouvrir_gestionnaire_macros)
-        layout_haut.addWidget(btn_macros)
-        layout_haut.addSpacing(3)
-
-        btn_modeles = QPushButton("MODÈLES")
-        btn_modeles.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_modeles.clicked.connect(self.ouvrir_gestionnaire_modeles)
-        layout_haut.addWidget(btn_modeles)
-        layout_haut.addSpacing(3)
-
-        btn_sons = QPushButton("SONS")
-        btn_sons.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_sons.clicked.connect(self.gerer_sons)
-        layout_haut.addWidget(btn_sons)
-        layout_haut.addSpacing(3)
-
-        btn_spam = QPushButton("SPAM")
-        btn_spam.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_spam.clicked.connect(self.gerer_spam)
-        layout_haut.addWidget(btn_spam)
-        layout_haut.addSpacing(3)
-
-        btn_carnet = QPushButton("ADRESSES")
-        btn_carnet.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_carnet.clicked.connect(self.ouvrir_carnet_adresses)
-        layout_haut.addWidget(btn_carnet)
-        layout_haut.addSpacing(3)
-
-
-        btn_rechercher = QPushButton("RECHERCHER")
-        btn_rechercher.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_rechercher.clicked.connect(self.ouvrir_recherche)
-        layout_haut.addWidget(btn_rechercher)
-        layout_haut.addSpacing(3)
-
-        self.btn_effacer_filtre = QPushButton("✕")
-        self.btn_effacer_filtre.setStyleSheet(STYLE_BOUTON_HAUT)
-        self.btn_effacer_filtre.clicked.connect(self._effacer_filtre)
-        self.btn_effacer_filtre.setVisible(False)
-        layout_haut.addWidget(self.btn_effacer_filtre)
+        btn_agenda = QPushButton("TODO")
+        btn_agenda.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_agenda.clicked.connect(self._suivre_fenetre(btn_agenda, self.ouvrir_agenda))
+        layout_haut.addWidget(btn_agenda)
+        self._btn_agenda = btn_agenda
         layout_haut.addSpacing(3)
 
         self.btn_tri = QPushButton("CHRONO")
         self.btn_tri.setStyleSheet(STYLE_BOUTON_HAUT)
         self.btn_tri.clicked.connect(self.basculer_tri)
+        _marquer_bouton_actif(self.btn_tri, True)
         layout_haut.addWidget(self.btn_tri)
-        layout_haut.addSpacing(3)
-
-        # Bouton RECEVOIR (tous les comptes) retiré : remplacé par le petit
-        # rond cliquable à gauche de chaque nom de compte, plus adapté à
-        # l'usage réel (forcer la réception d'UN SEUL compte en urgence).
         layout_haut.addSpacing(3)
 
         btn_firefox = QPushButton("INTERNET")
@@ -29716,22 +29903,29 @@ class ClientMail(QMainWindow):
         layout_haut.addWidget(btn_firefox)
         layout_haut.addSpacing(3)
 
+        # Bouton RECEVOIR (tous les comptes) retiré : remplacé par le petit
+        # rond cliquable à gauche de chaque nom de compte, plus adapté à
+        # l'usage réel (forcer la réception d'UN SEUL compte en urgence).
+        layout_haut.addSpacing(3)
+
         # Bouton ORGANISER retiré : le réordonnancement des dossiers se fait
         # maintenant via le bouton ⇅ directement dans la barre du compte
         # actif, et celui des comptes par glisser-déposer dans la liste des
         # comptes elle-même — plus besoin de ce détour par une boîte séparée.
         layout_haut.addSpacing(3)
 
-        btn_rss = QPushButton("RSS to Email")
-        btn_rss.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_rss.clicked.connect(self.ouvrir_abonnements_rss)
-        layout_haut.addWidget(btn_rss)
+        btn_rechercher = QPushButton("RECHERCHER")
+        btn_rechercher.setStyleSheet(STYLE_BOUTON_HAUT)
+        btn_rechercher.clicked.connect(self._suivre_fenetre(btn_rechercher, self.ouvrir_recherche))
+        layout_haut.addWidget(btn_rechercher)
+        self._btn_rechercher = btn_rechercher
         layout_haut.addSpacing(3)
 
-        btn_agenda = QPushButton("TODO")
-        btn_agenda.setStyleSheet(STYLE_BOUTON_HAUT)
-        btn_agenda.clicked.connect(self.ouvrir_agenda)
-        layout_haut.addWidget(btn_agenda)
+        self.btn_effacer_filtre = QPushButton("✕")
+        self.btn_effacer_filtre.setStyleSheet(STYLE_BOUTON_HAUT)
+        self.btn_effacer_filtre.clicked.connect(self._effacer_filtre)
+        self.btn_effacer_filtre.setVisible(False)
+        layout_haut.addWidget(self.btn_effacer_filtre)
         layout_haut.addSpacing(3)
 
         # Bouton RECHARGER retiré de cette barre générale : il est plus
@@ -29745,19 +29939,23 @@ class ClientMail(QMainWindow):
 
         layout_haut.addStretch(1)
 
-        # Groupe droit : actions sur les mails
-        for label, slot in [
-            ("NOUVEAU",       self.nouveau_message),
-            ("RÉPONDRE",      self.repondre),
-            ("RÉP. À TOUS",   self.repondre_a_tous),
-            ("TRANSFERT",     self.transferer),
-            ("RENVOYER",      self.renvoyer),
+        # Groupe droit : actions sur les mails. La clé est celle posée sur
+        # la fenêtre de rédaction (_ouvrir_redaction, action_barre), pour
+        # l'orange du bouton tant qu'elle est ouverte.
+        self._boutons_redaction = {}
+        for label, slot, cle in [
+            ("NOUVEAU",       self.nouveau_message,  "nouveau"),
+            ("RÉPONDRE",      self.repondre,         "repondre"),
+            ("RÉP. À TOUS",   self.repondre_a_tous,  "repondre_tous"),
+            ("TRANSFERT",     self.transferer,       "transferer"),
+            ("RENVOYER",      self.renvoyer,         "renvoyer"),
         ]:
             btn = QPushButton(label)
             btn.setStyleSheet(STYLE_BOUTON_HAUT)
             btn.clicked.connect(slot)
             layout_haut.addWidget(btn)
             layout_haut.addSpacing(3)
+            self._boutons_redaction[cle] = btn
 
         # SUPPRIMER tout à droite, après RENVOYER (20/10/2026, demandé)
         btn_supprimer_barre = QPushButton("SUPPRIMER")
@@ -29785,7 +29983,7 @@ class ClientMail(QMainWindow):
                 border-bottom: 1px solid #6b1a1a; border-right: 1px solid #6b1a1a;
                 padding-top: 7px; padding-left: {marge + 2}px;
             }}
-        """
+        """ + STYLE_BOUTON_HAUT_ACTIF
 
         def _ajuster_barre_haut():
             boutons = [b for b in frame_haut.findChildren(QPushButton)
@@ -29823,6 +30021,19 @@ class ClientMail(QMainWindow):
 
         layout_principal.addWidget(frame_haut)
         self.frame_haut = frame_haut
+
+        # Orange de RSS to Email et TODO : au lancement, à la fermeture de
+        # leur fenêtre, et toutes les 30 s (une tâche qui arrive à échéance)
+        self._maj_boutons_actifs()
+        self._minuterie_boutons_actifs = QTimer(self)
+        self._minuterie_boutons_actifs.timeout.connect(self._maj_boutons_actifs)
+        self._minuterie_boutons_actifs.start(30 * 1000)
+        # TÉL, SMS et MAILING : simple coup d'œil (fenêtre, processus) sans
+        # lecture de fichier, donc assez souvent pour suivre leur ouverture
+        # et leur fermeture
+        self._minuterie_boutons_actifs_rapides = QTimer(self)
+        self._minuterie_boutons_actifs_rapides.timeout.connect(self._maj_boutons_actifs_rapides)
+        self._minuterie_boutons_actifs_rapides.start(2 * 1000)
 
         from PySide6.QtGui import QKeySequence
         QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.repondre)
@@ -33783,12 +33994,126 @@ if (typeof module === 'object') {
 
     def ouvrir_agenda(self):
         dlg = DialogueAgenda(self)
+        dlg.finished.connect(lambda _code: self._maj_boutons_actifs())
         dlg.show()
         self._conserver_fenetre_secondaire(dlg)
 
     def ouvrir_abonnements_rss(self):
         dlg = DialogueAbonnementsRSS(self)
         dlg.exec()
+        self._maj_boutons_actifs()
+
+    def _suivre_fenetre(self, bouton, slot):
+        """Enveloppe l'action d'un bouton de la barre du haut : les fenêtres
+        qu'elle fait apparaître lui sont rattachées, et le bouton reste
+        orange tant que l'une d'elles est ouverte. Pour une fenêtre modale
+        (exec), le bouton est allumé pendant toute l'exécution de l'action."""
+        def _filtrer(fenetres):
+            return [w for w in fenetres if w is not self and w.isVisible()
+                    and w.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog)]
+
+        def _action(*_):
+            avant = set(_filtrer(QApplication.topLevelWidgets()))
+            en_cours = getattr(self, "_boutons_en_cours", set())
+            self._boutons_en_cours = en_cours | {bouton}
+            _marquer_bouton_actif(bouton, True)
+            try:
+                slot()
+            finally:
+                self._boutons_en_cours = getattr(self, "_boutons_en_cours", set()) - {bouton}
+                nouvelles = [w for w in _filtrer(QApplication.topLevelWidgets()) if w not in avant]
+                if not hasattr(self, "_fenetres_boutons"):
+                    self._fenetres_boutons = {}
+                self._fenetres_boutons[bouton] = self._fenetres_boutons.get(bouton, []) + nouvelles
+                self._maj_boutons_actifs_rapides()
+        return _action
+
+    def _maj_boutons_actifs(self):
+        """RSS to Email en orange s'il y a des flux abonnés, TODO s'il reste
+        au moins une tâche programmée à venir (pas une tâche passée restée
+        dans la liste) — 25/10/2026, demandé. Lecture des fichiers ici,
+        affichage dans _maj_boutons_actifs_rapides."""
+        if not hasattr(self, "_btn_agenda"):
+            return
+        maintenant = datetime.datetime.now()
+        a_venir = False
+        for r in charger_rappels():
+            try:
+                if datetime.datetime.fromisoformat(r["date_heure"]) > maintenant:
+                    a_venir = True
+                    break
+            except Exception:
+                continue
+        self._etat_fichiers_boutons = {
+            self._btn_agenda: a_venir,
+            self._btn_rss: bool(charger_abonnements_rss().get("flux")),
+        }
+        self._maj_boutons_actifs_rapides()
+
+    def _maj_boutons_actifs_rapides(self):
+        """Orange de la barre du haut : un bouton est allumé si sa fenêtre
+        (_suivre_fenetre) est ouverte, ou bien selon son activité — TÉL
+        quand l'écran du téléphone est affiché (par COURRIER ou le
+        navigateur), SMS quand une fenêtre SMS est ouverte, MAILING tant que
+        le MAILING lancé par ce bouton tourne, RECHERCHER pendant une
+        recherche, RSS et TODO selon _maj_boutons_actifs, NOUVEAU/
+        RÉPONDRE... tant que leur fenêtre de rédaction est ouverte."""
+        if not hasattr(self, "_btn_tel"):
+            return
+        etat = dict(getattr(self, "_etat_fichiers_boutons", {}))
+        etat[self._btn_rechercher] = not self.btn_effacer_filtre.isHidden()
+
+        ouvertes = []
+        for f in getattr(self, "_fenetres_redaction", []):
+            try:
+                # Pas encore visible juste après l'ouverture : FenetreRedaction
+                # n'apparaît qu'une fois son contenu dessiné (voir son show)
+                if not getattr(f, "_fenetre_fermee", False) and (
+                        f.isVisible() or not getattr(f, "_deja_affichee_reellement", True)):
+                    ouvertes.append(f)
+            except RuntimeError:  # fenêtre déjà détruite côté Qt
+                continue
+        self._fenetres_redaction = ouvertes
+        actions = {getattr(f, "_action_barre", None) for f in ouvertes}
+        for cle, btn in self._boutons_redaction.items():
+            etat[btn] = cle in actions
+
+        try:
+            etat[self._btn_tel] = bool(_hwnd_fenetre_telephone())
+        except Exception:
+            etat[self._btn_tel] = False
+        sms = False
+        for d in getattr(self, "_fenetres_sms", []):
+            try:
+                if d.isVisible():
+                    sms = True
+                    break
+            except RuntimeError:  # fenêtre déjà détruite côté Qt
+                continue
+        etat[self._btn_sms] = sms
+        processus = getattr(self, "_processus_mailing", None)
+        etat[self._btn_mailing] = processus is not None and processus.poll() is None
+
+        # Fenêtres ouvertes par les boutons (fermées = oubliées)
+        fenetres_boutons = getattr(self, "_fenetres_boutons", {})
+        for btn, fenetres in list(fenetres_boutons.items()):
+            restantes = []
+            for w in fenetres:
+                try:
+                    if w.isVisible():
+                        restantes.append(w)
+                except RuntimeError:  # fenêtre déjà détruite côté Qt
+                    continue
+            fenetres_boutons[btn] = restantes
+            if restantes:
+                etat[btn] = True
+        for btn in getattr(self, "_boutons_en_cours", set()):
+            etat[btn] = True
+        for btn in fenetres_boutons:
+            etat.setdefault(btn, False)
+
+        for btn, actif in etat.items():
+            _marquer_bouton_actif(btn, actif)
 
     def _verifier_rss_arriere_plan(self):
         """Déclenchée par le minuteur toutes les 30 minutes (18/08/2026) —
@@ -33949,7 +34274,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 25/10/2026 à 15h01")
+        lbl_version = QLabel("Version du 25/10/2026 à 19h30")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -37771,7 +38096,7 @@ if (typeof module === 'object') {
             sujet = f"Re: {sujet}"
         fenetre = self._ouvrir_redaction(destinataire=", ".join(destinataires), sujet=sujet,
                                msg_info=msg_info, type_modele="repondre",
-                               retourner_fenetre=True)
+                               retourner_fenetre=True, action_barre="repondre_tous")
         if fenetre and cc_liste:
             fenetre.champ_cc.setText(", ".join(cc_liste))
 
@@ -37990,7 +38315,7 @@ if (typeof module === 'object') {
 
     def _ouvrir_redaction(self, destinataire="", sujet="", msg_info=None,
                            type_modele="nouveau", retourner_fenetre=False,
-                           corps_supplementaire="", cc="", cci=""):
+                           corps_supplementaire="", cc="", cci="", action_barre=None):
         """Ouvre la fenêtre de rédaction avec le modèle HTML approprié pour
         le compte actif. Deux emplacements seulement : "nouveau", et
         "reponse" qui couvre à la fois répondre / répondre à tous /
@@ -38082,6 +38407,30 @@ if (typeof module === 'object') {
         # elles passent par les vraies actions des boutons, qui ne rendent
         # pas la fenêtre qu'elles ouvrent.
         self._derniere_fenetre_redaction = fenetre
+        # Bouton de la barre du haut qui passe en orange tant que cette
+        # fenêtre est ouverte (voir _maj_boutons_actifs_rapides)
+        fenetre._action_barre = action_barre or type_modele
+        # Titre selon le bouton (25/10/2026, demandé) : RENVOYER seul, sans
+        # « Rédiger » (rien à rédiger), RÉPONDRE suivi du nom de l'expéditeur
+        # tel qu'écrit dans le carnet d'adresses, à défaut celui du mail
+        titre = {"nouveau": "Rédiger - NOUVEAU", "repondre": "Rédiger - RÉPONDRE",
+                 "repondre_tous": "Rédiger - RÉP. À TOUS",
+                 "transferer": "Rédiger - TRANSFERT",
+                 "renvoyer": "RENVOYER"}.get(fenetre._action_barre)
+        if titre:
+            if fenetre._action_barre == "repondre" and msg_info:
+                from email.utils import parseaddr
+                nom, adresse = parseaddr(msg_info.get("de", ""))
+                nom_carnet = next((c.get("nom", "").strip()
+                                   for c in charger_carnet().get("contacts", [])
+                                   if adresse and (c.get("email") or "").strip().lower() == adresse.lower()
+                                   and c.get("nom", "").strip()), "")
+                nom = nom_carnet or nom.strip().strip('"') or adresse
+                if nom:
+                    titre += f" à {nom}"
+            fenetre.setWindowTitle(titre)
+        self._fenetres_redaction = getattr(self, "_fenetres_redaction", []) + [fenetre]
+        self._maj_boutons_actifs_rapides()
         if retourner_fenetre:
             return fenetre
 

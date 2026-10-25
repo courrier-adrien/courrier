@@ -49,6 +49,7 @@
     display: inline-block; background: var(--brique); color: #fff; border-radius: 3px;
     padding: 0 7px; font-size: 12px; font-weight: bold; white-space: nowrap; line-height: 1.7;
   }
+  .btn.actif { background: #DAA520; color: #000; }
   kbd {
     background: #111; border: 1px solid #666; border-radius: 3px; padding: 0 5px;
     font-family: Consolas, monospace; font-size: 13px;
@@ -193,23 +194,47 @@
   <table>
     <tr><th>Bouton</th><th>Rôle</th></tr>
     <tr><td><span class="btn">CONTRÔLE</span></td><td>Poste de contrôle : ce que fait le logiciel, compte par compte (<a href="#controle">section 24</a>).</td></tr>
-    <tr><td><span class="btn">SUPPRIMER</span></td><td>Supprime le ou les mails sélectionnés.</td></tr>
     <tr><td><span class="btn">COMPTES</span></td><td>Ajouter, modifier ou supprimer un compte (<a href="#saisie-comptes">section 4</a>).</td></tr>
-    <tr><td><span class="btn">TÉL</span> <span class="btn">SMS</span></td><td>Écran du téléphone Android sur le PC (<a href="#tel">section 21</a>), et envoi de SMS (<a href="#sms">section 22</a>).</td></tr>
-    <tr><td><span class="btn">MAILING</span></td><td>Envoi d'un même message à une liste de destinataires (<a href="#mailing">section 20</a>).</td></tr>
+    <tr><td><span class="btn">SPAM</span></td><td>Liste des expéditeurs indésirables (<a href="#spam">section 15</a>).</td></tr>
     <tr><td><span class="btn">MACROS</span> <span class="btn">MODÈLES</span></td><td>Réponses toutes faites et modèles de mails (<a href="#macros">section 13</a>).</td></tr>
     <tr><td><span class="btn">SONS</span></td><td>Son de réception, compte par compte.</td></tr>
-    <tr><td><span class="btn">SPAM</span></td><td>Liste des expéditeurs indésirables (<a href="#spam">section 15</a>).</td></tr>
     <tr><td><span class="btn">ADRESSES</span></td><td>Carnet d'adresses (<a href="#carnet">section 14</a>).</td></tr>
-    <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span> <span class="btn">CHRONO</span></td><td>Recherche, retour à l'affichage normal, et choix du tri (<a href="#recherche">section 16</a>).</td></tr>
-    <tr><td><span class="btn">INTERNET</span></td><td>Ouvre le mail affiché dans un navigateur installé sur l'ordinateur.</td></tr>
+    <tr><td><span class="btn">MAILING</span></td><td>Envoi d'un même message à une liste de destinataires (<a href="#mailing">section 20</a>).</td></tr>
     <tr><td><span class="btn">RSS to Email</span></td><td>Abonnements RSS reçus sous forme de mails (<a href="#rss">section 18</a>).</td></tr>
+    <tr><td><span class="btn">TÉL</span> <span class="btn">⚙</span> <span class="btn">SMS</span></td><td>Écran du téléphone Android sur le PC et ses réglages (<a href="#tel">section 21</a>), et envoi de SMS (<a href="#sms">section 22</a>).</td></tr>
     <tr><td><span class="btn">TODO</span></td><td>Rappels programmés (<a href="#todo">section 19</a>).</td></tr>
+    <tr><td><span class="btn">CHRONO</span></td><td>Choix du tri de la liste des mails (<a href="#recherche">section 16</a>).</td></tr>
+    <tr><td><span class="btn">INTERNET</span></td><td>Ouvre le mail affiché dans un navigateur installé sur l'ordinateur.</td></tr>
+    <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span></td><td>Recherche, puis retour à l'affichage normal (<a href="#recherche">section 16</a>).</td></tr>
   </table>
   <h3>Barre du haut, à droite : les actions sur les mails</h3>
-  <p><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span> (renvoie le mail à l'identique).</p>
+  <p><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span> (renvoie le mail à l'identique) et <span class="btn">SUPPRIMER</span> (supprime le ou les mails sélectionnés).</p>
+  <h3>Boutons en orange : ce qui est en cours</h3>
+  <p>Un bouton passe de rouge à orange quand ce qu'il commande est en cours. Par exemple <span class="btn actif">TODO</span> au lieu de <span class="btn">TODO</span>. D'un coup d'œil, vous voyez ce qui est en service :</p>
+  <table>
+    <tr><th>Bouton</th><th>Orange quand…</th></tr>
+    <tr><td><span class="btn">CONTRÔLE</span> <span class="btn">COMPTES</span> <span class="btn">SPAM</span> <span class="btn">MACROS</span> <span class="btn">MODÈLES</span> <span class="btn">SONS</span> <span class="btn">ADRESSES</span></td><td>sa fenêtre est ouverte.</td></tr>
+    <tr><td><span class="btn">MAILING</span></td><td>MAILING, lancé par ce bouton, est ouvert.</td></tr>
+    <tr><td><span class="btn">RSS to Email</span></td><td>au moins un flux RSS est abonné, ou sa fenêtre est ouverte.</td></tr>
+    <tr><td><span class="btn">TÉL</span></td><td>l'écran du téléphone est affiché sur l'ordinateur.</td></tr>
+    <tr><td><span class="btn">SMS</span></td><td>une fenêtre SMS est ouverte.</td></tr>
+    <tr><td><span class="btn">TODO</span></td><td>au moins un rappel est encore à venir (un rappel passé resté dans la liste ne compte pas), ou sa fenêtre est ouverte.</td></tr>
+    <tr><td><span class="btn">CHRONO</span></td><td>toujours : on peut y choisir un autre tri.</td></tr>
+    <tr><td><span class="btn">RECHERCHER</span></td><td>sa fenêtre est ouverte, puis tant que les résultats d'une recherche sont affichés.</td></tr>
+    <tr><td><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span></td><td>une fenêtre de rédaction ouverte par ce bouton est encore ouverte.</td></tr>
+  </table>
+  <p><span class="btn">INTERNET</span> et <span class="btn">SUPPRIMER</span> ne passent jamais à l'orange : ils agissent en une fois, sans rien laisser en cours.</p>
   <h3>Barre du bas (barre d'état)</h3>
-  <p>De gauche à droite : <span class="btn">SPAM</span> / <span class="btn">NON SPAM</span> pour le mail affiché, l'état du compte et ses compteurs, les téléchargements en cours (progression, pause, arrêt, dossier d'enregistrement), les boutons de vos macros, puis <span class="btn">DÉLAI</span>, <span class="btn">CONSOLE</span>, <span class="btn">À PROPOS</span>, <span class="btn">AIDE</span> (ouvre ce mode d'emploi) et <span class="btn">DÉFAUT</span>.</p>
+  <p>Sous la liste et le mail affiché : <span class="btn">SPAM</span> / <span class="btn">NON SPAM</span> pour le mail affiché, les boutons de vos macros au centre, et <span class="btn">COPIER</span> <span class="btn">COUPER</span> <span class="btn">COLLER</span> à droite.</p>
+  <p>Tout en bas : l'état du compte et ses compteurs, les téléchargements en cours (progression, pause, arrêt, dossier d'enregistrement), puis <span class="btn actif">DÉLAI</span> (toujours orange : le délai d'envoi est toujours en service), <span class="btn">CONSOLE</span>, <span class="btn">À PROPOS</span>, <span class="btn">AIDE</span> (ouvre ce mode d'emploi), <span class="btn">DÉFAUT</span> et <span class="btn">FERMER</span>.</p>
+  <h3>COPIER, COUPER, COLLER</h3>
+  <p>Ces trois boutons font exactement comme <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>X</kbd> et <kbd>Ctrl</kbd>+<kbd>V</kbd> là où vous étiez : dans un champ, dans le mail affiché, sur des mails ou des fichiers sélectionnés.</p>
+  <ul>
+    <li><span class="btn actif">COPIER</span> reste orange tant qu'une copie attend dans le presse-papiers. Cela vaut aussi pour <kbd>Ctrl</kbd>+<kbd>C</kbd> au clavier ou une copie faite dans une autre application.</li>
+    <li><span class="btn actif">COUPER</span> reste orange tant qu'une coupe attend d'être collée : par ce bouton, par <kbd>Ctrl</kbd>+<kbd>X</kbd>, ou des fichiers coupés dans l'Explorateur Windows. Il s'éteint une fois la coupe collée.</li>
+    <li>Un clic sur <span class="btn actif">COPIER</span> ou <span class="btn actif">COUPER</span> allumé l'éteint et <b>vide le presse-papiers</b>, sans rien copier ni couper.</li>
+  </ul>
+  <p>Les fenêtres de rédaction ont leurs propres boutons Copier, Couper, Coller (<a href="#redaction">section 10</a>). Une copie faite dans une fenêtre de rédaction n'allume que les boutons de cette fenêtre, pas ceux d'ici.</p>
   <div class="note"><b>Affichage Windows à 125 % ou plus :</b> si la place manque, la barre du haut réduit d'elle-même la taille de ses boutons pour que tout reste visible.</div>
 </section>
 
@@ -388,10 +413,12 @@
 
 <section id="redaction">
   <h2>10. Écrire un mail</h2>
-  <p>Cliquez sur <span class="btn">NOUVEAU</span>, <span class="btn">RÉPONDRE</span> (<kbd>Ctrl</kbd>+<kbd>R</kbd>), <span class="btn">RÉP. À TOUS</span>, <span class="btn">TRANSFERT</span> ou <span class="btn">RENVOYER</span>.</p>
+  <p>Cliquez sur <span class="btn">NOUVEAU</span>, <span class="btn">RÉPONDRE</span> (<kbd>Ctrl</kbd>+<kbd>R</kbd>), <span class="btn">RÉP. À TOUS</span>, <span class="btn">TRANSFERT</span> ou <span class="btn">RENVOYER</span>. Le bouton reste orange tant que la fenêtre est ouverte.</p>
+  <p>Le titre de la fenêtre rappelle d'où elle vient : « Rédiger - NOUVEAU », « Rédiger - RÉP. À TOUS », « Rédiger - TRANSFERT », ou simplement « RENVOYER » (il n'y a rien à rédiger). Pour <span class="btn">RÉPONDRE</span>, le titre donne aussi le nom de l'expéditeur, tel qu'il est écrit dans votre carnet d'adresses : « Rédiger - RÉPONDRE à Paul Martin ». S'il n'est pas dans le carnet, c'est le nom indiqué dans le mail, ou à défaut son adresse.</p>
   <ul>
     <li><b>Destinataires :</b> les adresses se complètent pendant la frappe. Cliquer sur l'étiquette À, Cc ou Cci ouvre le carnet d'adresses pour choisir les destinataires.</li>
     <li><b>Mise en forme :</b> boutons <span class="btn">Gras</span> <span class="btn">Italique</span> <span class="btn">Souligné</span> <span class="btn">Barré</span> <span class="btn">Couleur</span> <span class="btn">Émoticônes</span> <span class="btn">Langue</span>, ainsi que la taille de la police.</li>
+    <li><b>Copier, couper, coller :</b> les boutons <span class="btn">Copier</span> <span class="btn">Couper</span> <span class="btn">Coller</span>, à côté de <span class="btn">Langue</span>, agissent dans cette fenêtre sans la quitter. Ils passent à l'orange comme ceux du bas de l'écran principal (<a href="#ecran">section 3</a>), mais seulement pour une copie ou une coupe faite dans cette fenêtre.</li>
     <li><b>Pièces jointes :</b> elles s'affichent dans une colonne à droite. La petite croix rouge retire une pièce jointe.</li>
     <li><span class="btn">Accusé de réception</span> : enfoncé, il demande un accusé de lecture au destinataire.</li>
   </ul>
