@@ -103,15 +103,19 @@ import ssl
 # racine, installé dans le magasin Windows mais absent de certifi. Les deux
 # listes ensemble : certifi pour un magasin Windows périmé (ci-dessus), le
 # magasin Windows pour l'antivirus — comme le fait un navigateur.
-try:
-    import certifi
-    CONTEXTE_SSL = ssl.create_default_context(cafile=certifi.where())
-except Exception:
-    CONTEXTE_SSL = ssl.create_default_context()
-try:
-    CONTEXTE_SSL.load_default_certs()
-except Exception:
-    pass
+def _nouveau_contexte_ssl():
+    try:
+        import certifi
+        contexte = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        contexte = ssl.create_default_context()
+    try:
+        contexte.load_default_certs()
+    except Exception:
+        pass
+    return contexte
+
+CONTEXTE_SSL = _nouveau_contexte_ssl()
 
 # OAuth2 pour les comptes Outlook/Hotmail (01/09/2026) : Microsoft a
 # définitivement fermé l'authentification par mot de passe (login/mdp
@@ -432,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-25 19h30"
+VERSION_BUILD = "2026-10-25 23h54"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -1554,13 +1558,17 @@ def _session_http_msal():
     """Session requests pour MSAL (25/10/2026) : requests ne fait confiance
     qu'à certifi, donc refuse le certificat d'un antivirus qui analyse le
     HTTPS (ESET, règle COURRIER du 20/10/2026 : synchro Outlook en
-    CERTIFICATE_VERIFY_FAILED). Même confiance que CONTEXTE_SSL."""
+    CERTIFICATE_VERIFY_FAILED). Même confiance que CONTEXTE_SSL, mais un
+    contexte À PART : urllib3 y inscrit l'ALPN "http/1.1", et partagé avec
+    l'IMAP, les serveurs Dovecot (o2switch, Free) refusaient ensuite toute
+    connexion — "tlsv1 alert no application protocol" (25/10/2026)."""
     import requests
     from requests.adapters import HTTPAdapter
+    contexte_http = _nouveau_contexte_ssl()
 
     class _AdaptateurContexteSSL(HTTPAdapter):
         def init_poolmanager(self, *args, **kwargs):
-            kwargs["ssl_context"] = CONTEXTE_SSL
+            kwargs["ssl_context"] = contexte_http
             return super().init_poolmanager(*args, **kwargs)
 
     session = requests.Session()
@@ -28984,7 +28992,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 25/10/2026 19h30")
+        self.setWindowTitle("COURRIER ADRIEN — 25/10/2026 23h54")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -34274,7 +34282,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 25/10/2026 à 19h30")
+        lbl_version = QLabel("Version du 25/10/2026 à 23h54")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
