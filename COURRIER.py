@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-25 23h54"
+VERSION_BUILD = "2026-10-26 12h51"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28992,7 +28992,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 25/10/2026 23h54")
+        self.setWindowTitle("COURRIER ADRIEN — 26/10/2026 12h51")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -34282,7 +34282,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 25/10/2026 à 23h54")
+        lbl_version = QLabel("Version du 26/10/2026 à 12h51")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -39683,6 +39683,10 @@ if (typeof module === 'object') {
         # sa position en continu vers PontLecture.signalerPositionVideo
         # (voir SCRIPT_BADGE_IMAGES_EXTERNES / suivreVideo).
         self._cle_cache_html_affichee = cle_cache_html
+        # Changement de mail : aucune navigation externe ne lui appartient
+        # tant que son corps (ou sa page restaurée) n'est pas affiché — voir
+        # _sur_changement_url_lecture.
+        self._cle_origine_navigation = None
 
         # Navigation externe (ex. vidéo) mémorisée pour CE mail : la
         # restaurer plutôt que d'afficher le corps du mail (réintroduit le
@@ -42858,7 +42862,14 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             # (réintroduit le 30/08/2026, perdu lors de la migration
             # PySide6 du 29/08/2026 — voir _afficher_message_selectionne_differe
             # et _restaurer_navigation_externe).
-            cle = getattr(self, '_cle_cache_html_affichee', None)
+            # Clé = mail dont le corps était à l'écran quand la navigation a
+            # commencé, et non le mail sélectionné (26/10/2026, bug remonté
+            # par l'utilisateur : un mail supprimé pendant qu'une page du
+            # forum ouverte depuis lui finissait de charger — envoi d'un
+            # message, plus de 20 s — la page arrivait après le passage au
+            # mail suivant et restait collée à CE dernier, rechargée à chaque
+            # sélection).
+            cle = getattr(self, '_cle_origine_navigation', None)
             if cle:
                 nav = getattr(self, '_navigation_externe_par_mail', None)
                 if nav is None:
@@ -42871,6 +42882,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             self.label_url.setText("")
             self.barre_url.hide()
             self._url_courante = None
+            if url.startswith("file:///"):
+                self._cle_origine_navigation = getattr(self, '_cle_cache_html_affichee', None)
             if getattr(self, '_site_plein_ecran', False):
                 self._basculer_plein_ecran_site()
 
@@ -43099,6 +43112,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         self.barre_url.show()
         position = entree_nav.get("position")
         self._position_video_a_restaurer = position if position else None
+        self._cle_origine_navigation = cle_cache_html
         self.webview.load(QUrl(url))
 
     def _basculer_plein_ecran_site(self):
