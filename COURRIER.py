@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-27 13h11"
+VERSION_BUILD = "2026-10-27 19h31"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -861,6 +861,7 @@ _UBOL_TYPES = {
 # l'emporter sur les ascenseurs stylés par les sites eux-mêmes (voir les
 # explications détaillées dans navigateur.py). Ne JAMAIS poser
 # scrollbar-color/scrollbar-width : Chromium ignorerait alors la largeur.
+# Pose aussi le surlignage rouge (::selection) dans toutes les pages web.
 # Inclut le correctif du pointeur : sur l'ascenseur d'une zone de texte,
 # Chromium affiche le « I » de texte au lieu de la flèche.
 SCRIPT_ASCENSEUR_WEB = """
@@ -877,7 +878,10 @@ SCRIPT_ASCENSEUR_WEB = """
             "*" + P + "::-webkit-scrollbar-track { background: #000000 !important; } " +
             "*" + P + "::-webkit-scrollbar-thumb { background: #A52A2A !important; border-radius: 4px !important; border: 6px solid #000000 !important; } " +
             "*" + P + "::-webkit-scrollbar-thumb:hover { background: #c03030 !important; } " +
-            "*" + P + "::-webkit-scrollbar-corner { background: #000000 !important; }";
+            "*" + P + "::-webkit-scrollbar-corner { background: #000000 !important; } " +
+            // Surlignage rouge (27/10/2026) : comme la palette Qt, au lieu
+            // du bleu de Chromium (rédaction, lecture, sites).
+            "*" + P + "::selection { background: #A52A2A !important; color: #ffffff !important; }";
         (document.head || document.documentElement).appendChild(style);
     }
 
@@ -19869,18 +19873,21 @@ class DialogueCarnetAdresses(QDialog):
 
     DOSSIER_TOUS = "(Tous les contacts)"
 
-    def __init__(self, parent=None, champ_cible=None, libelle_cible=""):
+    def __init__(self, parent=None, champs_cibles=None, libelle_cible=""):
         super().__init__(None)  # pas de parent Qt → fenêtre indépendante + bouton taskbar auto
         self.setProperty("centrer_ecran", True)  # centrée à l'ouverture (centrer_fenetre_ecran)
         self._parent_courrier = parent
         # Mode "choix de destinataires" (28/09/2026, demandé par l'utilisateur) :
-        # ouvert par un clic sur À / Cc / Cci dans la fenêtre de rédaction,
-        # le carnet ajoute les contacts choisis à ce champ (bouton dédié ou
-        # double-clic), et reste ouvert pour en ajouter d'autres.
-        self._champ_cible = champ_cible
+        # ouvert par un clic sur À / Copie / Copie cachée dans la fenêtre de
+        # rédaction, le carnet ajoute les contacts choisis à ce champ (bouton
+        # dédié ou double-clic), et reste ouvert pour en ajouter d'autres.
+        # champs_cibles = {"À": champ, "Copie": champ, "Copie cachée": champ} :
+        # un bouton "Ajouter en ..." par champ (27/10/2026) ; libelle_cible =
+        # celui qui a été cliqué, rempli par le double-clic.
+        self._champs_cibles = champs_cibles or {}
         self._libelle_cible = libelle_cible
         from PySide6.QtWidgets import QLineEdit
-        self.setWindowTitle(f"ADRESSES → {libelle_cible}" if champ_cible is not None else "ADRESSES")
+        self.setWindowTitle(f"ADRESSES → {libelle_cible}" if self._champs_cibles else "ADRESSES")
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowTitleHint |
@@ -20151,13 +20158,18 @@ class DialogueCarnetAdresses(QDialog):
         self.lbl_statut = QLabel("")
         ligne_bas.addWidget(self.lbl_statut)
         ligne_bas.addStretch(1)
-        if self._champ_cible is not None:
-            btn_ajouter_cible = QPushButton(f"  Ajouter en {self._libelle_cible}  ")
+        for libelle in self._champs_cibles:
+            btn_ajouter_cible = QPushButton(f"  Ajouter en {libelle}  ")
             btn_ajouter_cible.setStyleSheet(STYLE_BOUTON)
-            btn_ajouter_cible.setToolTip("Ajoute le(s) contact(s) sélectionné(s) — double-clic sur un contact : même effet")
-            btn_ajouter_cible.clicked.connect(self._ajouter_au_champ_cible)
+            if libelle == self._libelle_cible:
+                btn_ajouter_cible.setToolTip("Ajoute le(s) contact(s) sélectionné(s) — double-clic sur un contact : même effet")
+            else:
+                btn_ajouter_cible.setToolTip(f"Ajoute le(s) contact(s) sélectionné(s) en {libelle}")
+            btn_ajouter_cible.clicked.connect(lambda _c=False, l=libelle: self._ajouter_au_champ_cible(l))
             ligne_bas.addWidget(btn_ajouter_cible)
-            self.liste_contacts.itemDoubleClicked.connect(lambda _it: self._ajouter_au_champ_cible())
+        if self._libelle_cible in self._champs_cibles:
+            self.liste_contacts.itemDoubleClicked.connect(
+                lambda _it: self._ajouter_au_champ_cible(self._libelle_cible))
         btn_fermer = QPushButton("  Fermer  ")
         btn_fermer.setStyleSheet(STYLE_BOUTON)
         btn_fermer.clicked.connect(self.accept)
@@ -20324,11 +20336,11 @@ class DialogueCarnetAdresses(QDialog):
             return
         ouvrir_fenetre_sms(self._parent_courrier, destinataires)
 
-    def _ajouter_au_champ_cible(self):
-        """Ajoute les contacts sélectionnés au champ À/Cc/Cci d'origine, au
-        même format que l'autocomplétion ("Nom <adresse>", séparés par
-        "; "), sans doublon avec les adresses déjà présentes."""
-        champ = self._champ_cible
+    def _ajouter_au_champ_cible(self, libelle):
+        """Ajoute les contacts sélectionnés au champ À/Copie/Copie cachée
+        demandé, au même format que l'autocomplétion ("Nom <adresse>",
+        séparés par "; "), sans doublon avec les adresses déjà présentes."""
+        champ = self._champs_cibles.get(libelle)
         if champ is None:
             return
         ids = [it.data(Qt.ItemDataRole.UserRole) for it in self.liste_contacts.selectedItems()]
@@ -20355,7 +20367,7 @@ class DialogueCarnetAdresses(QDialog):
             ajouts.append(f"{nom} <{email}>" if nom else email)
         if not ajouts:
             self.lbl_statut.setStyleSheet("color: #e0a050;")
-            self.lbl_statut.setText(f"Déjà présent(s) en {self._libelle_cible}.")
+            self.lbl_statut.setText(f"Déjà présent(s) en {libelle}.")
             return
         base = texte.rstrip()
         if base and not base.endswith((";", ",")):
@@ -20364,7 +20376,7 @@ class DialogueCarnetAdresses(QDialog):
         champ.setText(nouveau)
         champ.setCursorPosition(len(nouveau))
         self.lbl_statut.setStyleSheet("color: #90c090;")
-        self.lbl_statut.setText(f"{len(ajouts)} contact(s) ajouté(s) en {self._libelle_cible}.")
+        self.lbl_statut.setText(f"{len(ajouts)} contact(s) ajouté(s) en {libelle}.")
 
     def _restaurer_dossier_avant_drag(self):
         """Remet la sélection sur le dossier qui était affiché avant le
@@ -25123,28 +25135,38 @@ class FenetreRedaction(QDialog):
         grille = QVBoxLayout()
         grille.setSpacing(6)
 
+        # Largeur commune de la colonne de gauche : celle du bouton le plus
+        # long ("Copie cachée"), pour que les champs restent alignés.
+        LARGEUR_LIBELLES = 120
+
         def ligne(label, valeur="", normaliser_adresses=False, multiligne=False):
             h = QHBoxLayout()
-            lbl = QLabel(f"{label} :")
-            lbl.setFixedWidth(60)
             if multiligne:
                 champ = ChampDestinataires(valeur, normaliser_adresses=normaliser_adresses)
-                # Clic sur "À :" / "Cc :" / "Cci :" = carnet d'adresses pour
-                # ce champ (28/09/2026, demandé par l'utilisateur)
+                # Bouton "À" / "Copie" / "Copie cachée" = carnet d'adresses
+                # pour ce champ (28/09/2026, demandé par l'utilisateur). Vrais
+                # boutons rouges depuis le 27/10/2026 : en simple libellé
+                # "À :" / "Cc :" / "Cci :", personne ne voyait qu'on pouvait
+                # cliquer dessus.
+                lbl = QPushButton(label)
+                lbl.setStyleSheet(STYLE_BOUTON)
+                lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 lbl.setCursor(Qt.CursorShape.PointingHandCursor)
                 lbl.setToolTip(f"Choisir des destinataires en {label} dans le carnet d'adresses")
-                lbl.setStyleSheet("QLabel:hover { color: #e08080; text-decoration: underline; }")
-                lbl.mousePressEvent = lambda event, c=champ, l=label: self._ouvrir_carnet_pour(c, l)
+                lbl.clicked.connect(lambda _c=False, l=label: self._ouvrir_carnet_pour(l))
+                h.addWidget(lbl, 0, Qt.AlignmentFlag.AlignTop)
             else:
                 champ = ChampTexteNatif(valeur, normaliser_adresses=normaliser_adresses)
-            h.addWidget(lbl)
+                lbl = QLabel(f"{label} :")
+                h.addWidget(lbl)
+            lbl.setFixedWidth(LARGEUR_LIBELLES)
             h.addWidget(champ)
             grille.addLayout(h)
             return champ
 
         self.champ_a = ligne("À", destinataire, normaliser_adresses=True, multiligne=True)
-        self.champ_cc = ligne("Cc", normaliser_adresses=True, multiligne=True)
-        self.champ_cci = ligne("Cci", normaliser_adresses=True, multiligne=True)
+        self.champ_cc = ligne("Copie", normaliser_adresses=True, multiligne=True)
+        self.champ_cci = ligne("Copie cachée", normaliser_adresses=True, multiligne=True)
         self.champ_sujet = ligne("Sujet", sujet)
         for champ_destinataire in (self.champ_a, self.champ_cc, self.champ_cci):
             installer_completion_destinataires(champ_destinataire)
@@ -25241,6 +25263,17 @@ class FenetreRedaction(QDialog):
         # se fait ici sans aller-retour par elle. Orange comme les autres
         # tant qu'une copie ou une coupe attend d'être collée.
         barre_forme.addWidget(creer_cadre_presse_papiers(STYLE_BOUTON, barre_redaction=True))
+
+        # "Ouvrir un HTML" (27/10/2026, demandé) : remplace le corps par un
+        # fichier .html tel quel (la newsletter, envoyée depuis le compte
+        # free) — le collage, lui, ne garde que le texte (voir 'paste').
+        btn_ouvrir_html = QPushButton(" Ouvrir un HTML ")
+        btn_ouvrir_html.setStyleSheet(STYLE_BOUTON)
+        btn_ouvrir_html.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        btn_ouvrir_html.setToolTip("Remplacer le corps du message par un fichier .html "
+                                   "(mise en page et images comprises)")
+        btn_ouvrir_html.clicked.connect(self._ouvrir_fichier_html)
+        barre_forme.addWidget(btn_ouvrir_html)
 
         layout.addWidget(conteneur_forme)
 
@@ -25825,17 +25858,19 @@ class FenetreRedaction(QDialog):
         else:
             lancer_appel_claude(CONSIGNE_CORRECTION_CLAUDE, passages, progression, rappel_claude)
 
-    def _ouvrir_carnet_pour(self, champ, libelle):
-        """Carnet d'adresses en mode choix pour le champ À/Cc/Cci cliqué
-        (voir DialogueCarnetAdresses._ajouter_au_champ_cible). Un seul carnet
-        de ce type ouvert à la fois par fenêtre de rédaction."""
+    def _ouvrir_carnet_pour(self, libelle):
+        """Carnet d'adresses en mode choix, ouvert par le bouton À / Copie /
+        Copie cachée (voir DialogueCarnetAdresses._ajouter_au_champ_cible) ;
+        il peut remplir les trois champs. Un seul carnet de ce type ouvert à
+        la fois par fenêtre de rédaction."""
         ancien = getattr(self, '_carnet_destinataires', None)
         if ancien is not None:
             try:
                 ancien.close()
             except RuntimeError:
                 pass
-        dlg = DialogueCarnetAdresses(self._parent_courrier, champ_cible=champ, libelle_cible=libelle)
+        champs = {"À": self.champ_a, "Copie": self.champ_cc, "Copie cachée": self.champ_cci}
+        dlg = DialogueCarnetAdresses(self._parent_courrier, champs_cibles=champs, libelle_cible=libelle)
         self._carnet_destinataires = dlg
         dlg.show()
         dlg.raise_()
@@ -26170,6 +26205,57 @@ class FenetreRedaction(QDialog):
             event.acceptProposedAction()
         else:
             super().dropEvent(event)
+
+    # Dossier du dernier .html ouvert, gardé le temps de la session
+    _dossier_dernier_html = ""
+
+    def _ouvrir_fichier_html(self):
+        """Bouton "Ouvrir un HTML" : remplace le corps du message par le
+        contenu d'un fichier .html. Seul le contenu de <body> est gardé (un
+        simple fragment est pris en entier), sans les <script>. Les images
+        restent des liens : elles doivent être en ligne pour s'afficher chez
+        le destinataire. Demande confirmation si le corps contient déjà du
+        texte."""
+        if not self._chargement_termine:
+            return
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        import re as _re
+        dossier = FenetreRedaction._dossier_dernier_html or os.path.expanduser("~")
+        chemin, _ = QFileDialog.getOpenFileName(self, "Ouvrir un HTML", dossier,
+                                                "Pages HTML (*.html *.htm)")
+        if not chemin:
+            return
+        FenetreRedaction._dossier_dernier_html = os.path.dirname(chemin)
+        try:
+            with open(chemin, "rb") as f:
+                brut = f.read()
+            try:
+                html = brut.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                html = brut.decode("cp1252", errors="replace")
+        except OSError as e:
+            QMessageBox.warning(self, "Ouvrir un HTML", f"Lecture impossible :\n{e}")
+            return
+        corps = _re.search(r"<body[^>]*>(.*)</body>", html, _re.IGNORECASE | _re.DOTALL)
+        if corps:
+            html = corps.group(1)
+        html = _re.sub(r"<script\b.*?</script>", "", html, flags=_re.IGNORECASE | _re.DOTALL)
+        if not html.strip():
+            QMessageBox.warning(self, "Ouvrir un HTML", "Ce fichier ne contient rien à afficher.")
+            return
+
+        def _remplacer(texte_actuel):
+            if (texte_actuel or "").strip() and QMessageBox.question(
+                    self, "Ouvrir un HTML",
+                    "Le corps du message contient déjà du texte.\n"
+                    "Le remplacer par le fichier ?") != QMessageBox.StandardButton.Yes:
+                return
+            self.webview.page().runJavaScript(
+                f"document.getElementById('zone-edition').innerHTML = {json.dumps(html)};"
+                "window.scrollTo(0, 0);")
+
+        self.webview.page().runJavaScript(
+            "document.getElementById('zone-edition').innerText", _remplacer)
 
     def _choisir_pieces_jointes(self):
         """Gros bouton rouge de la colonne : choix de fichiers Windows
@@ -29073,7 +29159,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 27/10/2026 13h11")
+        self.setWindowTitle("COURRIER ADRIEN — 27/10/2026 19h31")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -34363,7 +34449,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 27/10/2026 à 13h11")
+        lbl_version = QLabel("Version du 27/10/2026 à 19h31")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
