@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-27 11h41"
+VERSION_BUILD = "2026-10-27 13h11"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28805,10 +28805,12 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 
     COPIER ou COUPER reste orange (25/10/2026, demandé) tant qu'une copie
     ou une coupe attend d'être collée : allumé quand le presse-papiers
-    change (COUPER pour une coupe par ce bouton ou des fichiers coupés
-    dans l'Explorateur ou Ctrl+X reconnu aux touches encore enfoncées,
-    COPIER sinon, Ctrl+C au clavier ou autre appli compris), éteint quand
-    il se vide ou, pour une coupe, une fois collée (COLLER ou Ctrl+V). Un
+    change (COUPER pour une coupe par ce bouton, des fichiers coupés ou
+    Ctrl+X reconnu aux touches encore enfoncées, COPIER sinon, Ctrl+C au
+    clavier compris), éteint quand il se vide ou, pour une coupe, une fois
+    collée (COLLER ou Ctrl+V). Seule une copie faite dans COURRIER
+    l'allume (27/10/2026, demandé) : une copie dans une autre appli
+    l'éteint, puisqu'elle remplace celle de COURRIER. Un
     clic sur COPIER ou COUPER allumé l'éteint et vide le presse-papiers,
     sans rien copier ni couper. Le focus revient à la fenêtre où l'on
     était (Rédiger...), pas à la fenêtre principale.
@@ -28824,6 +28826,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     user32.SetFocus.argtypes = [ctypes.c_void_p]
     user32.GetAsyncKeyState.restype = ctypes.c_short
     user32.GetClipboardOwner.restype = ctypes.c_void_p
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
 
     class LASTINPUTINFO(ctypes.Structure):
         _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
@@ -28887,10 +28890,9 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
         except RuntimeError:  # fenêtre déjà détruite (minuteur en retard)
             pass
 
-    def _proprietaire_presse_papiers():
-        """Nom de l'exécutable qui a rempli le presse-papiers (journal)."""
+    def _nom_processus(hwnd):
+        """Nom de l'exécutable propriétaire d'une fenêtre (journal)."""
         try:
-            hwnd = user32.GetClipboardOwner()
             if not hwnd:
                 return "?"
             pid = ctypes.c_ulong()
@@ -28911,10 +28913,33 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
         except Exception:
             return "?"
 
+    def _detail_journal(donnees):
+        """Source, appli au premier plan et contenu, pour le journal
+        (27/10/2026 : trouver d'où viennent les allumages sans copie)."""
+        extrait = " ".join((donnees.text() or "").split())[:40]
+        formats = ", ".join(donnees.formats()[:4])
+        return (f"source : {_nom_processus(user32.GetClipboardOwner())} · "
+                f"premier plan : {_nom_processus(user32.GetForegroundWindow())} · "
+                f"contenu : « {extrait} » [{formats}]")
+
     def _presse_papiers_change():
         donnees = QApplication.clipboard().mimeData()
         if donnees is None or not donnees.formats():
             signature_vue[0] = None
+            _allumer(None)
+            return
+        # Copie faite hors de COURRIER (27/10/2026, demandé) : n'allume
+        # rien, et éteint le bouton puisque la copie de COURRIER n'est plus
+        # dans le presse-papiers. Le propriétaire est la fenêtre cachée de
+        # Qt pour toute copie de COURRIER, pages web comprises.
+        pid = ctypes.c_ulong()
+        proprietaire = user32.GetClipboardOwner()
+        if proprietaire:
+            user32.GetWindowThreadProcessId(ctypes.c_void_p(proprietaire), ctypes.byref(pid))
+        if pid.value != os.getpid():
+            signature_vue[0] = None
+            if not barre_redaction:
+                print(f"[PRESSE-PAPIERS] copie hors de COURRIER, COPIER éteint — {_detail_journal(donnees)}")
             _allumer(None)
             return
         # Ctrl+C / Ctrl+X au clavier (0x11 = Ctrl, 0x43 = C, 0x58 = X) :
@@ -28941,28 +28966,27 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
                 inactif_ms = (ctypes.WinDLL("kernel32").GetTickCount() - infos.dwTime) & 0xFFFFFFFF
             if meme_contenu or inactif_ms > 2000:
                 print(f"[PRESSE-PAPIERS] changement ignoré ({'même contenu' if meme_contenu else f'aucune saisie depuis {inactif_ms} ms'}) "
-                      f"— source : {_proprietaire_presse_papiers()}")
+                      f"— {_detail_journal(donnees)}")
                 return
         # attente gardée jusqu'à son délai : une page web peut changer le
         # presse-papiers en plusieurs fois pour une seule coupe
         libelle = attente[0] or "COPIER"
-        # Ctrl+X au clavier dans une autre appli : le presse-papiers ne
-        # distingue pas une coupe d'une copie, mais Ctrl et X sont encore
-        # enfoncés quand il change
+        # Ctrl+X au clavier : le presse-papiers ne distingue pas une coupe
+        # d'une copie, mais Ctrl et X sont encore enfoncés quand il change
         if touche_x:
             coupe_signalee[0] = time.monotonic()
         # Coupe signalée (touches ci-dessus, Ctrl+X dans COURRIER, bouton
         # COUPER) : vaut aussi pour les changements qui suivent de près
         if time.monotonic() - coupe_signalee[0] < 1.5:
             libelle = "COUPER"
-        # Fichiers coupés dans l'Explorateur : DropEffect 2 (déplacer)
+        # Fichiers coupés : DropEffect 2 (déplacer)
         effet = donnees.data('application/x-qt-windows-mime;value="Preferred DropEffect"')
         if len(effet) >= 1 and effet[0] in (b"\x02", 2):
             libelle = "COUPER"
         # Seule la barre de la fenêtre d'où vient la copie s'allume
         # (25/10/2026, demandé) : celle d'une fenêtre Rédiger si c'est elle
         # qui est active, sinon celle de la fenêtre principale (copie faite
-        # ailleurs dans COURRIER ou dans une autre appli)
+        # ailleurs dans COURRIER)
         active = QApplication.activeWindow()
         if attente[0]:
             concernee = True  # bouton de cette barre-ci
@@ -28972,7 +28996,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
             concernee = (active is None
                          or active.findChild(QFrame, "cadrePressePapiersRedaction") is None)
         if concernee:
-            print(f"[PRESSE-PAPIERS] {libelle} allumé — source : {_proprietaire_presse_papiers()}")
+            print(f"[PRESSE-PAPIERS] {libelle} allumé — {_detail_journal(donnees)}")
         _allumer(libelle if concernee else None)
 
     class _SurveillantCtrlX(QObject):
@@ -29049,7 +29073,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 27/10/2026 11h41")
+        self.setWindowTitle("COURRIER ADRIEN — 27/10/2026 13h11")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -34339,7 +34363,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 27/10/2026 à 11h41")
+        lbl_version = QLabel("Version du 27/10/2026 à 13h11")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
