@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-26 12h51"
+VERSION_BUILD = "2026-10-27 11h41"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -28823,6 +28823,10 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     user32.GetFocus.restype = ctypes.c_void_p
     user32.SetFocus.argtypes = [ctypes.c_void_p]
     user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.GetClipboardOwner.restype = ctypes.c_void_p
+
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
     cadre = QFrame()
     cadre.setObjectName("cadrePressePapiersRedaction" if barre_redaction else "cadrePressePapiers")
     layout = QHBoxLayout(cadre)
@@ -28839,6 +28843,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     boutons = {}
     attente = [None]  # "COPIER"/"COUPER" cliqué, en attente du presse-papiers
     coupe_signalee = [0.0]  # time.monotonic() du dernier Ctrl+X repéré
+    signature_vue = [None]  # dernier contenu vu, pour ignorer une republication
     style_actif = style_bouton + """
         QPushButton[actif="true"], QPushButton[actif="true"]:hover {
             background-color: #DAA520; color: black; }
@@ -28882,19 +28887,69 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
         except RuntimeError:  # fenêtre déjà détruite (minuteur en retard)
             pass
 
+    def _proprietaire_presse_papiers():
+        """Nom de l'exécutable qui a rempli le presse-papiers (journal)."""
+        try:
+            hwnd = user32.GetClipboardOwner()
+            if not hwnd:
+                return "?"
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+            kernel32 = ctypes.WinDLL("kernel32")
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            h = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+            if not h:
+                return f"pid {pid.value}"
+            try:
+                tampon = ctypes.create_unicode_buffer(260)
+                taille = ctypes.c_ulong(260)
+                if kernel32.QueryFullProcessImageNameW(ctypes.c_void_p(h), 0, tampon, ctypes.byref(taille)):
+                    return os.path.basename(tampon.value)
+                return f"pid {pid.value}"
+            finally:
+                kernel32.CloseHandle(ctypes.c_void_p(h))
+        except Exception:
+            return "?"
+
     def _presse_papiers_change():
         donnees = QApplication.clipboard().mimeData()
         if donnees is None or not donnees.formats():
+            signature_vue[0] = None
             _allumer(None)
             return
+        # Ctrl+C / Ctrl+X au clavier (0x11 = Ctrl, 0x43 = C, 0x58 = X) :
+        # touches encore enfoncées quand le presse-papiers change
+        ctrl = user32.GetAsyncKeyState(0x11) & 0x8000
+        touche_c = ctrl and user32.GetAsyncKeyState(0x43) & 0x8000
+        touche_x = ctrl and user32.GetAsyncKeyState(0x58) & 0x8000
+        demande = bool(attente[0] or touche_c or touche_x
+                       or time.monotonic() - coupe_signalee[0] < 1.5)
+        # Allumage sans copie (27/10/2026, bug remonté) : Windows signale
+        # aussi un changement quand une appli republie le même contenu
+        # (fermeture d'une appli, gestionnaire de presse-papiers...) ou
+        # remplit le presse-papiers toute seule, sans geste de
+        # l'utilisateur. On ignore donc un contenu identique au précédent,
+        # et un changement sans clavier ni souris depuis 2 s.
+        signature = (tuple(donnees.formats()), donnees.text(), len(donnees.html()))
+        meme_contenu = signature == signature_vue[0]
+        signature_vue[0] = signature
+        if not demande:
+            infos = LASTINPUTINFO()
+            infos.cbSize = ctypes.sizeof(LASTINPUTINFO)
+            inactif_ms = 0
+            if user32.GetLastInputInfo(ctypes.byref(infos)):
+                inactif_ms = (ctypes.WinDLL("kernel32").GetTickCount() - infos.dwTime) & 0xFFFFFFFF
+            if meme_contenu or inactif_ms > 2000:
+                print(f"[PRESSE-PAPIERS] changement ignoré ({'même contenu' if meme_contenu else f'aucune saisie depuis {inactif_ms} ms'}) "
+                      f"— source : {_proprietaire_presse_papiers()}")
+                return
         # attente gardée jusqu'à son délai : une page web peut changer le
         # presse-papiers en plusieurs fois pour une seule coupe
         libelle = attente[0] or "COPIER"
         # Ctrl+X au clavier dans une autre appli : le presse-papiers ne
         # distingue pas une coupe d'une copie, mais Ctrl et X sont encore
-        # enfoncés quand il change (0x11 = Ctrl, 0x58 = X)
-        if (user32.GetAsyncKeyState(0x11) & 0x8000
-                and user32.GetAsyncKeyState(0x58) & 0x8000):
+        # enfoncés quand il change
+        if touche_x:
             coupe_signalee[0] = time.monotonic()
         # Coupe signalée (touches ci-dessus, Ctrl+X dans COURRIER, bouton
         # COUPER) : vaut aussi pour les changements qui suivent de près
@@ -28916,6 +28971,8 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
         else:
             concernee = (active is None
                          or active.findChild(QFrame, "cadrePressePapiersRedaction") is None)
+        if concernee:
+            print(f"[PRESSE-PAPIERS] {libelle} allumé — source : {_proprietaire_presse_papiers()}")
         _allumer(libelle if concernee else None)
 
     class _SurveillantCtrlX(QObject):
@@ -28992,7 +29049,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 26/10/2026 12h51")
+        self.setWindowTitle("COURRIER ADRIEN — 27/10/2026 11h41")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31591,7 +31648,7 @@ if (typeof module === 'object') {
         btn_spam_bas.setStyleSheet(
             "QPushButton { background-color: #A52A2A; color: white; border: 1px solid white;"
             " font-family: Verdana; font-size: 11px; font-weight: bold; padding: 1px 6px; }"
-            "QPushButton:hover { background-color: #c03030; }"
+            "QPushButton:hover { background-color: #DAA520; color: black; }"
         )
         btn_spam_bas.setFixedHeight(16)
         btn_spam_bas.clicked.connect(self.marquer_spam)
@@ -31607,7 +31664,7 @@ if (typeof module === 'object') {
         self._btn_non_spam.setStyleSheet(
             "QPushButton { background-color: #A52A2A; color: white; border: 1px solid white;"
             " font-family: Verdana; font-size: 11px; font-weight: bold; padding: 1px 6px; }"
-            "QPushButton:hover { background-color: #c03030; }"
+            "QPushButton:hover { background-color: #DAA520; color: black; }"
         )
         self._btn_non_spam.setFixedHeight(16)
         self._btn_non_spam.clicked.connect(self.demarquer_spam)
@@ -31742,7 +31799,7 @@ if (typeof module === 'object') {
                 font-family: Verdana; font-size: 11px; font-weight: bold;
                 padding: 1px 6px;
             }
-            QPushButton:hover { background-color: #c03030; }
+            QPushButton:hover { background-color: #DAA520; color: black; }
         """
 
         # COPIER / COUPER / COLLER (25/10/2026, demandé) : à l'extrême droite
@@ -33902,7 +33959,7 @@ if (typeof module === 'object') {
                     font-family: Verdana; font-size: 11px; font-weight: bold;
                     padding: 1px 8px;
                 }
-                QPushButton:hover { background-color: #c03030; }
+                QPushButton:hover { background-color: #DAA520; color: black; }
             """
         # Vider les boutons existants
         while self._zone_boutons_macros.count():
@@ -34282,7 +34339,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 26/10/2026 à 12h51")
+        lbl_version = QLabel("Version du 27/10/2026 à 11h41")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
