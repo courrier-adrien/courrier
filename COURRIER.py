@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-27 19h31"
+VERSION_BUILD = "2026-10-29 12h03"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -24937,6 +24937,9 @@ class FenetreRedaction(QDialog):
         self.btn_envoyer = QPushButton("  Envoyer  ")
         self.btn_envoyer.setStyleSheet(STYLE_BOUTON)
         self.btn_envoyer.clicked.connect(self.demarrer_envoi)
+        # Même largeur que les boutons À / Copie / Copie cachée juste dessous
+        # (LARGEUR_LIBELLES, 28/10/2026, demandé par l'utilisateur).
+        self.btn_envoyer.setFixedWidth(120)
         layout_btn_haut.addWidget(self.btn_envoyer)
 
         # Ctrl+Entrée envoie le mail depuis À/Cc/Cci/Sujet. Avec QWebEngineView
@@ -28896,7 +28899,8 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     clavier compris), éteint quand il se vide ou, pour une coupe, une fois
     collée (COLLER ou Ctrl+V). Seule une copie faite dans COURRIER
     l'allume (27/10/2026, demandé) : une copie dans une autre appli
-    l'éteint, puisqu'elle remplace celle de COURRIER. Un
+    l'éteint, puisqu'elle remplace celle de COURRIER. COPIER s'éteint
+    aussi seul au bout de 30 s (28/10/2026, demandé). Un
     clic sur COPIER ou COUPER allumé l'éteint et vide le presse-papiers,
     sans rien copier ni couper. Le focus revient à la fenêtre où l'on
     était (Rédiger...), pas à la fenêtre principale.
@@ -28969,10 +28973,22 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
         elif focus_avant[0] and user32.GetFocus() != focus_avant[0]:
             user32.SetFocus(focus_avant[0])
 
+    # COPIER s'éteint seul au bout de 30 s (28/10/2026, demandé : on oublie
+    # de l'éteindre). La copie reste dans le presse-papiers ; COUPER, lui,
+    # reste allumé jusqu'au collage.
+    extinction_copier = QTimer(cadre)
+    extinction_copier.setSingleShot(True)
+    extinction_copier.setInterval(30000)
+    extinction_copier.timeout.connect(lambda: _allumer(None))
+
     def _allumer(libelle):
         try:
             for nom in ("COPIER", "COUPER"):
                 _marquer_bouton_actif(boutons[nom], nom == libelle)
+            if libelle == "COPIER":
+                extinction_copier.start()
+            else:
+                extinction_copier.stop()
         except RuntimeError:  # fenêtre déjà détruite (minuteur en retard)
             pass
 
@@ -29159,7 +29175,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 27/10/2026 19h31")
+        self.setWindowTitle("COURRIER ADRIEN — 29/10/2026 12h03")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -34449,7 +34465,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 27/10/2026 à 19h31")
+        lbl_version = QLabel("Version du 29/10/2026 à 12h03")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -40292,8 +40308,21 @@ if (typeof module === 'object') {
 </div>"""
 
         import json
+        # Page du mail pas encore chargée (29/10/2026, bug remonté par
+        # l'utilisateur : PJ absentes en arrivant sur un compte, présentes en
+        # recliquant le mail). Le bloc était injecté une seule fois, 300 ms
+        # après la lecture du .eml : au changement de compte le panneau part
+        # de about:blank et le mail n'est pas encore chargé à ce moment-là —
+        # l'injection tombait dans la page vide, effacée ensuite par le mail.
+        # Le JS vérifie maintenant que c'est bien la page de CE mail (fichier
+        # d'aperçu propre à chaque mail) et finie de charger ; sinon il
+        # renvoie false et on réessaie.
+        fichier_apercu = os.path.basename(getattr(self, '_temp_html', '') or '')
         js = f"""
 (function() {{
+    if (document.readyState === 'loading'
+        || location.href.indexOf({json.dumps(fichier_apercu)}) < 0
+        || !document.getElementById('__corps_mail__')) return false;
     // Définir les fonctions d'abord (sans passer par innerHTML/script)
     window.ouvrirPJ = function(index) {{ try {{ if (pyBridge) pyBridge.ouvrirPieceJointe(index); }} catch(e) {{}} }};
     window.enregistrerPJ = function() {{ try {{ if (pyBridge) pyBridge.enregistrerPiecesJointes(); }} catch(e) {{}} }};
@@ -40410,11 +40439,26 @@ if (typeof module === 'object') {
             repli.style.display = 'block';
         }}
     }}
+    return true;
 }})();"""
-        try:
-            self.webview.page().runJavaScript(js)
-        except Exception:
-            pass
+        uid_att = self._item_selectionne
+
+        def _injecter(tentative=0):
+            if self._item_selectionne != uid_att:
+                return
+            def _resultat(ok):
+                # 25 essais × 200 ms : jusqu'à 5 s pour un mail lourd
+                if ok is False and tentative < 25:
+                    QTimer.singleShot(200, lambda: _injecter(tentative + 1))
+                elif ok is False:
+                    print(f"[PJ] UID={uid_att} : page du mail jamais prête, "
+                          f"barre des pièces jointes non affichée")
+            try:
+                self.webview.page().runJavaScript(js, _resultat)
+            except Exception:
+                pass
+
+        _injecter()
 
     def _conserver_fenetre_secondaire(self, dlg):
         """Empêche une fenêtre secondaire indépendante (QDialog(None) affichée
@@ -44100,14 +44144,21 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         sujet_mail = msg_info.get("sujet", "") if msg_info else ""
         sujet_esc  = _html.escape(sujet_mail) if sujet_mail and sujet_mail != "(sans sujet)" else ""
 
+        # À/Cc/Cci plafonnés à 4 lignes, avec leur propre ascenseur (28/10/2026,
+        # bug remonté par l'utilisateur : un mail envoyé à ~300 personnes en Cc
+        # rendait le bandeau plus haut que l'écran ; comme il devient sticky à
+        # l'ouverture d'une PJ (__pjAfficherViewer), il recouvrait la
+        # visionneuse et la PJ était impossible à voir). Déplafonné à
+        # l'impression (règle @media print du bandeau).
+        STYLE_DEST_BANDEAU = "max-height:5em;overflow-y:auto;"
         bandeau = f"""
-<div id="__bandeau_entete__" style="font-family:Verdana;font-size:13px;background:#f0f0f0;border-bottom:1px solid #ccc;padding:8px 12px;margin-bottom:0;">
-  <style>@media print {{ #__ligne_boutons_bandeau__ {{ display:none !important; }} #__bandeau_entete__ {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }} }}</style>
+<div id="__bandeau_entete__"style="font-family:Verdana;font-size:13px;background:#f0f0f0;border-bottom:1px solid #ccc;padding:8px 12px;margin-bottom:0;">
+  <style>@media print {{ #__ligne_boutons_bandeau__ {{ display:none !important; }} #__bandeau_entete__ {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }} .__dest_bandeau__ {{ max-height:none !important; overflow:visible !important; }} }}</style>
   {"<div id='__bandeau_sujet__' style='float:right;max-width:55%;margin:2px 0 6px 16px;font-size:16px;font-weight:bold;color:#333;text-align:right;line-height:1.3;'>" + sujet_esc + "</div>" if sujet_esc else ""}
   <div><b>De :</b> {de_esc}</div>
-  {"<div><b>À :</b> " + a_esc + "</div>" if a_esc else ""}
-  {"<div><b>Cc :</b> " + cc_esc + "</div>" if cc_esc else ""}
-  {"<div><b>Cci :</b> " + cci_esc + "</div>" if cci_esc else ""}
+  {"<div class='__dest_bandeau__' style='" + STYLE_DEST_BANDEAU + "'><b>À :</b> " + a_esc + "</div>" if a_esc else ""}
+  {"<div class='__dest_bandeau__' style='" + STYLE_DEST_BANDEAU + "'><b>Cc :</b> " + cc_esc + "</div>" if cc_esc else ""}
+  {"<div class='__dest_bandeau__' style='" + STYLE_DEST_BANDEAU + "'><b>Cci :</b> " + cci_esc + "</div>" if cci_esc else ""}
   <div><b>Date :</b> {date_affichee}</div>
   {"<div><b>Taille :</b> " + taille_esc + "</div>" if taille_esc else ""}
   <div id="__ligne_boutons_bandeau__" style="clear:both;margin-top:4px;display:flex;align-items:center;flex-wrap:wrap;">
