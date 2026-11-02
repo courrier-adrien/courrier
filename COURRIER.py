@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-10-29 12h03"
+VERSION_BUILD = "2026-11-02 19h09"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -4434,6 +4434,84 @@ def _memoriser_telephone(serie):
                                   reseaux=reseaux)
 
     _threading.Thread(target=_travail, daemon=True).start()
+
+
+def _sons_pour_telephone():
+    """Sons de compte de SONS, avec leur fichier (base64), pour la copie vers le téléphone."""
+    import base64
+    sortie = []
+    for adresse, s in (charger_sons_comptes() or {}).items():
+        chemin = (s or {}).get("chemin") or ""
+        try:
+            with open(chemin, "rb") as f:
+                donnees = base64.b64encode(f.read()).decode("ascii")
+        except OSError:
+            continue   # son absent ou illisible : pas copié
+        sortie.append({"adresse": adresse, "actif": bool(s.get("actif", True)),
+                       "nom": os.path.basename(chemin), "donnees": donnees})
+    return sortie
+
+
+def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False, modeles=False):
+    """Export « coffre à coffre » vers COURRIER ADRIEN ANDROID (29/10/2026) :
+    ouvre l'appli sur sa réception (port et jeton d'une fois en paramètres),
+    crée un tunnel adb vers ce port, envoie les comptes, attend la réponse.
+    Aucun fichier, ni ici ni sur le téléphone. True, ou un message d'erreur.
+    Bloquant (fil de fond).
+    02/11/2026 : macros, sons et modèles en plus (ou seuls, comptes = []),
+    format « courrier-adrien-copie-2 » ; comptes seuls : ancien format,
+    compris aussi par les applications d'avant."""
+    import secrets, socket
+    paquet = "fr.courrieradrien.android"
+    if "package:" not in _adb_bloquant("-s", serie, "shell", "pm", "path", paquet):
+        return "l'application COURRIER ADRIEN n'est pas installée sur ce téléphone."
+    jeton = secrets.token_hex(16)
+    port_tel = 40000 + secrets.randbelow(10000)
+    contenu = {
+        "format": "courrier-adrien-copie-2" if (macros or sons or modeles) else "courrier-adrien-comptes-direct-1",
+        "jeton": jeton, "avec_mdp": bool(avec_mdp),
+        "comptes": [{
+            "nom": c.get("nom", ""), "adresse": c.get("adresse", ""),
+            "imap_host": c.get("imap_host", ""), "imap_port": c.get("imap_port", 993),
+            "smtp_host": c.get("smtp_host", ""), "smtp_port": c.get("smtp_port", 465),
+            "smtp_starttls": bool(c.get("smtp_starttls")),
+            "protocole": c.get("protocole") or "imap",
+            "mdp": (c.get("mdp") or "") if avec_mdp and (c.get("protocole") or "imap") != "graph" else "",
+        } for c in comptes],
+    }
+    if macros:
+        contenu["macros"] = charger_macros().get("macros", [])
+    if sons:
+        contenu["sons"] = _sons_pour_telephone()
+    if modeles:
+        contenu["modeles"] = charger_modeles()
+    paquet_json = json.dumps(contenu, ensure_ascii=False).encode("utf-8") + b"\n"
+    _adb_bloquant("-s", serie, "shell", "am", "start", "-n", f"{paquet}/.MainActivity",
+                  "--ei", "port_comptes", str(port_tel), "--es", "jeton_comptes", jeton)
+    sortie = _adb_bloquant("-s", serie, "forward", "tcp:0", f"tcp:{port_tel}", erreurs=False).strip()
+    if not sortie.isdigit():
+        return "la liaison avec l'application n'a pas pu s'établir. Recommencez."
+    port_pc = int(sortie)
+    try:
+        # adb accepte la connexion côté PC même si l'appli n'écoute pas
+        # encore : réponse vide = pas prête, on réessaie
+        fin = time.monotonic() + 20
+        while time.monotonic() < fin:
+            try:
+                # 60 s : avec les sons, plusieurs Mo passent par le Wi-Fi (02/11/2026)
+                with socket.create_connection(("127.0.0.1", port_pc), timeout=60) as sock:
+                    sock.sendall(paquet_json)
+                    reponse = sock.makefile("rb").readline().decode("utf-8", "replace").strip()
+            except OSError:
+                reponse = ""
+            if reponse == "OK":
+                return True
+            if reponse:
+                return "l'application a refusé l'envoi. Recommencez."
+            time.sleep(0.5)
+        return "l'application n'a pas répondu. Déverrouillez le téléphone et recommencez."
+    finally:
+        _adb_bloquant("-s", serie, "forward", "--remove", f"tcp:{port_pc}")
 
 
 def _adb_bloquant(*arguments, delai=15, erreurs=True):
@@ -13363,6 +13441,81 @@ def enregistrer_lu_initial(compte, dossier, uid, lu):
             return
         meta[uid_str] = {**meta.get(uid_str, {}), "lu": bool(lu)}
         sauvegarder_cache_meta(compte, dossier, meta)
+
+
+def synchroniser_non_lus_inbox(compte, conn, uids_serveur):
+    """Rattrape, SANS ouvrir le compte, les mails non lus de l'INBOX locale
+    qui ont été lus ou supprimés depuis un autre client (31/10/2026, demandé
+    par l'utilisateur : après un ménage depuis COURRIER ADRIEN ANDROID, les
+    badges de Windows affichaient encore des non-lus jusqu'à ce qu'on clique
+    sur le compte — seul ChargeurMessages faisait ce rattrapage).
+
+    conn : connexion déjà authentifiée, INBOX sélectionnée (lecture seule
+    suffit). uids_serveur : résultat du SEARCH UNDELETED, sert de témoin.
+    Mêmes règles que ChargeurMessages : lu à SENS UNIQUE (un mail lu ici ne
+    redevient jamais non lu), et un mail n'est retiré que si un UID FETCH
+    direct confirme son absence, avec un UID présent comme témoin.
+    Retourne (nb passés lus, nb retirés)."""
+    _adr = compte.get("adresse", "?")
+    if not uids_serveur:
+        return 0, 0
+    meta, fiable = lire_cache_meta(compte, "INBOX")
+    if not fiable:
+        return 0, 0
+    non_lus = sorted(
+        (u for u in uids_visibles_en_cache(compte, "INBOX", meta)
+         if u.isdigit() and not meta.get(u, {}).get("lu")),
+        key=int)[-300:]
+    if not non_lus:
+        return 0, 0
+    temoin = max(uids_serveur, key=lambda u: int(u) if u.isdigit() else 0)
+    st, data = conn.uid('fetch', ",".join(non_lus + [temoin]), "(FLAGS)")
+    if st != "OK" or not data:
+        return 0, 0
+    flags_par_uid = {}
+    for part in data:
+        brut = part[0] if isinstance(part, tuple) else part
+        if not isinstance(brut, bytes):
+            continue
+        m = re.search(rb"UID\s+(\d+)", brut)
+        if m:
+            flags_par_uid[m.group(1).decode()] = brut
+    if temoin not in flags_par_uid:
+        print(f"[SYNCHRO-NON-LUS] {_adr} : réponse serveur inexploitable (témoin absent) — rien changé")
+        return 0, 0
+    lus, retires = [], []
+    for u in non_lus:
+        flags = flags_par_uid.get(u)
+        if flags is None or b"\\Deleted" in flags:
+            retires.append(u)
+        elif b"\\Seen" in flags:
+            lus.append(u)
+    if not lus and not retires:
+        return 0, 0
+    nb_retires = 0
+    with _verrou_cache_meta(chemin_cache_meta(compte, "INBOX")):
+        meta, fiable = lire_cache_meta(compte, "INBOX")
+        if not fiable:
+            return 0, 0
+        for u in lus:
+            if not meta.get(u, {}).get("lu"):
+                meta[u] = {**meta.get(u, {}), "lu": True}
+        for u in retires:
+            chemin = chemin_cache_eml(compte, "INBOX", u)
+            try:
+                if os.path.exists(chemin):
+                    if time.time() - os.path.getmtime(chemin) < 30:
+                        continue  # tout juste écrit : on laisse passer ce tour
+                    os.remove(chemin)
+                    supprimer_cache_html_disque(chemin)
+            except Exception:
+                continue
+            meta.pop(u, None)
+            nb_retires += 1
+        sauvegarder_cache_meta(compte, "INBOX", meta)
+    print(f"[SYNCHRO-NON-LUS] {_adr} : {len(lus)} lu(s) ailleurs, "
+          f"{nb_retires} supprimé(s) ailleurs — badge mis à jour sans ouvrir le compte")
+    return len(lus), nb_retires
 
 
 # ---------------------------------------------------------------------------
@@ -27295,6 +27448,10 @@ class GestionnaireMacros(QDialog):
         btn_sauvegarder.clicked.connect(self._sauvegarder_tout)
         btn_fermer = QPushButton(" Fermer ")
         btn_fermer.clicked.connect(self.accept)
+        # Copie des macros vers COURRIER ADRIEN sur le téléphone (02/11/2026), après sauvegarde
+        btn_telephone = QPushButton(" Copier vers le téléphone ")
+        btn_telephone.clicked.connect(self._copier_vers_telephone)
+        ligne_bas.addWidget(btn_telephone)
         ligne_bas.addWidget(btn_sauvegarder)
         ligne_bas.addWidget(btn_fermer)
         colonne_droite.addLayout(ligne_bas)
@@ -27448,6 +27605,13 @@ class GestionnaireMacros(QDialog):
         sauvegarder_macros(self.donnees)
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.information(self, "Macros", "Macros sauvegardées.")
+
+    def _copier_vers_telephone(self):
+        """Même fenêtre que COMPTES > Copier vers le téléphone, seulement les macros (02/11/2026)."""
+        sauvegarder_macros(self.donnees)   # on copie ce qui est à l'écran
+        client = self.parent()
+        if hasattr(client, "_exporter_comptes_android"):
+            client._exporter_comptes_android(self, seulement="macros")
 
 
 class GestionnaireModeles(QDialog):
@@ -27654,6 +27818,11 @@ class GestionnaireModeles(QDialog):
         # demandé par l'utilisateur — il était à droite de la ligne du haut).
         ligne_bas = QHBoxLayout()
         ligne_bas.addStretch(1)
+        # Copie des modèles vers COURRIER ADRIEN sur le téléphone (02/11/2026)
+        btn_telephone = QPushButton(" Copier vers le téléphone ")
+        btn_telephone.setStyleSheet(STYLE_BOUTON)
+        btn_telephone.clicked.connect(self._copier_vers_telephone)
+        ligne_bas.addWidget(btn_telephone)
         self.btn_sauvegarder = QPushButton(" Sauvegarder ")
         self.btn_sauvegarder.setStyleSheet(STYLE_BOUTON)
         self.btn_sauvegarder.clicked.connect(self._sauvegarder_tout)
@@ -28186,6 +28355,15 @@ class GestionnaireModeles(QDialog):
         sauvegarder_modeles(self.donnees)
         self.lbl_statut.setStyleSheet("color: #80c080; font-family: Verdana; font-size: 11px;")
         self.lbl_statut.setText("Modèles sauvegardés.")
+
+    def _copier_vers_telephone(self):
+        """Même fenêtre que COMPTES > Copier vers le téléphone, seulement les modèles (02/11/2026),
+        après la sauvegarde de ce qui est dans l'éditeur."""
+        def _apres():
+            self._ecrire_sur_disque()
+            if hasattr(self.client_mail, "_exporter_comptes_android"):
+                self.client_mail._exporter_comptes_android(self, seulement="modeles")
+        self._capturer_puis(_apres)
 
     def closeEvent(self, event):
         # Sauvegarde silencieuse à la fermeture, pour ne jamais perdre une
@@ -29175,7 +29353,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 29/10/2026 12h03")
+        self.setWindowTitle("COURRIER ADRIEN — 02/11/2026 19h09")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -33011,6 +33189,7 @@ if (typeof module === 'object') {
         le son + met à jour le compteur sans modifier la liste des mails."""
         class NotificateurSilencieux(QThread):
             nouveaux = Signal(str)
+            compteurs = Signal(str)  # mails lus/supprimés ailleurs rattrapés
 
             def __init__(self, compte):
                 super().__init__()
@@ -33034,6 +33213,8 @@ if (typeof module === 'object') {
                     uids_locaux = set(uids_connus_en_cache(self.compte, "INBOX"))
                     if uids_serveur - uids_locaux:
                         self.nouveaux.emit(self.compte["adresse"])
+                    elif any(synchroniser_non_lus_inbox(self.compte, conn, uids_serveur)):
+                        self.compteurs.emit(_adr)
                 except Exception as e:
                     print(f"[NOTIF-ARRIERE-PLAN] {_adr} : échec ({type(e).__name__}: {e})")
                 finally:
@@ -33044,6 +33225,7 @@ if (typeof module === 'object') {
             jouer_son_nouveau_mail(adresse),
             self._maj_compteurs_non_lus()
         ))
+        t.compteurs.connect(lambda _adr: self._maj_compteurs_non_lus())
         t.start()
         if not hasattr(self, '_notificateurs'):
             self._notificateurs = []
@@ -33128,6 +33310,7 @@ if (typeof module === 'object') {
         class ReleveArrierePlan(QThread):
             nouveaux = Signal(str)  # adresse si nouveaux mails
             verifie = Signal(str, int)  # adresse, nb nouveaux (même 0) — relevé réussi
+            compteurs = Signal(str)  # mails lus/supprimés ailleurs rattrapés
 
             def __init__(self, compte):
                 super().__init__()
@@ -33155,6 +33338,11 @@ if (typeof module === 'object') {
                     nouveaux = uids_serveur - uids_locaux
                     print(f"[RELEVE-ARRIERE-PLAN] {_adr} : {len(uids_serveur)} sur le "
                           f"serveur, {len(uids_locaux)} en local, {len(nouveaux)} nouveau(x)")
+                    try:
+                        if any(synchroniser_non_lus_inbox(self.compte, conn, uids_serveur)):
+                            self.compteurs.emit(_adr)
+                    except Exception as e_sync:
+                        print(f"[SYNCHRO-NON-LUS] {_adr} : échec ({type(e_sync).__name__}: {e_sync})")
                     if nouveaux:
                         reste = basculer_en_entetes(
                             self.compte, "INBOX", conn,
@@ -33295,6 +33483,7 @@ if (typeof module === 'object') {
 
         t = ReleveArrierePlan(compte)
         t.nouveaux.connect(self._on_nouveaux_releve_arriere_plan)
+        t.compteurs.connect(lambda _adr: self._maj_compteurs_non_lus())
         # Console : résultat de chaque relève, et fin d'une éventuelle erreur
         t.verifie.connect(lambda adr, nb: (moteur_erreur(adr, None), moteur_evenement(
             adr, f"Relève : {nb} nouveau(x) mail(s)" if nb else "Relève : rien de nouveau")))
@@ -33374,10 +33563,29 @@ if (typeof module === 'object') {
             return
         t = IdleThread(compte, "INBOX")
         t.nouveau_mail.connect(lambda a=adresse: self._on_nouveau_mail_arriere_plan(a))
-        t.changement.connect(lambda: None)
+        # EXPUNGE/FETCH (mail supprimé ou lu depuis le téléphone, 31/10/2026) :
+        # relève de fond, qui rattrape aussi les non-lus — sans ça le badge
+        # restait figé jusqu'à l'ouverture du compte. Regroupé sur 5 s :
+        # supprimer 10 mails sur le téléphone envoie 10 événements.
+        t.changement.connect(lambda a=adresse: self._on_changement_idle_arriere_plan(a))
         t.erreur.connect(lambda e: None)
         t.start()
         self.idle_threads_arriere_plan[adresse] = t
+
+    def _on_changement_idle_arriere_plan(self, adresse):
+        if not hasattr(self, '_timers_changement_arriere_plan'):
+            self._timers_changement_arriere_plan = {}
+        timer = self._timers_changement_arriere_plan.get(adresse)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            def _relever(a=adresse):
+                compte = next((c for c in COMPTES if c["adresse"] == a), None)
+                if compte and a != self.compte_actif.get("adresse", ""):
+                    self._relever_compte_arriere_plan(compte)
+            timer.timeout.connect(_relever)
+            self._timers_changement_arriere_plan[adresse] = timer
+        timer.start(5000)
 
     def _arreter_idle_arriere_plan(self, adresse):
         """Arrête l'IDLE arrière-plan d'un compte (bascule vers IDLE plein,
@@ -34465,7 +34673,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 29/10/2026 à 12h03")
+        lbl_version = QLabel("Version du 02/11/2026 à 19h09")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -45980,15 +46188,19 @@ __JS_TRADUCTION__
         layout.addLayout(ligne_dl)
 
         layout_btn = QHBoxLayout()
+        # Copie des sons vers COURRIER ADRIEN sur le téléphone (02/11/2026)
+        btn_telephone = QPushButton(" Copier vers le téléphone ")
+        btn_telephone.setStyleSheet(STYLE_BOUTON)
         btn_enregistrer = QPushButton(" Enregistrer ")
         btn_enregistrer.setStyleSheet(STYLE_BOUTON)
         btn_fermer = QPushButton(" Fermer ")
         btn_fermer.setStyleSheet(STYLE_BOUTON)
+        layout_btn.addWidget(btn_telephone)
         layout_btn.addWidget(btn_enregistrer)
         layout_btn.addWidget(btn_fermer)
         layout.addLayout(layout_btn)
 
-        def enregistrer():
+        def _sauver():
             nouveaux_sons = {}
             for adresse, case, champ in lignes:
                 nouveaux_sons[adresse] = {
@@ -46000,8 +46212,16 @@ __JS_TRADUCTION__
                 "actif": case_dl.isChecked(),
                 "chemin": champ_dl.text().strip(),
             })
+
+        def enregistrer():
+            _sauver()
             dlg.accept()
 
+        def copier_telephone():
+            _sauver()   # on copie ce qui est à l'écran
+            self._exporter_comptes_android(dlg, seulement="sons")
+
+        btn_telephone.clicked.connect(copier_telephone)
         btn_enregistrer.clicked.connect(enregistrer)
         btn_fermer.clicked.connect(dlg.reject)
         dlg.show()
@@ -46637,6 +46857,13 @@ __JS_TRADUCTION__
             b.setStyleSheet(STYLE_BOUTON)
             layout_btn.addWidget(b)
         layout.addLayout(layout_btn)
+        # Export vers COURRIER ADRIEN ANDROID (29/10/2026, demandé) : bouton
+        # long, sur toute la largeur, au titre explicite, collé à la ligne
+        # Ajouter/Valider/Supprimer (au-dessus de la ligne de statut)
+        btn_export_android = QPushButton("Copier vers COURRIER ADRIEN sur le téléphone (comptes, macros, sons, modèles)")
+        btn_export_android.setStyleSheet(STYLE_BOUTON)
+        btn_export_android.clicked.connect(lambda: self._exporter_comptes_android(dlg))
+        layout.addWidget(btn_export_android)
 
         # Retour visuel après Ajouter/Modifier/Supprimer (15/08/2026,
         # remonté par l'utilisateur — jusqu'ici ces 3 actions se faisaient
@@ -46918,6 +47145,176 @@ __JS_TRADUCTION__
         dlg.show()
         QTimer.singleShot(0, _reinitialiser_formulaire)
         self._conserver_fenetre_secondaire(dlg)
+
+    # --- Export des comptes vers COURRIER ADRIEN ANDROID (29/10/2026) ---
+    # « Coffre à coffre », sans aucun fichier : les comptes passent de la
+    # mémoire de COURRIER à celle de l'appli par un tunnel de la liaison adb
+    # du bouton TÉL (chiffrée en Wi-Fi, câble en USB), et l'appli les range
+    # dans son coffre (Android Keystore) quand on touche Importer. Pas de
+    # code à taper : il ne servait qu'à protéger un fichier. Un jeton d'une
+    # seule fois empêche une autre appli du téléphone de se brancher à la
+    # place. On choisit les comptes envoyés, avec ou sans mots de passe ;
+    # l'appli les ajoute à ceux qu'elle a déjà (même nom = mis à jour).
+    def _exporter_comptes_android(self, parent, seulement=None):
+        """02/11/2026 : comptes, macros, sons et modèles (tout coché), ou seulement=
+        "macros" / "sons" / "modeles" depuis les boutons de ces fenêtres (le reste décoché)."""
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
+                                       QRadioButton, QLineEdit, QScrollArea, QWidget)
+        comptes = [c for c in COMPTES if not est_compte_factice(c)]
+        dlg = QDialog(parent)
+        dlg.setWindowTitle("Copier vers COURRIER ADRIEN sur le téléphone")
+        dlg.setMinimumWidth(560)
+        dlg.setStyleSheet("""
+            QDialog, QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
+            QLabel { color: white; }
+            QCheckBox, QRadioButton { color: white; padding: 3px 2px; spacing: 8px; }
+            QCheckBox::indicator, QRadioButton::indicator { width: 14px; height: 14px; background-color: #3a3a3a; border: 1px solid #666; }
+            QCheckBox::indicator:checked, QRadioButton::indicator:checked { background-color: #A52A2A; border: 1px solid #A52A2A; }
+            QRadioButton::indicator { border-radius: 8px; }
+            QLineEdit { background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; padding: 4px 6px; }
+            QLineEdit:disabled { color: #666666; border-color: #3a3a3a; }
+            QScrollArea { border: 1px solid #5a5a5a; }
+        """ + STYLE_BOUTON + STYLE_SCROLLBAR)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(8)
+
+        explication = QLabel(
+            "Ce que vous cochez est directement copié de coffre à coffre "
+            "vers COURRIER ADRIEN sur le téléphone par la liaison Wi-Fi ou câble.")
+        explication.setWordWrap(True)
+        explication.setStyleSheet("color: #e0c080;")
+        layout.addWidget(explication)
+
+        # À copier (02/11/2026) : tout par défaut, ou la seule partie demandée
+        ligne_quoi = QHBoxLayout()
+        lbl_quoi = QLabel("À copier :")
+        lbl_quoi.setStyleSheet("font-weight: bold;")
+        ligne_quoi.addWidget(lbl_quoi)
+        case_comptes = QCheckBox("Comptes")
+        case_macros = QCheckBox("Macros")
+        case_sons = QCheckBox("Sons")
+        case_modeles = QCheckBox("Modèles")
+        for cle, case in (("comptes", case_comptes), ("macros", case_macros), ("sons", case_sons), ("modeles", case_modeles)):
+            case.setChecked(seulement is None or seulement == cle)
+            ligne_quoi.addWidget(case)
+        ligne_quoi.addStretch(1)
+        layout.addLayout(ligne_quoi)
+
+        titre = QLabel("Comptes à envoyer :")
+        titre.setStyleSheet("font-weight: bold;")
+        layout.addWidget(titre)
+        zone = QScrollArea()
+        zone.setWidgetResizable(True)
+        interieur = QWidget()
+        lignes = QVBoxLayout(interieur)
+        lignes.setContentsMargins(8, 6, 8, 6)
+        lignes.setSpacing(0)
+        cases = []
+        for c in comptes:
+            case = QCheckBox(f"{c.get('nom', '')}  —  {c.get('adresse', '')}")
+            case.setChecked(True)
+            lignes.addWidget(case)
+            cases.append((case, c))
+        lignes.addStretch(1)
+        zone.setWidget(interieur)
+        zone.setMinimumHeight(min(320, 30 * len(comptes) + 16))
+        layout.addWidget(zone)
+        ligne_tout = QHBoxLayout()
+        btn_tout = QPushButton("Tout sélectionner")
+        btn_rien = QPushButton("Tout désélectionner")
+        for b, v in ((btn_tout, True), (btn_rien, False)):
+            b.setStyleSheet(STYLE_BOUTON)
+            b.clicked.connect(lambda _=False, v=v: [k.setChecked(v) for k, _c in cases])
+            ligne_tout.addWidget(b)
+        ligne_tout.addStretch(1)
+        layout.addLayout(ligne_tout)
+
+        choix_avec = QRadioButton("Avec les mots de passe")
+        choix_sans = QRadioButton("Sans les mots de passe. Ce sera à vous de les saisir sur le téléphone, compte par compte.")
+        choix_avec.setChecked(True)
+        layout.addWidget(choix_avec)
+        layout.addWidget(choix_sans)
+
+        # Comptes décochés : leur liste et le choix des mots de passe sont grisés
+        def _comptes_actifs(actif):
+            for w in (titre, zone, btn_tout, btn_rien, choix_avec, choix_sans):
+                w.setEnabled(actif)
+        case_comptes.toggled.connect(_comptes_actifs)
+        _comptes_actifs(case_comptes.isChecked())
+
+        lbl_etat = QLabel("")
+        lbl_etat.setWordWrap(True)
+        layout.addWidget(lbl_etat)
+
+        ligne_bas = QHBoxLayout()
+        ligne_bas.addStretch(1)
+        btn_envoyer = QPushButton("Envoyer au téléphone")
+        btn_annuler = QPushButton("Annuler")
+        for b in (btn_envoyer, btn_annuler):
+            b.setStyleSheet(STYLE_BOUTON)
+            ligne_bas.addWidget(b)
+        layout.addLayout(ligne_bas)
+        btn_annuler.clicked.connect(dlg.reject)
+
+        def _etat(texte, couleur="#e0a050"):
+            lbl_etat.setStyleSheet(f"color: {couleur};")
+            lbl_etat.setText(texte)
+
+        def _envoyer():
+            choisis = [c for case, c in cases if case.isChecked()] if case_comptes.isChecked() else []
+            avec_macros, avec_sons, avec_modeles = case_macros.isChecked(), case_sons.isChecked(), case_modeles.isChecked()
+            if case_comptes.isChecked() and not choisis:
+                _etat("Cochez au moins un compte, ou décochez Comptes.", "#e08080")
+                return
+            if not (choisis or avec_macros or avec_sons or avec_modeles):
+                _etat("Cochez au moins une chose à copier.", "#e08080")
+                return
+            avec = choix_avec.isChecked()
+            if not verifier_code_telephone(dlg):
+                return
+            btn_envoyer.setEnabled(False)
+            _etat("Connexion au téléphone...")
+
+            def _echec():
+                btn_envoyer.setEnabled(True)
+                _etat("Téléphone introuvable : rien n'a été envoyé.", "#e08080")
+
+            def _connecte(serie):
+                _etat("Envoi à l'application du téléphone...")
+                self._lancer_fil_export_android(
+                    lambda: _envoyer_comptes_android(serie, choisis, avec, macros=avec_macros, sons=avec_sons,
+                                                     modeles=avec_modeles), _fini)
+
+            def _fini(resultat):
+                btn_envoyer.setEnabled(True)
+                if resultat is not True:
+                    _etat(f"Envoi impossible : {resultat}", "#e08080")
+                    return
+                pluriel = "s" if len(choisis) > 1 else ""
+                parties = ([f"{len(choisis)} compte{pluriel}"] if choisis else []) + \
+                    (["macros"] if avec_macros else []) + (["sons"] if avec_sons else []) + (["modèles"] if avec_modeles else [])
+                _etat("Envoyé : " + ", ".join(parties) + ". Sur le téléphone, vérifiez ce qui est reçu "
+                      "puis touchez Copier.", "#80c080")
+                btn_annuler.setText("Fermer")
+
+            connecter_telephone(dlg, _connecte, si_echec=_echec)
+
+        btn_envoyer.clicked.connect(_envoyer)
+        dlg.exec()
+
+    def _lancer_fil_export_android(self, travail, suite):
+        """travail() dans un fil de fond, puis suite(résultat ou message d'erreur) dans l'interface."""
+        relais = _RelaisTelephone(self)
+        self._relais_export_android = relais
+        relais.fini.connect(suite)
+
+        def _fil():
+            try:
+                relais.fini.emit(travail())
+            except Exception as e:
+                relais.fini.emit(str(e) or e.__class__.__name__)
+        _threading.Thread(target=_fil, daemon=True).start()
 
     def gerer_comptes(self):
         """Wrapper diagnostique autour de _gerer_comptes_impl : à l'époque de
