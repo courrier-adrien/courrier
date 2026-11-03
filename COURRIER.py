@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-02 19h09"
+VERSION_BUILD = "2026-11-03 01h11"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -1446,6 +1446,561 @@ def sauvegarder_comptes(comptes):
         # Jamais de repli en clair : mieux vaut ne rien écrire (l'ancien
         # fichier reste intact) que réécrire les mots de passe lisibles.
         print(f"Erreur sauvegarde comptes : {e}")
+
+# ── Import des comptes de Thunderbird (02/11/2026, demandé) ───────────────
+# Lecture seule : rien n'est écrit dans le profil Thunderbird. Les réglages
+# viennent de prefs.js, les mots de passe de logins.json, chiffrés par la clé
+# rangée dans key4.db (format NSS, le même que Firefox). Une fois lus, ils ne
+# vivent qu'en mémoire jusqu'à sauvegarder_comptes, qui les rechiffre comme
+# les autres. Lancé uniquement par le bouton de la fenêtre COMPTES.
+class MotDePassePrincipalRequis(Exception):
+    """Le profil Thunderbird est protégé par un mot de passe principal, et
+    celui fourni (ou son absence) ne l'ouvre pas."""
+
+def _der_decoder(donnees):
+    """Décode un élément DER. Retourne (valeur, reste) : liste pour une
+    séquence, texte pour un OID, entier pour un INTEGER, bytes sinon."""
+    tag, longueur, pos = donnees[0], donnees[1], 2
+    if longueur & 0x80:
+        nb_octets = longueur & 0x7F
+        longueur = int.from_bytes(donnees[2:2 + nb_octets], "big")
+        pos = 2 + nb_octets
+    corps, reste = donnees[pos:pos + longueur], donnees[pos + longueur:]
+    if tag == 0x30:
+        elements = []
+        while corps:
+            element, corps = _der_decoder(corps)
+            elements.append(element)
+        return elements, reste
+    if tag == 0x06:
+        chiffres = [corps[0] // 40, corps[0] % 40]
+        valeur = 0
+        for octet in corps[1:]:
+            valeur = (valeur << 7) | (octet & 0x7F)
+            if not octet & 0x80:
+                chiffres.append(valeur)
+                valeur = 0
+        return ".".join(str(c) for c in chiffres), reste
+    if tag == 0x02:
+        return int.from_bytes(corps, "big"), reste
+    return corps, reste
+
+def _dechiffrer_cbc(algo, cle, iv, texte_chiffre):
+    """Déchiffre en CBC (algo : "aes" ou "3des") et retire le bourrage."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    if algo == "aes":
+        algorithme, taille_bloc = algorithms.AES(cle), 16
+    else:
+        from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
+        algorithme, taille_bloc = TripleDES(cle), 8
+    d = Cipher(algorithme, modes.CBC(iv)).decryptor()
+    clair = d.update(texte_chiffre) + d.finalize()
+    bourrage = clair[-1]
+    if not 1 <= bourrage <= taille_bloc or clair[-bourrage:] != bytes([bourrage]) * bourrage:
+        raise ValueError("bourrage invalide")
+    return clair[:-bourrage]
+
+def _dechiffrer_bloc_nss(bloc, sel_global, mot_de_passe):
+    """Déchiffre un bloc de key4.db : PBES2/AES-256 (profils récents) ou
+    PBE-SHA1-3DES (profils créés avant 2020)."""
+    import hashlib, hmac
+    (entete, texte_chiffre), _reste = _der_decoder(bloc)
+    oid, parametres = entete
+    cle_mdp = hashlib.sha1(sel_global + mot_de_passe).digest()
+    if oid == "1.2.840.113549.1.5.13":  # PBES2
+        pbkdf2, chiffre = parametres
+        sel, iterations = pbkdf2[1][0], pbkdf2[1][1]
+        cle = hashlib.pbkdf2_hmac("sha256", cle_mdp, sel, iterations, 32)
+        # NSS ne stocke que 14 octets de l'IV : les 2 premiers sont fixes
+        iv = chiffre[1]
+        if len(iv) == 14:
+            iv = b"\x04\x0e" + iv
+        return _dechiffrer_cbc("aes", cle, iv, texte_chiffre)
+    if oid == "1.2.840.113549.1.12.5.1.3":  # PBE-SHA1-3DES
+        sel = parametres[0]
+        sel_complete = sel.ljust(20, b"\x00")
+        cle_h = hashlib.sha1(cle_mdp + sel).digest()
+        k1 = hmac.new(cle_h, sel_complete + sel, hashlib.sha1).digest()
+        tk = hmac.new(cle_h, sel_complete, hashlib.sha1).digest()
+        k2 = hmac.new(cle_h, tk + sel, hashlib.sha1).digest()
+        cle = k1 + k2
+        return _dechiffrer_cbc("3des", cle[:24], cle[-8:], texte_chiffre)
+    raise ValueError(f"chiffrement inconnu : {oid}")
+
+def _cles_profil_thunderbird(dossier, mot_de_passe=""):
+    """Clés de chiffrement du profil (key4.db), par identifiant de clé."""
+    import sqlite3
+    with open(os.path.join(dossier, "key4.db"), "rb") as f:
+        contenu = f.read()
+    # Copie en mémoire : Thunderbird peut être ouvert, et sa base reste intacte
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.deserialize(contenu)
+        sel_global, controle = conn.execute(
+            "SELECT item1, item2 FROM metadata WHERE id = 'password'").fetchone()
+        try:
+            ouvert = b"password-check" in _dechiffrer_bloc_nss(
+                controle, sel_global, mot_de_passe.encode("utf-8"))
+        except ValueError:
+            ouvert = False
+        if not ouvert:
+            raise MotDePassePrincipalRequis()
+        cles = {}
+        for a11, a102 in conn.execute("SELECT a11, a102 FROM nssPrivate"):
+            cles[bytes(a102)] = _dechiffrer_bloc_nss(a11, sel_global, mot_de_passe.encode("utf-8"))
+        return cles
+    finally:
+        conn.close()
+
+def _dechiffrer_login_thunderbird(texte_b64, cles):
+    """Déchiffre un champ de logins.json (utilisateur ou mot de passe)."""
+    import base64
+    (id_cle, (oid, iv), texte_chiffre), _reste = _der_decoder(base64.b64decode(texte_b64))
+    cle = cles[bytes(id_cle)]
+    if oid == "1.2.840.113549.3.7":  # 3DES-CBC
+        return _dechiffrer_cbc("3des", cle[:24], iv, texte_chiffre).decode("utf-8")
+    return _dechiffrer_cbc("aes", cle[:32], iv, texte_chiffre).decode("utf-8")
+
+def _logins_profil_thunderbird(dossier, mot_de_passe=""):
+    """Identifiants du profil : {(protocole, serveur, utilisateur) : mot de
+    passe}, en minuscules. Un identifiant illisible est simplement ignoré
+    (son mot de passe sera demandé à l'import)."""
+    chemin = os.path.join(dossier, "logins.json")
+    if not os.path.exists(chemin) or not os.path.exists(os.path.join(dossier, "key4.db")):
+        return {}
+    with open(chemin, "r", encoding="utf-8") as f:
+        logins = json.load(f).get("logins", [])
+    if not logins:
+        return {}
+    cles = _cles_profil_thunderbird(dossier, mot_de_passe)
+    resultat = {}
+    for login in logins:
+        protocole, _sep, serveur = login.get("hostname", "").partition("://")
+        try:
+            utilisateur = _dechiffrer_login_thunderbird(login["encryptedUsername"], cles)
+            mdp = _dechiffrer_login_thunderbird(login["encryptedPassword"], cles)
+        except Exception as e:
+            print(f"[THUNDERBIRD] Identifiant illisible ({protocole}) : {type(e).__name__}")
+            continue
+        resultat[(protocole.lower(), serveur.split(":")[0].lower(), utilisateur.lower())] = mdp
+    return resultat
+
+def _prefs_thunderbird(dossier):
+    """Lit prefs.js : {nom de la préférence : valeur}."""
+    prefs = {}
+    with open(os.path.join(dossier, "prefs.js"), "r", encoding="utf-8", errors="replace") as f:
+        for ligne in f:
+            m = re.match(r'\s*user_pref\("([^"]+)",\s*(.*)\);\s*$', ligne)
+            if m:
+                try:
+                    prefs[m.group(1)] = json.loads(m.group(2))
+                except ValueError:
+                    pass
+    return prefs
+
+def profils_thunderbird():
+    """Dossiers des profils Thunderbird de cette session Windows."""
+    racine = os.path.join(os.environ.get("APPDATA", ""), "Thunderbird")
+    candidats = []
+    try:
+        with open(os.path.join(racine, "profiles.ini"), "r", encoding="utf-8", errors="replace") as f:
+            for ligne in f:
+                if ligne.lower().startswith("path="):
+                    # Chemin relatif à racine, ou absolu : join gère les deux
+                    candidats.append(os.path.normpath(os.path.join(racine, ligne[5:].strip())))
+    except OSError:
+        pass
+    try:
+        dossier_profils = os.path.join(racine, "Profiles")
+        candidats += [os.path.join(dossier_profils, n) for n in os.listdir(dossier_profils)]
+    except OSError:
+        pass
+    profils = []
+    for d in candidats:
+        if os.path.exists(os.path.join(d, "prefs.js")) and \
+                os.path.normcase(d) not in [os.path.normcase(p) for p in profils]:
+            profils.append(d)
+    return profils
+
+def _regler_compte_microsoft(compte):
+    """Compte personnel Outlook/Hotmail : lui donne les mêmes réglages que le
+    fournisseur « Outlook / Hotmail » de COMPTES. Retourne True si c'en est un."""
+    domaine = compte["adresse"].rpartition("@")[2].lower()
+    if domaine.split(".")[0] not in ("outlook", "hotmail", "live", "msn"):
+        return False
+    compte.update(imap_host="outlook.office365.com", imap_port=993,
+                  smtp_host="smtp-mail.outlook.com", smtp_port=587,
+                  smtp_starttls=True, auth_oauth2=True, protocole="graph")
+    return True
+
+def _comptes_profil_thunderbird(dossier, logins):
+    """Traduit les comptes d'un profil au format de comptes.json. Chaque
+    entrée : {"compte", "importable", "note"}. L'IMAP de COURRIER passe
+    toujours par SSL direct et n'envoie que par SSL ou STARTTLS : un compte
+    Thunderbird moins protégé est remonté aux ports chiffrés standard."""
+    prefs = _prefs_thunderbird(dossier)
+    entrees = []
+    for compte_tb in str(prefs.get("mail.accountmanager.accounts", "")).split(","):
+        serveur = prefs.get(f"mail.account.{compte_tb.strip()}.server")
+        identites = str(prefs.get(f"mail.account.{compte_tb.strip()}.identities", ""))
+        if not serveur or not identites:
+            continue  # dossiers locaux, flux RSS : aucune identité
+        s = f"mail.server.{serveur}."
+        type_serveur = prefs.get(s + "type", "")
+        if type_serveur not in ("imap", "pop3"):
+            continue
+        identite = f"mail.identity.{identites.split(',')[0].strip()}."
+        adresse = str(prefs.get(identite + "useremail", "")).strip()
+        if not adresse:
+            continue
+        nom = str(prefs.get(identite + "fullName", "")).strip() or adresse
+        hote = str(prefs.get(s + "hostname", "")).strip()
+        utilisateur = str(prefs.get(s + "userName", "")).strip()
+        est_oauth = prefs.get(s + "authMethod") == 10
+
+        compte = {
+            "nom": nom, "adresse": adresse, "mdp": "",
+            "imap_host": hote, "imap_port": 993,
+            "smtp_host": "", "smtp_port": 465,
+            "ssl_direct": True, "smtp_starttls": False,
+            "auth_oauth2": False, "protocole": "imap",
+        }
+        entree = {"compte": compte, "importable": True, "note": ""}
+        entrees.append(entree)
+
+        if type_serveur == "pop3":
+            entree.update(importable=False,
+                          note="compte POP : COURRIER ADRIEN ne lit que l'IMAP")
+            continue
+
+        if _regler_compte_microsoft(compte):
+            entree["note"] = "connexion Microsoft à faire"
+            continue
+        if est_oauth and "office365" in hote.lower():
+            entree.update(importable=False,
+                          note="compte Microsoft professionnel, non pris en charge")
+            continue
+
+        if prefs.get(s + "socketType") == 3:
+            compte["imap_port"] = prefs.get(s + "port") or 993
+
+        # Serveur d'envoi : celui de l'identité, sinon le serveur par défaut
+        cle_smtp = prefs.get(identite + "smtpServer") or prefs.get("mail.smtp.defaultserver") \
+            or str(prefs.get("mail.smtpservers", "")).split(",")[0].strip()
+        p = f"mail.smtpserver.{cle_smtp}."
+        hote_smtp = str(prefs.get(p + "hostname", "")).strip()
+        utilisateur_smtp = str(prefs.get(p + "username", "")).strip()
+        if not hote_smtp:
+            entree.update(importable=False, note="aucun serveur d'envoi dans Thunderbird")
+            continue
+        securite = prefs.get(p + "try_ssl", 0)
+        if securite == 3:
+            port_smtp = prefs.get(p + "port") or 465
+        elif securite in (1, 2):
+            port_smtp = prefs.get(p + "port") or 587
+        else:
+            port_smtp = 465
+        compte.update(smtp_host=hote_smtp, smtp_port=port_smtp,
+                      smtp_starttls=securite in (1, 2))
+
+        if not est_oauth:
+            compte["mdp"] = logins.get(("imap", hote.lower(), utilisateur.lower())) \
+                or logins.get(("smtp", hote_smtp.lower(), utilisateur_smtp.lower())) or ""
+        notes = ["mot de passe récupéré" if compte["mdp"] else "mot de passe à saisir"]
+        # COURRIER se connecte toujours avec l'adresse comme identifiant
+        if utilisateur and utilisateur.lower() != adresse.lower():
+            notes.append(f"identifiant Thunderbird différent ({utilisateur})")
+        entree["note"] = ", ".join(notes)
+    return entrees
+
+def lire_comptes_thunderbird(mot_de_passe=""):
+    """Comptes de tous les profils Thunderbird, sans doublon d'adresse (celui
+    dont le mot de passe est connu l'emporte). Lève
+    MotDePassePrincipalRequis si un profil en a besoin. Retourne None si
+    Thunderbird n'a aucun profil ici."""
+    profils = profils_thunderbird()
+    if not profils:
+        return None
+    par_adresse = {}
+    for dossier in profils:
+        for entree in _comptes_profil_thunderbird(dossier, _logins_profil_thunderbird(dossier, mot_de_passe)):
+            cle = entree["compte"]["adresse"].lower()
+            if cle not in par_adresse or (entree["compte"]["mdp"] and not par_adresse[cle]["compte"]["mdp"]):
+                par_adresse[cle] = entree
+    return list(par_adresse.values())
+
+# ── Import des comptes de Foxmail 7 (02/11/2026, demandé) ─────────────────
+# Lecture seule, comme pour Thunderbird. Chaque compte a son fichier
+# Storage\<adresse>\Accounts\Account.rec0 (format non documenté, décortiqué
+# ici) : une suite de champs [taille totale, longueur du nom, nom, type,
+# valeur] qui commence au champ « Account ». Le compte y est écrit deux fois,
+# avec le même mot de passe brouillé différemment : le premier suffit.
+def _champs_foxmail(contenu):
+    """Champs du compte : {nom : texte, ou bytes pour un nombre/une case}."""
+    debut = contenu.find(b"\x07\x00\x00\x00Account")
+    if debut < 4:
+        return {}
+    champs = {}
+    pos = debut - 4
+    while pos + 12 <= len(contenu):
+        total = int.from_bytes(contenu[pos:pos + 4], "little")
+        lg_nom = int.from_bytes(contenu[pos + 4:pos + 8], "little")
+        if not 1 <= lg_nom <= 64 or total < 12 + lg_nom or pos + total > len(contenu):
+            break  # fin de la fiche du compte
+        nom = contenu[pos + 8:pos + 8 + lg_nom].decode("latin-1")
+        if nom in champs or not nom.isprintable():
+            break
+        type_valeur = int.from_bytes(contenu[pos + 8 + lg_nom:pos + 12 + lg_nom], "little")
+        valeur = contenu[pos + 12 + lg_nom:pos + total]
+        if type_valeur in (0x100, 8) and len(valeur) >= 4:
+            n = int.from_bytes(valeur[:4], "little")
+            valeur = valeur[4:4 + n].decode("latin-1") if type_valeur == 0x100 \
+                else valeur[4:4 + 2 * n].decode("utf-16-le", "replace")
+        champs[nom] = valeur
+        pos += total
+    return champs
+
+def _debrouiller_mdp_foxmail(texte_hex):
+    """Mot de passe en clair de Foxmail 7 ("" s'il est absent ou ne donne pas
+    un texte lisible : il sera alors demandé à l'import)."""
+    cle = (0x7E, 0x46, 0x40, 0x37, 0x25, 0x6D, 0x24, 0x7E)
+    try:
+        octets = bytes.fromhex(texte_hex)
+    except (TypeError, ValueError):
+        return ""
+    clair, precedent = "", (octets[0] ^ 0x71) if octets else 0
+    for i, octet in enumerate(octets[1:]):
+        valeur = octet ^ cle[i % 8]
+        clair += chr(valeur - precedent if valeur >= precedent else valeur + 255 - precedent)
+        precedent = octet
+    return clair if clair.isprintable() else ""
+
+def _compte_foxmail(champs):
+    """Traduit les champs d'un compte Foxmail, même format d'entrée que
+    _comptes_profil_thunderbird, et mêmes ports chiffrés imposés."""
+    def _texte(nom):
+        valeur = champs.get(nom, "")
+        return valeur.strip() if isinstance(valeur, str) else ""
+
+    def _nombre(nom):
+        valeur = champs.get(nom, b"")
+        return int.from_bytes(valeur, "little") if isinstance(valeur, bytes) else 0
+
+    adresse = _texte("Email")
+    hote, port = _texte("IncomingServer"), _nombre("IncomingPort")
+    compte = {
+        "nom": _texte("SenderName") or adresse, "adresse": adresse, "mdp": "",
+        "imap_host": hote, "imap_port": 993,
+        "smtp_host": "", "smtp_port": 465,
+        "ssl_direct": True, "smtp_starttls": False,
+        "auth_oauth2": False, "protocole": "imap",
+    }
+    entree = {"compte": compte, "importable": True, "note": ""}
+    if not hote:
+        entree.update(importable=False, note="compte Exchange, non pris en charge")
+    elif port in (110, 995) or hote.lower().startswith("pop"):
+        entree.update(importable=False, note="compte POP : COURRIER ADRIEN ne lit que l'IMAP")
+    elif _regler_compte_microsoft(compte):
+        entree["note"] = "connexion Microsoft à faire"
+    elif not _texte("OutgoingServer"):
+        entree.update(importable=False, note="aucun serveur d'envoi dans Foxmail")
+    else:
+        if _nombre("InComingSSL"):
+            compte["imap_port"] = port or 993
+        hote_smtp, port_smtp = _texte("OutgoingServer"), _nombre("OutgoingPort")
+        starttls = bool(_nombre("OutgoingUseStartTls"))
+        if starttls:
+            port_smtp = port_smtp or 587
+        elif _nombre("OutgoingSSL"):
+            port_smtp = port_smtp or 465
+        else:
+            port_smtp = 465
+        compte.update(smtp_host=hote_smtp, smtp_port=port_smtp, smtp_starttls=starttls)
+        compte["mdp"] = _debrouiller_mdp_foxmail(_texte("Password")) \
+            or _debrouiller_mdp_foxmail(_texte("SmtpPassword"))
+        notes = ["mot de passe récupéré" if compte["mdp"] else "mot de passe à saisir"]
+        utilisateur = _texte("Account")
+        if utilisateur and utilisateur.lower() != adresse.lower():
+            notes.append(f"identifiant Foxmail différent ({utilisateur})")
+        entree["note"] = ", ".join(notes)
+    return entree
+
+def dossiers_foxmail():
+    """Dossiers Storage de Foxmail : celui indiqué au registre, sinon les
+    emplacements habituels (Foxmail s'installe souvent à la racine du disque)."""
+    import glob, winreg
+    candidats = []
+    for cle in (r"Software\Aerofox\FoxmailPreview", r"Software\Aerofox\Foxmail"):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cle) as k:
+                candidats.append(os.path.dirname(winreg.QueryValueEx(k, "Executable")[0]))
+        except OSError:
+            pass
+    for racine in ("C:\\", "D:\\", os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
+        if racine:
+            candidats += glob.glob(os.path.join(racine, "Foxmail*"))
+    dossiers = []
+    for d in candidats:
+        stockage = os.path.join(d, "Storage")
+        if os.path.isdir(stockage) and os.path.normcase(stockage) not in [os.path.normcase(s) for s in dossiers]:
+            dossiers.append(stockage)
+    return dossiers
+
+def lire_comptes_foxmail():
+    """Comptes de toutes les installations de Foxmail, sans doublon d'adresse.
+    Retourne None si Foxmail n'est pas trouvé."""
+    dossiers = dossiers_foxmail()
+    if not dossiers:
+        return None
+    par_adresse = {}
+    for stockage in dossiers:
+        for nom in os.listdir(stockage):
+            chemin = os.path.join(stockage, nom, "Accounts", "Account.rec0")
+            if not os.path.exists(chemin):
+                continue
+            try:
+                with open(chemin, "rb") as f:
+                    contenu = f.read()
+            except PermissionError:
+                raise OSError("Fermez Foxmail, puis recommencez.")
+            entree = _compte_foxmail(_champs_foxmail(contenu))
+            cle = entree["compte"]["adresse"].lower()
+            if cle and (cle not in par_adresse or (entree["compte"]["mdp"] and not par_adresse[cle]["compte"]["mdp"])):
+                par_adresse[cle] = entree
+    return list(par_adresse.values())
+
+# ── Import des comptes d'Outlook classique (03/11/2026, demandé) ──────────
+# Lecture seule, comme pour Thunderbird et Foxmail. Chaque compte est une
+# sous-clé de <profil>\9375CFF0413111d3B88A00104B2A6676 : sous Windows
+# Messaging Subsystem jusqu'à Outlook 2010 (vérifié sur un vrai compte), sous
+# Office\<version>\Outlook ensuite (non vérifié, pas d'Outlook récent ici). Le
+# nouvel Outlook du Microsoft Store n'y range rien. Mot de passe : un octet de
+# version suivi d'un bloc DPAPI, lisible seulement dans la même session Windows.
+_RACINES_OUTLOOK = (
+    r"Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles",
+    r"Software\Microsoft\Office\15.0\Outlook\Profiles",
+    r"Software\Microsoft\Office\16.0\Outlook\Profiles",
+)
+
+def _dechiffrer_mdp_outlook(octets):
+    """Mot de passe en clair ("" s'il est absent ou illisible : il sera alors
+    demandé à l'import)."""
+    try:
+        import win32crypt
+    except ImportError:
+        return ""
+    octets = bytes(octets or b"")
+    for bloc in (octets[1:], octets):
+        if bloc:
+            try:
+                return win32crypt.CryptUnprotectData(bloc, None, None, None, 0)[1] \
+                    .decode("utf-16-le").rstrip("\x00")
+            except Exception:
+                pass
+    return ""
+
+def _compte_outlook(valeurs):
+    """Traduit les valeurs d'un compte Outlook, même format d'entrée que
+    _comptes_profil_thunderbird, et mêmes ports chiffrés imposés."""
+    def _texte(nom):
+        valeur = valeurs.get(nom, "")
+        if isinstance(valeur, bytes):
+            try:
+                valeur = valeur.decode("utf-16-le")
+            except UnicodeDecodeError:
+                return ""
+        return valeur.rstrip("\x00").strip() if isinstance(valeur, str) else ""
+
+    def _nombre(nom):
+        valeur = valeurs.get(nom, 0)
+        return valeur if isinstance(valeur, int) else 0
+
+    adresse = _texte("Email")
+    compte = {
+        "nom": _texte("Display Name") or adresse, "adresse": adresse, "mdp": "",
+        "imap_host": _texte("IMAP Server"), "imap_port": 993,
+        "smtp_host": "", "smtp_port": 465,
+        "ssl_direct": True, "smtp_starttls": False,
+        "auth_oauth2": False, "protocole": "imap",
+    }
+    entree = {"compte": compte, "importable": True, "note": ""}
+    if _regler_compte_microsoft(compte):
+        entree["note"] = "connexion Microsoft à faire"
+    elif _texte("POP3 Server"):
+        entree.update(importable=False, note="compte POP : COURRIER ADRIEN ne lit que l'IMAP")
+    elif not compte["imap_host"]:
+        entree.update(importable=False, note="compte Exchange, non pris en charge")
+    elif not _texte("SMTP Server"):
+        entree.update(importable=False, note="aucun serveur d'envoi dans Outlook")
+    else:
+        if _nombre("IMAP Use SSL"):
+            compte["imap_port"] = _nombre("IMAP Port") or 993
+        # SMTP Secure Connection : 0 aucun, 1 SSL, 2 TLS, 3 automatique
+        securite, port_smtp = _nombre("SMTP Secure Connection"), _nombre("SMTP Port")
+        starttls = port_smtp != 465 and (securite in (2, 3) or port_smtp == 587)
+        if starttls:
+            port_smtp = port_smtp or 587
+        elif securite != 1:
+            port_smtp = 465
+        compte.update(smtp_host=_texte("SMTP Server"), smtp_port=port_smtp or 465, smtp_starttls=starttls)
+        compte["mdp"] = _dechiffrer_mdp_outlook(valeurs.get("IMAP Password")) \
+            or _dechiffrer_mdp_outlook(valeurs.get("SMTP Password"))
+        notes = ["mot de passe récupéré" if compte["mdp"] else "mot de passe à saisir"]
+        utilisateur = _texte("IMAP User")
+        if utilisateur and utilisateur.lower() != adresse.lower():
+            notes.append(f"identifiant Outlook différent ({utilisateur})")
+        entree["note"] = ", ".join(notes)
+    return entree
+
+def lire_comptes_outlook():
+    """Comptes de tous les profils Outlook, sans doublon d'adresse. Retourne
+    None si Outlook n'a aucun profil ici."""
+    import winreg
+
+    def _sous_cles(cle):
+        i = 0
+        while True:
+            try:
+                yield winreg.EnumKey(cle, i)
+            except OSError:
+                return
+            i += 1
+
+    def _valeurs(cle):
+        valeurs, i = {}, 0
+        while True:
+            try:
+                nom, valeur, _type = winreg.EnumValue(cle, i)
+            except OSError:
+                return valeurs
+            valeurs[nom] = valeur
+            i += 1
+
+    par_adresse = {}
+    profil_trouve = False
+    for racine in _RACINES_OUTLOOK:
+        try:
+            cle_racine = winreg.OpenKey(winreg.HKEY_CURRENT_USER, racine)
+        except OSError:
+            continue
+        with cle_racine:
+            for profil in list(_sous_cles(cle_racine)):
+                profil_trouve = True
+                try:
+                    cle_comptes = winreg.OpenKey(cle_racine, profil + r"\9375CFF0413111d3B88A00104B2A6676")
+                except OSError:
+                    continue
+                with cle_comptes:
+                    for sous_cle in list(_sous_cles(cle_comptes)):
+                        with winreg.OpenKey(cle_comptes, sous_cle) as k:
+                            valeurs = _valeurs(k)
+                        if "Email" not in valeurs:
+                            continue  # carnets d'adresses, fichiers de données
+                        entree = _compte_outlook(valeurs)
+                        cle = entree["compte"]["adresse"].lower()
+                        if cle and (cle not in par_adresse or (entree["compte"]["mdp"] and not par_adresse[cle]["compte"]["mdp"])):
+                            par_adresse[cle] = entree
+    return list(par_adresse.values()) if profil_trouve else None
 
 import threading as _threading
 # Limite globale de connexions IMAP simultanées — o2switch bloque à 20 par IP.
@@ -29353,7 +29908,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 02/11/2026 19h09")
+        self.setWindowTitle("COURRIER ADRIEN — 03/11/2026 01h11")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -34673,7 +35228,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 02/11/2026 à 19h09")
+        lbl_version = QLabel("Version du 03/11/2026 à 01h11")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -46864,6 +47419,16 @@ __JS_TRADUCTION__
         btn_export_android.setStyleSheet(STYLE_BOUTON)
         btn_export_android.clicked.connect(lambda: self._exporter_comptes_android(dlg))
         layout.addWidget(btn_export_android)
+        # Import depuis d'autres logiciels (02/11/2026, demandé)
+        ligne_import = QHBoxLayout()
+        ligne_import.setSpacing(6)
+        ligne_import.addWidget(QLabel("Importer les comptes de :"))
+        for logiciel in ("Thunderbird", "Foxmail", "Outlook"):
+            btn_import = QPushButton(logiciel)
+            btn_import.setStyleSheet(STYLE_BOUTON)
+            btn_import.clicked.connect(lambda _c=False, l=logiciel: self._importer_comptes(dlg, l, _ajouter_comptes_importes))
+            ligne_import.addWidget(btn_import)
+        layout.addLayout(ligne_import)
 
         # Retour visuel après Ajouter/Modifier/Supprimer (15/08/2026,
         # remonté par l'utilisateur — jusqu'ici ces 3 actions se faisaient
@@ -46961,6 +47526,28 @@ __JS_TRADUCTION__
             # le compte restant au lieu de garder l'arborescence du factice.
             if factice_actif and self.liste_comptes.count() > 0:
                 self.liste_comptes.setCurrentRow(0)
+
+        def _ajouter_comptes_importes(nouveaux, nb_ignores):
+            """Ajoute les comptes choisis dans un import, avec le même retrait
+            du compte factice qu'Ajouter."""
+            if nouveaux:
+                factice_actif = False
+                for i in reversed(range(len(COMPTES))):
+                    if COMPTES[i].get("adresse") == ADRESSE_COMPTE_FACTICE:
+                        factice_actif |= ADRESSE_COMPTE_FACTICE == self.compte_actif.get("adresse", "")
+                        COMPTES.pop(i)
+                COMPTES.extend(nouveaux)
+                sauvegarder_comptes(COMPTES)
+                _remplir_liste()
+                self._maj_liste_comptes()
+                if factice_actif and self.liste_comptes.count() > 0:
+                    self.liste_comptes.setCurrentRow(0)
+            texte = f"Comptes importés : {len(nouveaux)}"
+            if nb_ignores:
+                texte += f" ({nb_ignores} non importé(s), mot de passe ou connexion manquant)"
+            couleur = "#80c080" if nouveaux else "#e08080"
+            lbl_statut_comptes.setStyleSheet(f"color: {couleur}; font-family: Verdana; font-size: 11px;")
+            lbl_statut_comptes.setText(texte)
 
         def modifier():
             row = liste.currentRow()
@@ -47145,6 +47732,108 @@ __JS_TRADUCTION__
         dlg.show()
         QTimer.singleShot(0, _reinitialiser_formulaire)
         self._conserver_fenetre_secondaire(dlg)
+
+    # --- Import des comptes de Thunderbird, Foxmail et Outlook (02-03/11/2026,
+    # demandé) ---
+    # La lecture est en tête de fichier (lire_comptes_thunderbird,
+    # lire_comptes_foxmail, lire_comptes_outlook). Ici : le mot de passe principal éventuel de
+    # Thunderbird, la liste à cocher, puis pour chaque compte coché ce qui
+    # manque (mot de passe, connexion Microsoft).
+    def _importer_comptes(self, parent, logiciel, ajouter_comptes):
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
+                                        QLabel, QMessageBox, QInputDialog)
+        de_logiciel = "d'Outlook" if logiciel == "Outlook" else f"de {logiciel}"
+        mot_de_passe = ""
+        while True:
+            try:
+                if logiciel == "Thunderbird":
+                    entrees = lire_comptes_thunderbird(mot_de_passe)
+                elif logiciel == "Foxmail":
+                    entrees = lire_comptes_foxmail()
+                else:
+                    entrees = lire_comptes_outlook()
+                break
+            except MotDePassePrincipalRequis:
+                saisie, ok = QInputDialog.getText(
+                    parent, "Thunderbird",
+                    "Thunderbird est protégé par un mot de passe principal.\n"
+                    "Saisissez-le pour importer vos comptes :",
+                    QLineEdit.EchoMode.Password)
+                if not ok:
+                    return
+                mot_de_passe = saisie
+            except Exception as e:
+                print(f"[IMPORT] Lecture {logiciel} impossible : {type(e).__name__} : {e}")
+                QMessageBox.warning(parent, logiciel,
+                                    f"Impossible de lire les comptes {de_logiciel} :\n{e}")
+                return
+        if not entrees:
+            QMessageBox.information(parent, logiciel,
+                                    f"Aucun compte de messagerie {logiciel} trouvé sur cet ordinateur.")
+            return
+
+        fen = QDialog(parent)
+        fen.setWindowTitle(f"IMPORTER LES COMPTES {de_logiciel.upper()}")
+        fen.setMinimumWidth(620)
+        lay = QVBoxLayout(fen)
+        lay.setContentsMargins(15, 15, 15, 15)
+        lay.setSpacing(10)
+        lbl = QLabel(f"Cochez les comptes à ajouter à COURRIER ADRIEN. {logiciel} n'est pas modifié.")
+        lbl.setStyleSheet("color: white;")
+        lay.addWidget(lbl)
+        liste = QListWidget()
+        adresses_connues = {c["adresse"].lower() for c in COMPTES}
+        for entree in entrees:
+            compte = entree["compte"]
+            deja_la = compte["adresse"].lower() in adresses_connues
+            note = "déjà dans COURRIER ADRIEN" if deja_la else entree["note"]
+            item = QListWidgetItem(f"  {compte['nom']}  —  {compte['adresse']}  ({note})")
+            if deja_la or not entree["importable"]:
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+            else:
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, compte["adresse"].lower())
+            liste.addItem(item)
+        lay.addWidget(liste)
+        ligne = QHBoxLayout()
+        ligne.addStretch(1)
+        btn_importer = QPushButton(" Importer ")
+        btn_annuler = QPushButton(" Annuler ")
+        for b in (btn_importer, btn_annuler):
+            b.setStyleSheet(STYLE_BOUTON)
+            ligne.addWidget(b)
+        lay.addLayout(ligne)
+        btn_importer.clicked.connect(fen.accept)
+        btn_annuler.clicked.connect(fen.reject)
+        if fen.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        cochees = {liste.item(i).data(Qt.ItemDataRole.UserRole) for i in range(liste.count())
+                   if liste.item(i).checkState() == Qt.CheckState.Checked}
+        nouveaux, nb_ignores = [], 0
+        for entree in entrees:
+            compte = entree["compte"]
+            if compte["adresse"].lower() not in cochees:
+                continue
+            if compte["auth_oauth2"]:
+                if not lancer_authentification_oauth_interactive(compte["adresse"], parent, scopes=SCOPES_OAUTH_GRAPH):
+                    nb_ignores += 1
+                    continue
+            elif not compte["mdp"]:
+                conseil = ("\nGmail demande un mot de passe d'application, voir le mode d'emploi."
+                           if "gmail" in compte["imap_host"].lower() else "")
+                saisie, ok = QInputDialog.getText(
+                    parent, "Mot de passe",
+                    f"Mot de passe de {compte['adresse']} :{conseil}",
+                    QLineEdit.EchoMode.Password)
+                if not ok or not saisie.strip():
+                    nb_ignores += 1
+                    continue
+                compte["mdp"] = saisie.strip()
+            nouveaux.append(compte)
+        print(f"[IMPORT] {logiciel} : {len(nouveaux)} compte(s) ajouté(s), {nb_ignores} ignoré(s)")
+        ajouter_comptes(nouveaux, nb_ignores)
 
     # --- Export des comptes vers COURRIER ADRIEN ANDROID (29/10/2026) ---
     # « Coffre à coffre », sans aucun fichier : les comptes passent de la
