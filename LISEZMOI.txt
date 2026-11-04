@@ -7,6 +7,7 @@ En cas de plantage, joignez si possible les fichiers journal.txt et
 crash_traceback.txt du dossier %LOCALAPPDATA%\COURRIER (voir VOS DONNEES).
 
 INSTALLATION
+  Necessite Windows 10 ou 11, 64 bits.
   1. Installez COURRIER dans C:\COURRIER : creez ce dossier et decompressez-y
      tout le zip. Le programme est alors
      C:\COURRIER\COURRIER ADRIEN\COURRIER ADRIEN.exe

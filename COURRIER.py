@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-03 01h11"
+VERSION_BUILD = "2026-11-04 12h10"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -5007,7 +5007,131 @@ def _sons_pour_telephone():
     return sortie
 
 
-def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False, modeles=False):
+# Synchro de la liste de spam (04/11/2026, idée de l'utilisateur) : un bouton « Synchro avec le
+# téléphone » dans la fenêtre SPAM, un bouton « Synchro avec le PC » sur le téléphone, après une
+# première copie (validée sur le téléphone) qui lui donne le secret partagé. C'est toujours le
+# téléphone qui appelle : il joint le PC par un tunnel « adb reverse », posé à chaque liaison TÉL,
+# et le bouton du PC lui demande simplement de le faire. Chaque échange est scellé (HMAC) : le
+# secret ne circule pas, et ni un autre programme du PC ni une autre appli du téléphone ne peut
+# modifier la liste.
+FICHIER_SYNCHRO_TELEPHONE = os.path.join(DOSSIER_APP, "synchro_telephone.json")
+PORT_SYNCHRO_SPAM = 47631
+_synchro_spam_faite = _threading.Event()
+_synchro_spam_bilan = {}
+_synchro_spam_ecoute = [False]
+
+def _lire_synchro_telephone():
+    try:
+        with open(FICHIER_SYNCHRO_TELEPHONE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+def _ecrire_synchro_telephone(**valeurs):
+    d = _lire_synchro_telephone()
+    d.update(valeurs)
+    try:
+        with open(FICHIER_SYNCHRO_TELEPHONE, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except OSError as e:
+        print(f"[SYNCHRO SPAM] Échec sauvegarde : {e}")
+
+def _secret_synchro_spam():
+    """Le secret partagé avec le téléphone, créé à la première copie de la liste de spam."""
+    secret = _lire_synchro_telephone().get("secret")
+    if not secret:
+        import secrets
+        secret = secrets.token_hex(32)
+        _ecrire_synchro_telephone(secret=secret, confirme=False)
+    return secret
+
+def _sceau_synchro(secret, *parties):
+    import hashlib, hmac
+    return hmac.new(secret.encode("utf-8"), "\n".join(parties).encode("utf-8"), hashlib.sha256).hexdigest()
+
+def _traiter_synchro_spam(ligne, secret):
+    """Une demande du téléphone : ses changements entrent dans notre liste, il reçoit la liste
+    complète. Rend la réponse (texte), ou None si la demande n'est pas scellée par notre secret."""
+    import hmac
+    try:
+        d = json.loads(ligne)
+        nonce = d["nonce"]
+        ajouts, retraits = d["spam_ajouts"], d["spam_retraits"]
+        attendu = _sceau_synchro(secret, nonce, ",".join(ajouts), ",".join(retraits))
+        if d.get("format") != "courrier-adrien-synchro-spam-1" or not hmac.compare_digest(attendu, d["sceau"]):
+            return None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    nb_ajouts, nb_retraits = _fusionner_spam_telephone(json.dumps({"spam_ajouts": ajouts, "spam_retraits": retraits}))
+    liste = sorted(charger_expediteurs_spam())
+    _ecrire_synchro_telephone(confirme=True)
+    _synchro_spam_bilan.update(ajouts=nb_ajouts, retraits=nb_retraits)
+    _synchro_spam_faite.set()
+    return json.dumps({"spam": liste, "sceau": _sceau_synchro(secret, nonce, "reponse", ",".join(liste))}, ensure_ascii=False)
+
+def _ecouter_synchro_spam():
+    """Fil de fond : attend le téléphone sur 127.0.0.1, seule porte du tunnel adb."""
+    import socket
+    try:
+        serveur = socket.socket()
+        serveur.bind(("127.0.0.1", PORT_SYNCHRO_SPAM))
+        serveur.listen(1)
+    except OSError as e:
+        print(f"[SYNCHRO SPAM] Écoute impossible : {e}")
+        _synchro_spam_ecoute[0] = False
+        return
+    while True:
+        try:
+            client, _adresse = serveur.accept()
+            with client:
+                client.settimeout(15)
+                lecture = client.makefile("rb")
+                ligne = lecture.readline(2_000_000).decode("utf-8", "replace")
+                secret = _lire_synchro_telephone().get("secret")
+                reponse = _traiter_synchro_spam(ligne, secret) if secret else None
+                client.sendall(((reponse or "REFUS") + "\n").encode("utf-8"))
+        except OSError as e:
+            print(f"[SYNCHRO SPAM] {e}")
+
+def _preparer_synchro_telephone(serie):
+    """Écoute + tunnel adb vers ce téléphone. Bloquant (adb). Rien tant qu'aucune copie n'a créé le secret."""
+    if not _lire_synchro_telephone().get("secret"):
+        return
+    if not _synchro_spam_ecoute[0]:
+        _synchro_spam_ecoute[0] = True
+        _threading.Thread(target=_ecouter_synchro_spam, daemon=True).start()
+    _adb_bloquant("-s", serie, "reverse", f"tcp:{PORT_SYNCHRO_SPAM}", f"tcp:{PORT_SYNCHRO_SPAM}")
+
+def _synchro_spam_telephone(serie):
+    """Bouton de la fenêtre SPAM : demande au téléphone d'appeler, attend qu'il l'ait fait. Rend le bilan à afficher."""
+    _preparer_synchro_telephone(serie)
+    _synchro_spam_faite.clear()
+    _adb_bloquant("-s", serie, "shell", "am", "start", "-n", "fr.courrieradrien.android/.MainActivity",
+                  "--ez", "synchro_pc", "true")
+    if not _synchro_spam_faite.wait(20):
+        # application réinstallée (secret perdu) ou téléphone verrouillé : le prochain clic repasse par la copie
+        _ecrire_synchro_telephone(confirme=False)
+        return "Le téléphone n'a pas répondu. Déverrouillez-le et recommencez."
+    return (f"Synchro faite. Venus du téléphone : {_synchro_spam_bilan.get('ajouts', 0)} expéditeur(s) "
+            f"bloqué(s), {_synchro_spam_bilan.get('retraits', 0)} débloqué(s).")
+
+
+def _fusionner_spam_telephone(ligne):
+    """Retour de la copie de la liste de spam (04/11/2026) : expéditeurs bloqués et débloqués sur
+    le téléphone depuis la copie précédente, ajoutés à la liste de COURRIER. Rend (ajouts, retraits)."""
+    try:
+        d = json.loads(ligne)
+        ajouts = {a for a in d.get("spam_ajouts", []) if isinstance(a, str)}
+        retraits = {a for a in d.get("spam_retraits", []) if isinstance(a, str)}
+    except (ValueError, AttributeError, TypeError):
+        return 0, 0
+    acceptees = ajouter_expediteurs_spam(ajouts)
+    retirer_expediteurs_spam(retraits)
+    return len(acceptees), len(retraits)
+
+
+def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False, modeles=False, spam=False, bilan_spam=None, etape=None, fin_copie=None):
     """Export « coffre à coffre » vers COURRIER ADRIEN ANDROID (29/10/2026) :
     ouvre l'appli sur sa réception (port et jeton d'une fois en paramètres),
     crée un tunnel adb vers ce port, envoie les comptes, attend la réponse.
@@ -5023,7 +5147,7 @@ def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False,
     jeton = secrets.token_hex(16)
     port_tel = 40000 + secrets.randbelow(10000)
     contenu = {
-        "format": "courrier-adrien-copie-2" if (macros or sons or modeles) else "courrier-adrien-comptes-direct-1",
+        "format": "courrier-adrien-copie-2" if (macros or sons or modeles or spam) else "courrier-adrien-comptes-direct-1",
         "jeton": jeton, "avec_mdp": bool(avec_mdp),
         "comptes": [{
             "nom": c.get("nom", ""), "adresse": c.get("adresse", ""),
@@ -5040,6 +5164,10 @@ def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False,
         contenu["sons"] = _sons_pour_telephone()
     if modeles:
         contenu["modeles"] = charger_modeles()
+    if spam:   # 04/11/2026 : expéditeurs bloqués de la fenêtre SPAM
+        contenu["spam"] = sorted(charger_expediteurs_spam())
+        contenu["secret_synchro"] = _secret_synchro_spam()
+        _preparer_synchro_telephone(serie)
     paquet_json = json.dumps(contenu, ensure_ascii=False).encode("utf-8") + b"\n"
     _adb_bloquant("-s", serie, "shell", "am", "start", "-n", f"{paquet}/.MainActivity",
                   "--ei", "port_comptes", str(port_tel), "--es", "jeton_comptes", jeton)
@@ -5056,10 +5184,30 @@ def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False,
                 # 60 s : avec les sons, plusieurs Mo passent par le Wi-Fi (02/11/2026)
                 with socket.create_connection(("127.0.0.1", port_pc), timeout=60) as sock:
                     sock.sendall(paquet_json)
-                    reponse = sock.makefile("rb").readline().decode("utf-8", "replace").strip()
+                    lecture = sock.makefile("rb")
+                    reponse = lecture.readline().decode("utf-8", "replace").strip()
+                    # Liste de spam : le téléphone répond aussi par ses changements (ligne absente avant la 0.29)
+                    retour_spam = lecture.readline().decode("utf-8", "replace").strip() if (spam and reponse == "OK") else ""
+                    # 04/11/2026 : le téléphone confirme une fois Copier (ou Ne pas copier) touché ;
+                    # rien de plus venant d'une application d'avant la 0.29 : fin de lecture, mot vide
+                    if reponse == "OK":
+                        if etape:
+                            etape()
+                        sock.settimeout(300)
+                        try:
+                            fin = lecture.readline().decode("utf-8", "replace").strip()
+                        except OSError:
+                            fin = "ATTENTE_DEPASSEE"
+                        if fin_copie is not None:
+                            mot, _sep, texte = fin.partition("|")
+                            fin_copie.update(mot=mot, texte=texte)
             except OSError:
                 reponse = ""
             if reponse == "OK":
+                if retour_spam:
+                    ajouts, retraits = _fusionner_spam_telephone(retour_spam)
+                    if bilan_spam is not None:
+                        bilan_spam.update(ajouts=ajouts, retraits=retraits)
                 return True
             if reponse:
                 return "l'application a refusé l'envoi. Recommencez."
@@ -6422,6 +6570,8 @@ def connecter_telephone(parent=None, apres=None, si_echec=None, attendre_ecran=F
     adb = chemin_adb()
 
     def _apres(serie):
+        # tunnel de la synchro de la liste de spam : le bouton du téléphone peut alors joindre COURRIER
+        _threading.Thread(target=_preparer_synchro_telephone, args=(serie,), daemon=True).start()
         if attendre_ecran:
             attente_telephone_etape("Téléphone trouvé. Ouverture de son écran…")
         attente_telephone_fermer(apres_ecran=attendre_ecran)
@@ -29908,7 +30058,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 03/11/2026 01h11")
+        self.setWindowTitle("COURRIER ADRIEN — 04/11/2026 12h10")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35228,7 +35378,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 03/11/2026 à 01h11")
+        lbl_version = QLabel("Version du 04/11/2026 à 12h10")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -46828,7 +46978,8 @@ __JS_TRADUCTION__
         layout.addWidget(liste_widget)
 
         lbl_nb = QLabel("")
-        lbl_nb.setStyleSheet("color: #aaaaaa;")
+        lbl_nb.setStyleSheet("color: white; font-size: 13px;")
+        lbl_nb.setWordWrap(True)   # le bilan de la synchro était tronqué (04/11/2026)
         layout.addWidget(lbl_nb)
 
         def _recharger():
@@ -46895,10 +47046,35 @@ __JS_TRADUCTION__
             restaurateur.termine.connect(_sur_fin_restauration)
             restaurateur.start()
         btn_retirer.clicked.connect(_retirer)
+        btn_telephone_spam = QPushButton(" Synchro avec le téléphone ")
+        btn_telephone_spam.setStyleSheet(STYLE_BOUTON)
+        def _copier_spam_telephone():
+            # La première fois : la copie, validée sur le téléphone, qui lui donne le secret
+            if not _lire_synchro_telephone().get("confirme"):
+                self._exporter_comptes_android(dlg, seulement="spam")
+                _recharger()   # le téléphone a pu renvoyer ses changements
+                return
+            btn_telephone_spam.setEnabled(False)
+            lbl_nb.setText("Synchro avec le téléphone...")
+
+            def _fin(bilan):
+                try:
+                    btn_telephone_spam.setEnabled(True)
+                    _recharger()
+                    lbl_nb.setText(f"{liste_widget.count()} expéditeur(s) bloqué(s) — {bilan}")
+                except RuntimeError:
+                    pass  # fenêtre déjà fermée entre-temps
+
+            def _connecte(serie):
+                self._lancer_fil_export_android(lambda: _synchro_spam_telephone(serie), _fin)
+
+            connecter_telephone(dlg, _connecte, si_echec=lambda: _fin("téléphone introuvable : rien n'a changé."))
+        btn_telephone_spam.clicked.connect(_copier_spam_telephone)
         btn_fermer_spam = QPushButton(" Fermer ")
         btn_fermer_spam.setStyleSheet(STYLE_BOUTON)
         btn_fermer_spam.clicked.connect(dlg.reject)
         layout_btn.addWidget(btn_retirer)
+        layout_btn.addWidget(btn_telephone_spam)
         layout_btn.addWidget(btn_fermer_spam)
         layout.addLayout(layout_btn)
 
@@ -47415,7 +47591,7 @@ __JS_TRADUCTION__
         # Export vers COURRIER ADRIEN ANDROID (29/10/2026, demandé) : bouton
         # long, sur toute la largeur, au titre explicite, collé à la ligne
         # Ajouter/Valider/Supprimer (au-dessus de la ligne de statut)
-        btn_export_android = QPushButton("Copier vers COURRIER ADRIEN sur le téléphone (comptes, macros, sons, modèles)")
+        btn_export_android = QPushButton("Copier vers COURRIER ADRIEN sur le téléphone (comptes, macros, sons, modèles, spam)")
         btn_export_android.setStyleSheet(STYLE_BOUTON)
         btn_export_android.clicked.connect(lambda: self._exporter_comptes_android(dlg))
         layout.addWidget(btn_export_android)
@@ -47846,7 +48022,7 @@ __JS_TRADUCTION__
     # l'appli les ajoute à ceux qu'elle a déjà (même nom = mis à jour).
     def _exporter_comptes_android(self, parent, seulement=None):
         """02/11/2026 : comptes, macros, sons et modèles (tout coché), ou seulement=
-        "macros" / "sons" / "modeles" depuis les boutons de ces fenêtres (le reste décoché)."""
+        "macros" / "sons" / "modeles" / "spam" depuis les boutons de ces fenêtres (le reste décoché)."""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
                                        QRadioButton, QLineEdit, QScrollArea, QWidget)
         comptes = [c for c in COMPTES if not est_compte_factice(c)]
@@ -47868,9 +48044,11 @@ __JS_TRADUCTION__
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(8)
 
+        # 04/11/2026 (texte de l'utilisateur) : seuls les mots de passe vont de coffre à coffre,
+        # donc la phrase n'en parle que si des comptes peuvent être copiés
         explication = QLabel(
-            "Ce que vous cochez est directement copié de coffre à coffre "
-            "vers COURRIER ADRIEN sur le téléphone par la liaison Wi-Fi ou câble.")
+            "Ce que vous cochez est copié sur le téléphone par la liaison Wi-Fi ou câble."
+            + ("" if seulement else " Les mots de passe des comptes sont directement copiés de coffre à coffre."))
         explication.setWordWrap(True)
         explication.setStyleSheet("color: #e0c080;")
         layout.addWidget(explication)
@@ -47884,9 +48062,12 @@ __JS_TRADUCTION__
         case_macros = QCheckBox("Macros")
         case_sons = QCheckBox("Sons")
         case_modeles = QCheckBox("Modèles")
-        for cle, case in (("comptes", case_comptes), ("macros", case_macros), ("sons", case_sons), ("modeles", case_modeles)):
+        case_spam = QCheckBox("Liste de spam")
+        for cle, case in (("comptes", case_comptes), ("macros", case_macros), ("sons", case_sons), ("modeles", case_modeles), ("spam", case_spam)):
             case.setChecked(seulement is None or seulement == cle)
             ligne_quoi.addWidget(case)
+        # Depuis MACROS, SONS, MODÈLES ou SPAM : pas de case Comptes (04/11/2026, demandé)
+        case_comptes.setVisible(seulement is None)
         ligne_quoi.addStretch(1)
         layout.addLayout(ligne_quoi)
 
@@ -47925,10 +48106,14 @@ __JS_TRADUCTION__
         layout.addWidget(choix_avec)
         layout.addWidget(choix_sans)
 
-        # Comptes décochés : leur liste et le choix des mots de passe sont grisés
+        # Comptes décochés : leur liste et le choix des mots de passe disparaissent (04/11/2026,
+        # remonté par l'utilisateur : grisés, ils semblaient encore actifs alors qu'on ne copiait
+        # que le spam, avec « Avec les mots de passe » qui paraissait coché)
         def _comptes_actifs(actif):
             for w in (titre, zone, btn_tout, btn_rien, choix_avec, choix_sans):
-                w.setEnabled(actif)
+                w.setVisible(actif)
+            layout.activate()
+            dlg.adjustSize()
         case_comptes.toggled.connect(_comptes_actifs)
         _comptes_actifs(case_comptes.isChecked())
 
@@ -47953,38 +48138,75 @@ __JS_TRADUCTION__
         def _envoyer():
             choisis = [c for case, c in cases if case.isChecked()] if case_comptes.isChecked() else []
             avec_macros, avec_sons, avec_modeles = case_macros.isChecked(), case_sons.isChecked(), case_modeles.isChecked()
+            avec_spam = case_spam.isChecked()
             if case_comptes.isChecked() and not choisis:
                 _etat("Cochez au moins un compte, ou décochez Comptes.", "#e08080")
                 return
-            if not (choisis or avec_macros or avec_sons or avec_modeles):
+            if not (choisis or avec_macros or avec_sons or avec_modeles or avec_spam):
                 _etat("Cochez au moins une chose à copier.", "#e08080")
                 return
-            avec = choix_avec.isChecked()
+            avec = bool(choisis) and choix_avec.isChecked()   # mots de passe : seulement avec des comptes
             if not verifier_code_telephone(dlg):
                 return
             btn_envoyer.setEnabled(False)
             _etat("Connexion au téléphone...")
+            bilan_spam, fin_copie = {}, {}
+            relais_etape = _RelaisTelephone(dlg)
+
+            def _attendre_copier(_rien=None):
+                attente_telephone_etape("Sur le téléphone, vérifiez ce qui est reçu et touchez Copier…")
+            relais_etape.fini.connect(_attendre_copier)
 
             def _echec():
+                attente_telephone_fermer()
                 btn_envoyer.setEnabled(True)
                 _etat("Téléphone introuvable : rien n'a été envoyé.", "#e08080")
 
             def _connecte(serie):
                 _etat("Envoi à l'application du téléphone...")
+                attente_telephone(dlg, "Envoi à l'application du téléphone…")
                 self._lancer_fil_export_android(
                     lambda: _envoyer_comptes_android(serie, choisis, avec, macros=avec_macros, sons=avec_sons,
-                                                     modeles=avec_modeles), _fini)
+                                                     modeles=avec_modeles, spam=avec_spam, bilan_spam=bilan_spam,
+                                                     etape=lambda: relais_etape.fini.emit(None),
+                                                     fin_copie=fin_copie), _fini)
 
             def _fini(resultat):
+                from PySide6.QtWidgets import QMessageBox
+                attente_telephone_fermer()
                 btn_envoyer.setEnabled(True)
                 if resultat is not True:
                     _etat(f"Envoi impossible : {resultat}", "#e08080")
                     return
+                du_telephone = ""
+                if bilan_spam.get("ajouts") or bilan_spam.get("retraits"):
+                    du_telephone = (f"\n\nReçu du téléphone pour la liste de spam : {bilan_spam.get('ajouts', 0)} "
+                                    f"expéditeur(s) bloqué(s), {bilan_spam.get('retraits', 0)} débloqué(s).")
+                mot = fin_copie.get("mot")
+                if mot == "COPIE_OK":   # copie réussie : tout se referme après le OK
+                    _boite_telephone(dlg, "Copie réussie.\n\n" + fin_copie.get("texte", "") + du_telephone,
+                                     QMessageBox.Information)
+                    dlg.accept()
+                    return
+                if mot == "COPIE_REFUSEE":
+                    _etat("Copie annulée sur le téléphone : rien n'y a été copié.", "#e08080")
+                    return
+                if mot == "COPIE_ECHEC":
+                    _etat("La copie a échoué sur le téléphone : " + fin_copie.get("texte", ""), "#e08080")
+                    return
+                if mot == "ATTENTE_DEPASSEE":
+                    _etat("Le téléphone n'a pas confirmé la copie après 5 minutes. Regardez sur le téléphone ce qui a été copié.", "#e08080")
+                    return
+                # application d'avant la 0.29 : elle ne dit pas si Copier a été touché
                 pluriel = "s" if len(choisis) > 1 else ""
                 parties = ([f"{len(choisis)} compte{pluriel}"] if choisis else []) + \
-                    (["macros"] if avec_macros else []) + (["sons"] if avec_sons else []) + (["modèles"] if avec_modeles else [])
+                    (["macros"] if avec_macros else []) + (["sons"] if avec_sons else []) + (["modèles"] if avec_modeles else []) + (["liste de spam"] if avec_spam else [])
+                du_tel = ""
+                if bilan_spam.get("ajouts") or bilan_spam.get("retraits"):
+                    du_tel = (f" Reçu du téléphone pour la liste de spam : {bilan_spam.get('ajouts', 0)} expéditeur(s) "
+                              f"bloqué(s), {bilan_spam.get('retraits', 0)} débloqué(s).")
                 _etat("Envoyé : " + ", ".join(parties) + ". Sur le téléphone, vérifiez ce qui est reçu "
-                      "puis touchez Copier.", "#80c080")
+                      "puis touchez Copier." + du_tel, "#80c080")
                 btn_annuler.setText("Fermer")
 
             connecter_telephone(dlg, _connecte, si_echec=_echec)
