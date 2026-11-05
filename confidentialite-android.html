@@ -17,43 +17,62 @@
 <body>
 <header><h1>COURRIER ADRIEN pour Android<br>Politique de confidentialité</h1></header>
 <main>
-<p class="date">En vigueur le 31 octobre 2026</p>
+<p class="date">En vigueur le 4 novembre 2026</p>
 
 <p>COURRIER ADRIEN est une application de messagerie gratuite, publiée par Adrien Verlaine.
 Cette page explique, simplement, ce que l'application fait de vos données. En résumé :
-<strong>tout reste sur votre téléphone, rien ne nous est envoyé.</strong></p>
+<strong>l'application se connecte directement à vos comptes, sans serveur à nous, et rien ne nous est envoyé sans que vous le demandiez.</strong></p>
 
 <h2>Les données que l'application utilise</h2>
 <ul>
   <li><strong>Vos comptes de messagerie</strong> : adresse, serveurs, identifiant et mot de passe que vous saisissez.
       Ils sont enregistrés uniquement sur votre téléphone, chiffrés avec une clé protégée par Android.</li>
   <li><strong>Vos emails et pièces jointes</strong> : téléchargés depuis vos serveurs de messagerie pour être affichés.
-      Les pièces jointes ne sont enregistrées dans le téléphone que si vous le demandez.</li>
+      Les pièces jointes que vous ouvrez passent par un dossier temporaire de l'application ; elles ne sont enregistrées
+      dans le dossier de votre choix que si vous le demandez.</li>
   <li><strong>Les contacts du téléphone</strong> (si vous l'autorisez) : lus uniquement pour vous proposer des adresses
       pendant la saisie. L'application ne les modifie pas, ne les copie pas et ne les envoie nulle part.</li>
   <li><strong>Les notifications</strong> (si vous l'autorisez) : pour vous prévenir de l'arrivée de nouveaux emails.</li>
+  <li><strong>La liste des expéditeurs bloqués</strong> : les adresses que vous marquez comme spam, enregistrées sur votre téléphone.</li>
+  <li><strong>Vos flux RSS</strong> : les adresses des sites que vous suivez, et les articles déjà reçus, enregistrés sur votre téléphone.</li>
+  <li><strong>Le journal de l'application</strong> : un fichier enregistré sur votre téléphone qui retrace son fonctionnement
+      (relèves, erreurs, plantages). Il contient notamment les noms de vos comptes, des adresses d'expéditeurs bloqués
+      et l'objet des emails lents à s'ouvrir.</li>
 </ul>
 
 <h2>Avec qui l'application communique</h2>
-<p>Uniquement avec les serveurs de messagerie des comptes que vous avez configurés (par exemple Gmail, Orange, Free,
-Yahoo, ou Microsoft pour les comptes Outlook), afin de relever et d'envoyer vos emails. Pour les comptes Outlook,
-la connexion se fait sur la page officielle de Microsoft ; l'application ne voit pas votre mot de passe Microsoft.</p>
+<ul>
+  <li><strong>Les serveurs de messagerie</strong> des comptes que vous avez configurés (par exemple Gmail, Orange, Free,
+      Yahoo, ou Microsoft pour les comptes Outlook), afin de relever et d'envoyer vos emails. Pour les comptes Outlook,
+      la connexion se fait sur la page officielle de Microsoft ; l'application ne voit pas votre mot de passe Microsoft.</li>
+  <li><strong>Les sites qui hébergent les images de vos emails</strong>, quand ces images sont affichées (voir plus bas).</li>
+  <li><strong>Les sites que vous suivez</strong>, si vous utilisez RSS to Email : l'application les interroge pour y lire
+      les nouveaux articles, puis les dépose dans le compte que vous avez choisi. Comme pour toute visite, ces sites
+      voient l'adresse Internet de votre connexion. Certains sont lus sans chiffrement si leur adresse commence par http.</li>
+  <li><strong>Votre ordinateur</strong>, si vous utilisez COURRIER ADRIEN pour Windows et le reliez à votre téléphone.
+      Vous pouvez alors copier vers le téléphone vos comptes (avec ou sans les mots de passe), macros, sons, modèles et flux RSS,
+      et synchroniser la liste des expéditeurs bloqués dans les deux sens. Ces données passent directement de
+      l'ordinateur au téléphone, sans aucun serveur intermédiaire.</li>
+</ul>
 <p>L'éditeur de l'application ne reçoit <strong>aucune</strong> de vos données : ni vos emails, ni vos mots de passe,
-ni vos contacts, ni statistiques d'utilisation.</p>
+ni vos contacts, ni statistiques d'utilisation. Une seule exception, à votre demande : si quelque chose ne fonctionne
+pas, le bouton « Envoyer le journal » prépare un email à notre adresse d'aide, avec le journal en pièce jointe.
+Vous le relisez et l'envoyez vous-même, depuis votre propre compte. Nous ne l'utilisons que pour répondre à votre
+demande.</p>
 
 <h2>Ce que l'application ne fait pas</h2>
 <ul>
   <li>Pas de publicité.</li>
   <li>Pas de statistiques, de mesure d'audience ni de pisteurs.</li>
   <li>Pas de compte à créer chez nous, pas de serveur à nous.</li>
-  <li>Aucune vente ni aucun partage de données avec qui que ce soit.</li>
+  <li>Aucune vente ni aucun partage de vos données.</li>
 </ul>
 
 <h2>Les images dans les emails</h2>
 <p>Certains emails (lettres d'information notamment) contiennent des images hébergées sur Internet. Les afficher,
 comme dans tout logiciel de messagerie, permet à leur expéditeur de savoir que l'email a été ouvert et de connaître
-l'adresse Internet de votre connexion. Vous pouvez bloquer ces images dans Réglages généraux, et ne les afficher
-qu'à la demande.</p>
+l'adresse Internet de votre connexion. Certaines de ces images sont chargées sans chiffrement. Vous pouvez les bloquer
+dans Réglages généraux, et ne les afficher qu'à la demande.</p>
 
 <h2>Supprimer vos données</h2>
 <p>Supprimer un compte dans l'application efface du téléphone ses identifiants et son mot de passe (ou sa connexion Microsoft). Désinstaller
@@ -61,7 +80,8 @@ l'application efface tout ce qu'elle a enregistré, sauf les pièces jointes que
 dans le dossier de votre choix. Vos emails restent bien sûr sur les serveurs de votre messagerie.</p>
 
 <h2>Sécurité</h2>
-<p>Les connexions aux serveurs de messagerie sont chiffrées (SSL/TLS). Les mots de passe sont chiffrés sur le
+<p>Les connexions aux serveurs de messagerie sont chiffrées (SSL/TLS). La synchronisation avec l'ordinateur est
+protégée par un secret partagé lors de la première copie, que vous validez sur le téléphone. Les mots de passe sont chiffrés sur le
 téléphone et ne sont pas inclus dans les sauvegardes automatiques d'Android.</p>
 
 <h2>Enfants</h2>

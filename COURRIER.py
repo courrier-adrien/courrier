@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-04 12h10"
+VERSION_BUILD = "2026-11-05 19h38"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -5131,7 +5131,7 @@ def _fusionner_spam_telephone(ligne):
     return len(acceptees), len(retraits)
 
 
-def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False, modeles=False, spam=False, bilan_spam=None, etape=None, fin_copie=None):
+def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False, modeles=False, spam=False, bilan_spam=None, etape=None, fin_copie=None, rss=False):
     """Export « coffre à coffre » vers COURRIER ADRIEN ANDROID (29/10/2026) :
     ouvre l'appli sur sa réception (port et jeton d'une fois en paramètres),
     crée un tunnel adb vers ce port, envoie les comptes, attend la réponse.
@@ -5147,7 +5147,7 @@ def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False,
     jeton = secrets.token_hex(16)
     port_tel = 40000 + secrets.randbelow(10000)
     contenu = {
-        "format": "courrier-adrien-copie-2" if (macros or sons or modeles or spam) else "courrier-adrien-comptes-direct-1",
+        "format": "courrier-adrien-copie-2" if (macros or sons or modeles or spam or rss) else "courrier-adrien-comptes-direct-1",
         "jeton": jeton, "avec_mdp": bool(avec_mdp),
         "comptes": [{
             "nom": c.get("nom", ""), "adresse": c.get("adresse", ""),
@@ -5168,6 +5168,11 @@ def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False,
         contenu["spam"] = sorted(charger_expediteurs_spam())
         contenu["secret_synchro"] = _secret_synchro_spam()
         _preparer_synchro_telephone(serie)
+    if rss:   # 04/11/2026 : flux avec leur mémoire « déjà vus » ; les flux locaux (file://) restent sur le PC
+        contenu["rss"] = [{k: f[k] for k in ("id", "url", "nom", "compte", "type", "motif", "items_vus", "etag",
+                                             "last_modified", "site_lien", "site_description") if k in f}
+                          for f in charger_abonnements_rss().get("flux", [])
+                          if str(f.get("url", "")).lower().startswith(("http://", "https://"))]
     paquet_json = json.dumps(contenu, ensure_ascii=False).encode("utf-8") + b"\n"
     _adb_bloquant("-s", serie, "shell", "am", "start", "-n", f"{paquet}/.MainActivity",
                   "--ei", "port_comptes", str(port_tel), "--es", "jeton_comptes", jeton)
@@ -20223,6 +20228,11 @@ class DialogueAbonnementsRSS(QDialog):
         btn_copier_url.clicked.connect(self._copier_url_flux)
         ligne_url_selection.addWidget(self.champ_url_selection, 1)
         ligne_url_selection.addWidget(btn_copier_url)
+        # 04/11/2026 : comme MACROS, SONS, MODÈLES et SPAM
+        btn_copier_tel = QPushButton("  Copier sur le téléphone  ")
+        btn_copier_tel.setStyleSheet(STYLE_BOUTON)
+        btn_copier_tel.clicked.connect(self._copier_flux_telephone)
+        ligne_url_selection.addWidget(btn_copier_tel)
         layout.addLayout(ligne_url_selection)
 
         self.lbl_statut = QLabel("")
@@ -20413,6 +20423,11 @@ class DialogueAbonnementsRSS(QDialog):
         if item_a_selectionner:
             self.liste_flux.setCurrentItem(item_a_selectionner)
         self._maj_etat_boutons()
+
+    def _copier_flux_telephone(self):
+        client = self._parent_courrier
+        if hasattr(client, "_exporter_comptes_android"):
+            client._exporter_comptes_android(self, seulement="rss")
 
     def _rechercher_flux(self):
         adresse = self.champ_recherche_flux.text().strip()
@@ -30058,7 +30073,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 04/11/2026 12h10")
+        self.setWindowTitle("COURRIER ADRIEN — 05/11/2026 19h38")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35378,7 +35393,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 04/11/2026 à 12h10")
+        lbl_version = QLabel("Version du 05/11/2026 à 19h38")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -48022,7 +48037,7 @@ __JS_TRADUCTION__
     # l'appli les ajoute à ceux qu'elle a déjà (même nom = mis à jour).
     def _exporter_comptes_android(self, parent, seulement=None):
         """02/11/2026 : comptes, macros, sons et modèles (tout coché), ou seulement=
-        "macros" / "sons" / "modeles" / "spam" depuis les boutons de ces fenêtres (le reste décoché)."""
+        "macros" / "sons" / "modeles" / "spam" / "rss" depuis les boutons de ces fenêtres (le reste décoché)."""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
                                        QRadioButton, QLineEdit, QScrollArea, QWidget)
         comptes = [c for c in COMPTES if not est_compte_factice(c)]
@@ -48063,10 +48078,11 @@ __JS_TRADUCTION__
         case_sons = QCheckBox("Sons")
         case_modeles = QCheckBox("Modèles")
         case_spam = QCheckBox("Liste de spam")
-        for cle, case in (("comptes", case_comptes), ("macros", case_macros), ("sons", case_sons), ("modeles", case_modeles), ("spam", case_spam)):
+        case_rss = QCheckBox("Flux RSS")
+        for cle, case in (("comptes", case_comptes), ("macros", case_macros), ("sons", case_sons), ("modeles", case_modeles), ("spam", case_spam), ("rss", case_rss)):
             case.setChecked(seulement is None or seulement == cle)
             ligne_quoi.addWidget(case)
-        # Depuis MACROS, SONS, MODÈLES ou SPAM : pas de case Comptes (04/11/2026, demandé)
+        # Depuis MACROS, SONS, MODÈLES, SPAM ou RSS to EMAIL : pas de case Comptes (04/11/2026, demandé)
         case_comptes.setVisible(seulement is None)
         ligne_quoi.addStretch(1)
         layout.addLayout(ligne_quoi)
@@ -48139,10 +48155,11 @@ __JS_TRADUCTION__
             choisis = [c for case, c in cases if case.isChecked()] if case_comptes.isChecked() else []
             avec_macros, avec_sons, avec_modeles = case_macros.isChecked(), case_sons.isChecked(), case_modeles.isChecked()
             avec_spam = case_spam.isChecked()
+            avec_rss = case_rss.isChecked()
             if case_comptes.isChecked() and not choisis:
                 _etat("Cochez au moins un compte, ou décochez Comptes.", "#e08080")
                 return
-            if not (choisis or avec_macros or avec_sons or avec_modeles or avec_spam):
+            if not (choisis or avec_macros or avec_sons or avec_modeles or avec_spam or avec_rss):
                 _etat("Cochez au moins une chose à copier.", "#e08080")
                 return
             avec = bool(choisis) and choix_avec.isChecked()   # mots de passe : seulement avec des comptes
@@ -48169,7 +48186,7 @@ __JS_TRADUCTION__
                     lambda: _envoyer_comptes_android(serie, choisis, avec, macros=avec_macros, sons=avec_sons,
                                                      modeles=avec_modeles, spam=avec_spam, bilan_spam=bilan_spam,
                                                      etape=lambda: relais_etape.fini.emit(None),
-                                                     fin_copie=fin_copie), _fini)
+                                                     fin_copie=fin_copie, rss=avec_rss), _fini)
 
             def _fini(resultat):
                 from PySide6.QtWidgets import QMessageBox
@@ -48200,7 +48217,7 @@ __JS_TRADUCTION__
                 # application d'avant la 0.29 : elle ne dit pas si Copier a été touché
                 pluriel = "s" if len(choisis) > 1 else ""
                 parties = ([f"{len(choisis)} compte{pluriel}"] if choisis else []) + \
-                    (["macros"] if avec_macros else []) + (["sons"] if avec_sons else []) + (["modèles"] if avec_modeles else []) + (["liste de spam"] if avec_spam else [])
+                    (["macros"] if avec_macros else []) + (["sons"] if avec_sons else []) + (["modèles"] if avec_modeles else []) + (["liste de spam"] if avec_spam else []) + (["flux RSS"] if avec_rss else [])
                 du_tel = ""
                 if bilan_spam.get("ajouts") or bilan_spam.get("retraits"):
                     du_tel = (f" Reçu du téléphone pour la liste de spam : {bilan_spam.get('ajouts', 0)} expéditeur(s) "
