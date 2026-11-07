@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-05 19h38"
+VERSION_BUILD = "2026-11-07 01h23"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -26807,6 +26807,30 @@ class FenetreRedaction(QDialog):
         )
         self.webview.page().runJavaScript(js)
 
+    def inserer_macro_au_curseur(self, macro):
+        """Macro « texte pur » (déclencheur aucun, 07/11/2026) : insère son
+        contenu au curseur du mail déjà ouvert, à chaque clic — pas de
+        marqueur anti-doublon ni de retour en haut de page, contrairement à
+        executer_macro, puisque l'utilisateur est en pleine rédaction."""
+        if getattr(self, '_fenetre_fermee', False) or not self._chargement_termine:
+            return
+        bloc_html = generer_html_macro(macro)
+        if not bloc_html:
+            return
+        self.webview.setFocus()
+        # Garde le curseur s'il est déjà dans le corps, sinon le pose à
+        # l'endroit habituel (marqueur du modèle ou fin du texte)
+        self._placer_curseur_dans_corps()
+        js = (
+            "(function(){"
+            "var zone = document.getElementById('zone-edition');"
+            "if (!zone) return;"
+            "zone.focus();"
+            f"document.execCommand('insertHTML', false, {json.dumps(bloc_html)});"
+            "})();"
+        )
+        self.webview.page().runJavaScript(js)
+
     def _inserer_emoji(self, emoji):
         if not self._chargement_termine:
             return
@@ -28051,6 +28075,9 @@ class GestionnaireMacros(QDialog):
         "repondre_a_tous": "Répondre à tous",
         "transferer": "Transférer le mail sélectionné",
         "renvoyer": "Renvoyer le mail sélectionné",
+        # Texte pur (07/11/2026, demandé) : aucune fenêtre ouverte, le texte
+        # va au curseur du mail en cours de rédaction — voir _lancer_macro
+        "aucun": "Aucun — texte pur, au curseur du mail en cours",
     }
 
     def __init__(self, parent=None):
@@ -30073,7 +30100,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 05/11/2026 19h38")
+        self.setWindowTitle("COURRIER ADRIEN — 07/11/2026 01h23")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35058,6 +35085,9 @@ if (typeof module === 'object') {
             "renvoyer": self.renvoyer,
         }
         declencheur = macro.get("declencheur", "repondre")
+        if declencheur == "aucun":
+            self._lancer_macro_texte_pur(macro)
+            return
         action = actions.get(declencheur)
         if action is None:
             return
@@ -35110,6 +35140,41 @@ if (typeof module === 'object') {
                 except Exception:
                     pass
             QTimer.singleShot(2300, _rendre_focus)
+
+    def _lancer_macro_texte_pur(self, macro):
+        """Macro sans déclencheur (07/11/2026) : n'ouvre rien. Le texte va au
+        curseur du mail en cours de rédaction (le dernier ouvert s'il y en a
+        plusieurs). Aucun mail ouvert : copié dans le presse-papiers, pour
+        le coller où l'on veut (Ctrl+V)."""
+        ouvertes = []
+        for f in getattr(self, "_fenetres_redaction", []):
+            try:
+                if not getattr(f, "_fenetre_fermee", False) and f.isVisible():
+                    ouvertes.append(f)
+            except RuntimeError:  # fenêtre déjà détruite côté Qt
+                continue
+        from PySide6.QtWidgets import QMessageBox
+        if not ouvertes:
+            bloc_html = generer_html_macro(macro)
+            if not bloc_html:
+                return
+            from PySide6.QtCore import QMimeData
+            mime = QMimeData()
+            mime.setHtml(bloc_html)
+            texte = re.sub(r"<br\s*/?>", "\n", bloc_html)
+            mime.setText(html.unescape(re.sub(r"<[^>]+>", "", texte)))
+            QApplication.clipboard().setMimeData(mime)
+            QMessageBox.information(
+                self, "Macro",
+                "Aucun mail en cours de rédaction : le texte est copié dans le "
+                "presse-papiers (Ctrl+V pour le coller).")
+            return
+        fenetre = ouvertes[-1]
+        if fenetre.isMinimized():
+            fenetre.showNormal()
+        fenetre.raise_()
+        fenetre.activateWindow()
+        fenetre.inserer_macro_au_curseur(macro)
 
     def ouvrir_agenda(self):
         dlg = DialogueAgenda(self)
@@ -35393,7 +35458,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 05/11/2026 à 19h38")
+        lbl_version = QLabel("Version du 07/11/2026 à 01h23")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
