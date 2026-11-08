@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-07 01h23"
+VERSION_BUILD = "2026-11-08 21h07"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -19618,18 +19618,9 @@ class DialogueAgenda(QDialog):
         # Personnaliser le QCalendarWidget popup
         cal = self.champ_date.calendarWidget()
         cal.setLocale(cal.locale())  # garder le français
-        # Flèches mois précédent/suivant en rouge
-        for btn_name in ("qt_calendar_prevmonth", "qt_calendar_nextmonth"):
-            btn = cal.findChild(QPushButton, btn_name)
-            if btn:
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #A52A2A; color: white; border: none;
-                        font-weight: bold; font-size: 13px; min-width: 24px; min-height: 24px;
-                    }
-                    QPushButton:hover { background-color: #c03030; }
-                """)
         # Style du calendrier : barre de navigation sombre, sélection rouge
+        # Flèches mois précédent/suivant (QToolButton) : fond rouge permanent,
+        # sinon la flèche sombre se perd sur le fond noir hors survol
         # On garde le fond blanc natif pour la grille (entêtes lisibles en noir)
         cal.setStyleSheet("""
             QCalendarWidget QAbstractItemView {
@@ -19646,6 +19637,15 @@ class DialogueAgenda(QDialog):
             }
             QCalendarWidget QToolButton::menu-indicator { image: none; }
             QCalendarWidget QToolButton:hover { background-color: #A52A2A; }
+            QCalendarWidget QToolButton#qt_calendar_prevmonth,
+            QCalendarWidget QToolButton#qt_calendar_nextmonth {
+                background-color: #A52A2A; border: none;
+                min-width: 22px; min-height: 20px;
+            }
+            QCalendarWidget QToolButton#qt_calendar_prevmonth:hover,
+            QCalendarWidget QToolButton#qt_calendar_nextmonth:hover {
+                background-color: #c03030;
+            }
             QCalendarWidget QMenu {
                 background-color: #1e1e1e; color: white;
             }
@@ -30100,7 +30100,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 07/11/2026 01h23")
+        self.setWindowTitle("COURRIER ADRIEN — 08/11/2026 21h07")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35458,7 +35458,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 07/11/2026 à 01h23")
+        lbl_version = QLabel("Version du 08/11/2026 à 21h07")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
