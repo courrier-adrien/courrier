@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-08 21h07"
+VERSION_BUILD = "2026-11-10 00h48"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -20903,6 +20903,22 @@ class DialogueCarnetAdresses(QDialog):
         btn_ecrire_contact.setStyleSheet(STYLE_BOUTON)
         btn_ecrire_contact.setToolTip("Nouveau mail au(x) contact(s) sélectionné(s)")
         btn_ecrire_contact.clicked.connect(self._ecrire_aux_contacts)
+        # Écrire à tous (09/11/2026, demandé par l'auteur) : tous les contacts
+        # affichés (le dossier entier, ou ce que filtre la recherche). Ouvert
+        # depuis À / Copie / Copie cachée, le libellé suit le champ cliqué et
+        # les adresses vont dans ce champ ; sinon nouveau mail, tous en À.
+        libelles_a_tous = {"À": "Écrire à tous", "Copie": "Copie à tous",
+                           "Copie cachée": "Copie cachée à tous"}
+        if self._libelle_cible in self._champs_cibles:
+            libelle_a_tous = libelles_a_tous.get(self._libelle_cible,
+                                                 f"{self._libelle_cible} à tous")
+        else:
+            libelle_a_tous = "Écrire à tous"
+        btn_ecrire_tous = QPushButton(f"  {libelle_a_tous}  ")
+        btn_ecrire_tous.setStyleSheet(STYLE_BOUTON)
+        btn_ecrire_tous.setToolTip("Tous les contacts du dossier affiché\n"
+                                   "(seulement ceux trouvés si une recherche est en cours)")
+        btn_ecrire_tous.clicked.connect(self._ecrire_a_tous)
         # SMS (07/10/2026) : fenêtre SMS avec les contacts sélectionnés
         # qui ont un numéro (voir DialogueSMS)
         btn_sms_contact = QPushButton("  SMS  ")
@@ -20932,6 +20948,7 @@ class DialogueCarnetAdresses(QDialog):
         # Deux lignes de boutons (07/10/2026) : envoyer / ranger
         ligne_btns_contact.addWidget(btn_afficher_contact, 1)
         ligne_btns_contact.addWidget(btn_ecrire_contact, 1)
+        ligne_btns_contact.addWidget(btn_ecrire_tous, 1)
         ligne_btns_contact.addWidget(btn_sms_contact, 1)
         ligne_btns_contact.addWidget(btn_copier_contact, 1)
         colonne_contacts.addLayout(ligne_btns_contact)
@@ -21193,6 +21210,49 @@ class DialogueCarnetAdresses(QDialog):
             return
         principal._ouvrir_redaction(destinataire="; ".join(destinataires) + "; ")
 
+    def _ecrire_a_tous(self):
+        """Bouton Écrire à tous / Copie à tous / Copie cachée à tous : tous les
+        contacts affichés dans la liste, sans avoir à les sélectionner.
+        Mode choix de destinataires : ajoutés au champ cliqué (À, Copie ou
+        Copie cachée) ; sinon nouveau mail avec tous en À."""
+        from PySide6.QtWidgets import QMessageBox
+        ids = [self.liste_contacts.item(i).data(Qt.ItemDataRole.UserRole)
+               for i in range(self.liste_contacts.count())]
+        if not ids:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Aucun contact dans ce dossier.")
+            return
+        # Vue « Tous les contacts » sans recherche : tout le carnet, on demande
+        if self._dossier_selectionne() is None and not self.champ_recherche.text().strip():
+            if QMessageBox.question(
+                    self, "Écrire à tous",
+                    f"Vous êtes sur « Tous les contacts » : les {len(ids)} contacts "
+                    "du carnet seront ajoutés. Continuer ?") != QMessageBox.StandardButton.Yes:
+                return
+        if self._libelle_cible in self._champs_cibles:
+            self._ajouter_au_champ_cible(self._libelle_cible, ids)
+            return
+        contacts = {c.get("id"): c for c in charger_carnet().get("contacts", [])}
+        destinataires, deja = [], set()
+        for cid in ids:
+            c = contacts.get(cid) or {}
+            email = c.get("email", "").strip()
+            if not email or email.lower() in deja:
+                continue
+            deja.add(email.lower())
+            nom = c.get("nom", "").strip()
+            destinataires.append(f"{nom} <{email}>" if nom else email)
+        if not destinataires:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Aucun contact de ce dossier n'a d'adresse mail.")
+            return
+        principal = self._parent_courrier
+        if principal is None or not hasattr(principal, "_ouvrir_redaction"):
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Fenêtre principale introuvable.")
+            return
+        principal._ouvrir_redaction(destinataire="; ".join(destinataires) + "; ")
+
     def _sms_aux_contacts(self):
         """Bouton SMS : fenêtre SMS avec les contacts sélectionnés qui ont
         un numéro de téléphone."""
@@ -21209,14 +21269,16 @@ class DialogueCarnetAdresses(QDialog):
             return
         ouvrir_fenetre_sms(self._parent_courrier, destinataires)
 
-    def _ajouter_au_champ_cible(self, libelle):
-        """Ajoute les contacts sélectionnés au champ À/Copie/Copie cachée
-        demandé, au même format que l'autocomplétion ("Nom <adresse>",
-        séparés par "; "), sans doublon avec les adresses déjà présentes."""
+    def _ajouter_au_champ_cible(self, libelle, ids=None):
+        """Ajoute les contacts sélectionnés (ou ids, pour « … à tous ») au
+        champ À/Copie/Copie cachée demandé, au même format que
+        l'autocomplétion ("Nom <adresse>", séparés par "; "), sans doublon
+        avec les adresses déjà présentes."""
         champ = self._champs_cibles.get(libelle)
         if champ is None:
             return
-        ids = [it.data(Qt.ItemDataRole.UserRole) for it in self.liste_contacts.selectedItems()]
+        if ids is None:
+            ids = [it.data(Qt.ItemDataRole.UserRole) for it in self.liste_contacts.selectedItems()]
         if not ids:
             self.lbl_statut.setStyleSheet("color: #e08080;")
             self.lbl_statut.setText("Sélectionnez un ou plusieurs contacts.")
@@ -30100,7 +30162,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 08/11/2026 21h07")
+        self.setWindowTitle("COURRIER ADRIEN — 10/11/2026 00h48")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35458,7 +35520,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 08/11/2026 à 21h07")
+        lbl_version = QLabel("Version du 10/11/2026 à 00h48")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -44767,7 +44829,30 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 
         layout.addSpacing(8)
 
+        resultat = {"dossier": None, "largeur": 0}
+
         layout_btns = QHBoxLayout()
+        if champ_nom is not None:
+            # Redimensionner (10/11/2026, demandé) : petite boîte copiée sur
+            # l'outil « Redimensionner » du logiciel photos ; la photo est
+            # réduite à la largeur choisie juste après l'enregistrement.
+            btn_redim = QPushButton("  Redimensionner  ")
+            btn_redim.setStyleSheet(STYLE_BOUTON)
+            btn_redim.setToolTip("Réduire la photo à une largeur choisie (ratio conservé)")
+            layout_btns.addWidget(btn_redim)
+
+            def choisir_largeur():
+                largeur = self._boite_redimensionner_photo(
+                    dlg, resultat["largeur"] or getattr(self, '_largeur_redim_photo', 800))
+                if largeur is None:
+                    return
+                resultat["largeur"] = largeur
+                if largeur:
+                    self._largeur_redim_photo = largeur
+                    btn_redim.setText(f"  Redimensionner : {largeur} px  ")
+                else:
+                    btn_redim.setText("  Redimensionner  ")
+            btn_redim.clicked.connect(choisir_largeur)
         layout_btns.addStretch(1)
         btn_ok  = QPushButton("  Enregistrer  ")
         btn_ann = QPushButton("  Annuler  ")
@@ -44776,8 +44861,6 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             layout_btns.addWidget(b)
         layout.addLayout(layout_btns)
         btn_ann.clicked.connect(dlg.reject)
-
-        resultat = {"dossier": None}
 
         def valider():
             dossier = champ_chemin.text().strip()
@@ -44804,8 +44887,101 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 
         dlg.exec()
         if champ_nom is not None:
-            return (resultat["dossier"], champ_nom.text().strip()) if resultat["dossier"] else None
+            return ((resultat["dossier"], champ_nom.text().strip(), resultat["largeur"])
+                    if resultat["dossier"] else None)
         return resultat["dossier"]
+
+    def _boite_redimensionner_photo(self, parent, largeur_initiale=800):
+        """Petite boîte « Redimensionner » (10/11/2026, demandé), copiée sur
+        redimensionner_selection du logiciel photos. Retourne la largeur
+        choisie, 0 si le champ est vidé (pas de redimensionnement), ou None
+        si annulé."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel as _QLabel
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Redimensionner")
+        dialog.setMinimumWidth(350)
+        dialog.setStyleSheet("QWidget { background-color: #2a2a2a; color: white; }")
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        lbl_info = _QLabel("1 image à enregistrer\nRatio conservé — jamais agrandie\n"
+                           "Champ vide = pas de redimensionnement")
+        lbl_info.setStyleSheet("color: #aaaaaa; font-family: Verdana; font-size: 11px; background-color: #1a1a1a; padding: 5px;")
+        lbl_info.setWordWrap(True)
+        layout.addWidget(lbl_info)
+
+        lbl_larg = _QLabel("Largeur cible (pixels) :")
+        lbl_larg.setStyleSheet("color: white; font-family: Verdana; font-size: 11px; font-weight: bold;")
+        layout.addWidget(lbl_larg)
+
+        edit_larg = QLineEdit(str(largeur_initiale or 800))
+        edit_larg.setStyleSheet("background-color: #4a4a4a; color: white; font-family: Verdana; font-size: 13px; padding: 4px;")
+        edit_larg.setMinimumHeight(edit_larg.sizeHint().height())
+        edit_larg.selectAll()
+        edit_larg.returnPressed.connect(dialog.accept)
+        layout.addWidget(edit_larg)
+
+        frame_btn = QHBoxLayout()
+        style_btn = """
+            QPushButton {
+                background-color: #A52A2A; color: white; border: none;
+                border-bottom: 3px solid #6b1a1a; border-right: 2px solid #6b1a1a;
+                padding: 5px 20px; font-family: Verdana; font-size: 11px;
+            }
+            QPushButton:pressed {
+                border-bottom: 1px solid #6b1a1a; border-right: 1px solid #6b1a1a;
+                padding-top: 7px; padding-left: 22px;
+            }
+        """
+        btn_ok = QPushButton("OK")
+        btn_ok.setStyleSheet(style_btn)
+        btn_annuler = QPushButton("Annuler")
+        btn_annuler.setStyleSheet(style_btn)
+        btn_ok.clicked.connect(dialog.accept)
+        btn_annuler.clicked.connect(dialog.reject)
+        frame_btn.addStretch()
+        frame_btn.addWidget(btn_ok)
+        frame_btn.addWidget(btn_annuler)
+        layout.addLayout(frame_btn)
+
+        if not dialog.exec():
+            return None
+        val = edit_larg.text().strip()
+        if not val:
+            return 0
+        return int(val) if val.isdigit() and int(val) > 0 else 800
+
+    def _redimensionner_image_enregistree(self, chemin, largeur):
+        """Réduit l'image enregistrée à `largeur` pixels, ratio conservé, en
+        remplaçant le fichier (même traitement que RedimensionneurThread du
+        logiciel photos). Jamais d'agrandissement ; SVG et GIF animés laissés
+        tels quels. Retourne True si l'image a été réduite."""
+        if not largeur or not chemin or not os.path.isfile(chemin):
+            return False
+        if os.path.splitext(chemin)[1].lower() == ".svg":
+            return False
+        try:
+            from PIL import Image
+            img = Image.open(chemin)
+            if getattr(img, "n_frames", 1) > 1:
+                img.close()
+                return False
+            larg_orig, haut_orig = img.size
+            if larg_orig <= largeur:
+                img.close()
+                return False
+            nouvelle_hauteur = max(1, int(largeur * haut_orig / larg_orig))
+            fmt = img.format or 'JPEG'
+            img_reduite = img.resize((largeur, nouvelle_hauteur), Image.LANCZOS)
+            img.close()
+            options = {"quality": 90} if fmt in ("JPEG", "WEBP") else {}
+            img_reduite.save(chemin, format=fmt, **options)
+            return True
+        except Exception as e:
+            print(f"[REDIM] Échec du redimensionnement de {chemin} : {e}")
+            self._statut_temporaire(f"  Photo enregistrée mais NON redimensionnée : {e}")
+            return False
 
     def _formater_date_fr(self, date_str):
         """Formate une date d'email en français pour le bandeau."""
@@ -46697,7 +46873,7 @@ __JS_TRADUCTION__
         )
         if not dossier:
             return
-        dossier, nom_choisi = dossier
+        dossier, nom_choisi, largeur = dossier
         # Seuls le tout premier clic et le clic droit fixent le dossier par
         # défaut (18/10/2026, demandé) ; le double-clic = cette photo seulement
         if premiere_fois or depuis_menu:
@@ -46706,13 +46882,13 @@ __JS_TRADUCTION__
         # nom nettoyé comme celui d'une pièce jointe (caractères interdits)
         nom_choisi = nom_fichier_sur(nom_choisi + extension, "") if nom_choisi else ""
         if src.startswith("file:"):
-            self._telecharger_image_fichier_local(src, dossier, nom_choisi)
+            self._telecharger_image_fichier_local(src, dossier, nom_choisi, largeur)
         elif src.startswith("data:"):
-            self._telecharger_image_data_uri(src, dossier, nom_choisi)
+            self._telecharger_image_data_uri(src, dossier, nom_choisi, largeur)
         else:
-            self._telecharger_image_navigateur(src, dossier, nom_choisi)
+            self._telecharger_image_navigateur(src, dossier, nom_choisi, largeur)
 
-    def _telecharger_image_navigateur(self, url, dossier, nom=""):
+    def _telecharger_image_navigateur(self, url, dossier, nom="", largeur=0):
         """Image distante du badge vert (30/09/2026, lenteur remontée par
         l'utilisateur : le badge était bien plus lent que le clic droit
         "Enregistrer l'image"). Jusqu'ici passait par TelechargeurClicImage
@@ -46731,10 +46907,10 @@ __JS_TRADUCTION__
             self._dl_badge_attendus = {}
         qurl = QUrl(url)
         # clé = forme normalisée par Qt, identique à item.url().toString()
-        self._dl_badge_attendus[qurl.toString()] = (dossier, nom)
+        self._dl_badge_attendus[qurl.toString()] = (dossier, nom, largeur)
         page.download(qurl)
 
-    def _telecharger_image_fichier_local(self, url_file, dossier, nom=""):
+    def _telecharger_image_fichier_local(self, url_file, dossier, nom="", largeur=0):
         """Copie une image déjà mise en cache localement (DOSSIER_CACHE_IMAGES)
         vers dossier — pendant de _telecharger_image_data_uri
         pour les images qui passent maintenant par le cache disque dédupliqué
@@ -46766,14 +46942,16 @@ __JS_TRADUCTION__
             n += 1
         try:
             _shutil.copy2(chemin_source, chemin)
-            self._statut_temporaire(f"  Image téléchargée : {os.path.basename(chemin)}")
+            reduite = self._redimensionner_image_enregistree(chemin, largeur)
+            self._statut_temporaire(f"  Image téléchargée : {os.path.basename(chemin)}"
+                                    + (f" (réduite à {largeur} px)" if reduite else ""))
             config_dl = charger_son_telechargement()
             if config_dl.get("actif") and config_dl.get("chemin"):
                 jouer_son_telechargement()
         except Exception as e:
             self._statut_temporaire(f"  Échec du téléchargement de l'image : {e}")
 
-    def _telecharger_image_data_uri(self, data_uri, dossier, nom=""):
+    def _telecharger_image_data_uri(self, data_uri, dossier, nom="", largeur=0):
         """Décode une image intégrée en base64 (data:...;base64,...) et
         l'enregistre dans dossier, avec
         la même protection anti-écrasement et le même son de fin que les
@@ -46805,7 +46983,9 @@ __JS_TRADUCTION__
         try:
             with open(chemin, "wb") as f:
                 f.write(donnees)
-            self._statut_temporaire(f"  Image téléchargée : {os.path.basename(chemin)}")
+            reduite = self._redimensionner_image_enregistree(chemin, largeur)
+            self._statut_temporaire(f"  Image téléchargée : {os.path.basename(chemin)}"
+                                    + (f" (réduite à {largeur} px)" if reduite else ""))
             config_dl = charger_son_telechargement()
             if config_dl.get("actif") and config_dl.get("chemin"):
                 jouer_son_telechargement()
@@ -49301,9 +49481,11 @@ if __name__ == "__main__":
         # _telecharger_image_navigateur) : dossier "images" mémorisé.
         dossier = getattr(fenetre, '_dl_badge_attendus', {}).pop(
             item.url().toString(), None)
+        largeur_badge = 0
         if isinstance(dossier, tuple):
-            # (dossier, nom choisi dans la boîte du badge, 18/10/2026)
-            dossier, nom_badge = dossier
+            # (dossier, nom choisi dans la boîte du badge, 18/10/2026,
+            #  largeur de redimensionnement, 10/11/2026 — 0 = aucune)
+            dossier, nom_badge, largeur_badge = (tuple(dossier) + (0,))[:3]
             if nom_badge:
                 if not os.path.splitext(nom_badge)[1]:
                     nom_badge += os.path.splitext(nom_fichier)[1]
@@ -49331,6 +49513,10 @@ if __name__ == "__main__":
             if not item.isFinished():
                 return
             fenetre._dl_masquer_progression()
+            if largeur_badge and item.state() == type(item).DownloadState.DownloadCompleted:
+                if fenetre._redimensionner_image_enregistree(chemin, largeur_badge):
+                    fenetre._statut_temporaire(
+                        f"  Image téléchargée : {os.path.basename(chemin)} (réduite à {largeur_badge} px)")
             config_dl = charger_son_telechargement()
             if config_dl.get("actif") and config_dl.get("chemin"):
                 jouer_son_telechargement()
