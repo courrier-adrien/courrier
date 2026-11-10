@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-10 20h09"
+VERSION_BUILD = "2026-11-10 21h08"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -9562,7 +9562,12 @@ def fusionner_contacts_telephone(contacts_tel, enregistrer=False, cles_telephone
         return len({(c.get("nom", "") or "").strip().lower() for c in fiches}) == 1
 
     stats = {"nouveaux": 0, "completes": 0, "inchanges": 0, "dossiers": 0, "lies": 0,
-             "ignores": 0, "ignores_noms": [], "ignores_cles": [], "supprimes_tel": []}
+             "ignores": 0, "ignores_noms": [], "ignores_cles": [], "supprimes_tel": [],
+             "nouveaux_noms": [], "completes_noms": []}
+
+    def _nom_affiche(t):
+        return ((t.get("nom") or "").strip() or (t.get("email") or "").strip()
+                or (t.get("portable") or "").strip() or (t.get("fixe") or "").strip() or "(sans nom)")
     pierres = carnet.setdefault("suppressions_tel", {})
     for t in contacts_tel:
         numeros_t = _numeros(t)
@@ -9615,8 +9620,11 @@ def fusionner_contacts_telephone(contacts_tel, enregistrer=False, cles_telephone
                     c["autres_tel"] = " ; ".join(m for m in [c.get("autres_tel", "")] + manquants if m)
                     modifie = True
             stats["completes" if modifie else "inchanges"] += 1
+            if modifie:
+                stats["completes_noms"].append(_nom_affiche(t))
             continue
         stats["nouveaux"] += 1
+        stats["nouveaux_noms"].append(_nom_affiche(t))
         for dossier in t["dossiers"]:
             if dossier.lower() not in par_minuscules:
                 dossiers.append(dossier)
@@ -22448,25 +22456,50 @@ class DialogueCarnetAdresses(QDialog):
                 morceaux.append(f"{stats['lies']} fiche(s) liée(s) au téléphone")
             self.lbl_statut.setText(" ; ".join(morceaux) + ".")
             return
-        lignes = [f"{len(resultat)} contacts lus sur le téléphone (ceux qui ont un numéro ou un mail) :", ""]
+        def _s(n, sing, plur):
+            return sing if n == 1 else plur
+
+        def _liste_noms(noms):
+            noms = sorted(noms, key=cle_tri_alpha)
+            if len(noms) <= 10:
+                return ["      –  " + n for n in noms]
+            return ["      " + ", ".join(noms[:20]) + (f" … (et {len(noms) - 20} autres)" if len(noms) > 20 else "")]
+
+        nb = stats["nouveaux"]
+        lignes = [f"{len(resultat)} contacts trouvés sur le téléphone (ceux qui ont un numéro ou un mail).", ""]
+        if nb:
+            lignes.append(f"•  {nb} {_s(nb, 'nouveau contact sera ajouté', 'nouveaux contacts seront ajoutés')}"
+                          f" au carnet :")
+            lignes += _liste_noms(stats["nouveaux_noms"])
+            if stats["dossiers"]:
+                lignes.append(f"      (rangés dans {stats['dossiers']} "
+                              f"{_s(stats['dossiers'], 'nouveau dossier', 'nouveaux dossiers')} : les groupes "
+                              f"du téléphone, et « {DOSSIER_CONTACTS_TELEPHONE} » pour les autres)")
+        else:
+            lignes.append("•  Aucun nouveau contact à ajouter.")
+        nc = stats["completes"]
+        if nc:
+            lignes.append(f"•  {nc} {_s(nc, 'contact déjà dans le carnet sera complété', 'contacts déjà dans le carnet seront complétés')}"
+                          f" (numéro, mail ou note manquant) :")
+            lignes += _liste_noms(stats["completes_noms"])
         if decision is True:
-            lignes.append(f"•  {len(stats['supprimes_tel'])} supprimé(s) du téléphone, à supprimer du carnet")
+            n = len(stats["supprimes_tel"])
+            lignes.append(f"•  {n} {_s(n, 'contact supprimé', 'contacts supprimés')} du téléphone "
+                          f"{_s(n, 'sera retiré', 'seront retirés')} du carnet.")
+        lignes.append(f"•  {stats['inchanges']} {_s(stats['inchanges'], 'contact est', 'contacts sont')} "
+                      f"déjà dans le carnet, à l'identique : rien à faire.")
         if stats["ignores"]:
-            lignes.append(f"•  {stats['ignores']} que vous avez supprimé(s) du carnet : pas réimporté(s)")
-        lignes.append(f"•  {stats['nouveaux']} nouveaux, à ajouter")
-        if stats["dossiers"]:
-            lignes.append(f"   (dans {stats['dossiers']} nouveau(x) dossier(s) : les groupes du "
-                          f"téléphone, et « {DOSSIER_CONTACTS_TELEPHONE} » pour les autres)")
-        lignes.append(f"•  {stats['completes']} déjà dans le carnet, à compléter "
-                      f"(numéro, mail ou note qui leur manque)")
-        lignes.append(f"•  {stats['inchanges']} déjà dans le carnet, sans changement")
+            n = stats["ignores"]
+            lignes.append(f"•  {n} {_s(n, 'contact que vous aviez supprimé', 'contacts que vous aviez supprimés')}"
+                          f" du carnet {_s(n, 'ne sera pas réimporté', 'ne seront pas réimportés')}.")
         if stats["lies"]:
-            lignes.append(f"•  {stats['lies']} fiche(s) du carnet liée(s) à leur fiche du téléphone "
-                          f"(pour « Envoyer au tél. »)")
+            n = stats["lies"]
+            lignes.append(f"•  {n} {_s(n, 'fiche du carnet sera reliée', 'fiches du carnet seront reliées')} "
+                          f"au téléphone (pour « Envoyer au tél. »).")
         lignes += ["", ("Rien d'autre n'est effacé ni remplacé dans le carnet" if decision is True
                         else "Rien n'est effacé ni remplacé dans le carnet") + ", et rien n'est modifié "
-                       "sur le téléphone. Le carnet actuel est sauvegardé avant l'import "
-                       "(bouton Restaurer pour revenir en arrière).", "", "Importer ?"]
+                       "sur le téléphone. Le carnet est sauvegardé juste avant "
+                       "(bouton Restaurer pour revenir en arrière).", "", "Lancer l'import ?"]
         boite = QMessageBox(QMessageBox.Question, "Importer du téléphone", "\n".join(lignes),
                             QMessageBox.NoButton, self)
         boite.setStyleSheet("QMessageBox { background-color: #2a2a2a; } "
@@ -30285,7 +30318,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 10/11/2026 20h09")
+        self.setWindowTitle("COURRIER ADRIEN — 10/11/2026 21h08")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35643,7 +35676,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 10/11/2026 à 20h09")
+        lbl_version = QLabel("Version du 10/11/2026 à 21h08")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
