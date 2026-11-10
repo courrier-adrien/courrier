@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-10 00h48"
+VERSION_BUILD = "2026-11-10 20h09"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -20925,6 +20925,13 @@ class DialogueCarnetAdresses(QDialog):
         btn_sms_contact.setStyleSheet(STYLE_BOUTON)
         btn_sms_contact.setToolTip("SMS au(x) contact(s) sélectionné(s), par le téléphone relié")
         btn_sms_contact.clicked.connect(self._sms_aux_contacts)
+        # Appeler (10/11/2026, demandé par l'auteur) : le téléphone relié
+        # compose le numéro du contact sélectionné (voir _appeler_contact)
+        btn_appeler_contact = QPushButton("  Appeler  ")
+        btn_appeler_contact.setStyleSheet(STYLE_BOUTON)
+        btn_appeler_contact.setToolTip("Appelle le contact sélectionné avec le téléphone relié\n"
+                                       "(choix du numéro s'il en a plusieurs)")
+        btn_appeler_contact.clicked.connect(self._appeler_contact)
         # Copier vers… (07/10/2026) : un contact peut être dans plusieurs
         # dossiers. Même effet : glisser vers un dossier avec Ctrl enfoncé.
         btn_copier_contact = QPushButton("  Copier vers…  ")
@@ -20950,6 +20957,7 @@ class DialogueCarnetAdresses(QDialog):
         ligne_btns_contact.addWidget(btn_ecrire_contact, 1)
         ligne_btns_contact.addWidget(btn_ecrire_tous, 1)
         ligne_btns_contact.addWidget(btn_sms_contact, 1)
+        ligne_btns_contact.addWidget(btn_appeler_contact, 1)
         ligne_btns_contact.addWidget(btn_copier_contact, 1)
         colonne_contacts.addLayout(ligne_btns_contact)
         ligne_btns_contact2 = QHBoxLayout()
@@ -21268,6 +21276,121 @@ class DialogueCarnetAdresses(QDialog):
             self.lbl_statut.setText("Sélectionnez un ou plusieurs contacts ayant un téléphone portable.")
             return
         ouvrir_fenetre_sms(self._parent_courrier, destinataires)
+
+    def _appeler_contact(self):
+        """Bouton Appeler (10/11/2026) : un seul contact sélectionné ; s'il a
+        plusieurs numéros (portable, fixe, autres), on choisit lequel. Même
+        protection par code que les SMS, puis connexion habituelle
+        (connecter_telephone) et appel lancé par adb."""
+        from PySide6.QtWidgets import QInputDialog
+        selection = self.liste_contacts.selectedItems()
+        if len(selection) != 1:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Sélectionnez un seul contact à appeler.")
+            return
+        contacts = {c.get("id"): c for c in charger_carnet().get("contacts", [])}
+        c = contacts.get(selection[0].data(Qt.ItemDataRole.UserRole)) or {}
+        nom = c.get("nom", "").strip()
+        numeros = []
+        for libelle, brut in ([("Portable", c.get("portable", "")), ("Fixe", c.get("fixe", ""))]
+                              + [("Autre", n) for n in (c.get("autres_tel", "") or "").split(";")]):
+            numero = normaliser_numero_sms(brut)
+            if numero and numero not in [n for _l, n, _b in numeros]:
+                numeros.append((libelle, numero, brut.strip()))
+        if not numeros:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Ce contact n'a pas de numéro de téléphone.")
+            return
+        if len(numeros) == 1:
+            _libelle, numero, affiche = numeros[0]
+        else:
+            choix = [f"{l} : {b}" for l, _n, b in numeros]
+            texte, ok = QInputDialog.getItem(self, "Appeler", f"Quel numéro appeler pour {nom} ?",
+                                             choix, 0, False)
+            if not ok:
+                return
+            _libelle, numero, affiche = numeros[choix.index(texte)]
+        if not verifier_code_telephone(self):
+            return
+        self.lbl_statut.setStyleSheet("color: #e0a050;")
+        self.lbl_statut.setText(f"Appel de {nom or affiche} : recherche du téléphone…")
+
+        def _echec():
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Téléphone introuvable : appel annulé.")
+
+        def _lancer_appel(serie):
+            """Bloquant. Réveille l'écran, puis intention CALL ; si le
+            téléphone la refuse, ouvre le clavier avec le numéro et appuie
+            sur la touche d'appel. Renvoie (serie, None) ou (serie, erreur)."""
+            _adb_bloquant("-s", serie, "shell", "input", "keyevent", "KEYCODE_WAKEUP", delai=5)
+            sortie = _adb_bloquant("-s", serie, "shell", "am", "start", "-a",
+                                   "android.intent.action.CALL", "-d", f"tel:{numero}")
+            print(f"[TELEPHONE] appel {numero} : {sortie.strip()}")
+            if "Error" in sortie or "Exception" in sortie or not sortie.strip():
+                sortie = _adb_bloquant("-s", serie, "shell", "am", "start", "-a",
+                                       "android.intent.action.DIAL", "-d", f"tel:{numero}")
+                if "Error" in sortie or "Exception" in sortie or not sortie.strip():
+                    return serie, sortie.strip() or "pas de réponse du téléphone"
+                time.sleep(1.5)
+                _adb_bloquant("-s", serie, "shell", "input", "keyevent", "KEYCODE_CALL", delai=5)
+            return serie, None
+
+        def _appel_lance(resultat):
+            if isinstance(resultat, Exception) or resultat[1]:
+                detail = resultat if isinstance(resultat, Exception) else resultat[1]
+                self.lbl_statut.setStyleSheet("color: #e08080;")
+                self.lbl_statut.setText(f"L'appel n'a pas pu être lancé : {detail}")
+                return
+            self.lbl_statut.setStyleSheet("color: #80c080;")
+            self.lbl_statut.setText(f"Appel en cours : {nom or affiche} ({affiche}).")
+            self._boite_appel(resultat[0], nom or affiche, affiche)
+
+        def _connecte(serie):
+            self.lbl_statut.setText(f"Appel de {nom or affiche} ({affiche})…")
+            self._lancer_fil_telephone(lambda: _lancer_appel(serie), _appel_lance)
+
+        connecter_telephone(self, _connecte, si_echec=_echec)
+
+    def _boite_appel(self, serie, qui, numero):
+        """Petite fenêtre non bloquante pendant l'appel : Raccrocher envoie
+        la touche « fin d'appel » au téléphone. Un bouton Haut-parleur a été
+        essayé puis retiré le 10/11/2026 (décidé avec l'auteur) : Android
+        n'a pas de commande pour cela, il fallait toucher le bouton de
+        l'écran d'appel, dont le nom change selon la marque (introuvable
+        sur un Samsung S20+). Pas fiable sur tous les téléphones."""
+        boite = QDialog(self)
+        boite.setWindowTitle("Appel")
+        boite.setStyleSheet("QDialog { background-color: #2a2a2a; } "
+                            "QLabel { color: white; font-family: Verdana; font-size: 13px; }"
+                            + STYLE_BOUTON)
+        boite.setWindowModality(Qt.NonModal)
+        boite.setAttribute(Qt.WA_DeleteOnClose, True)
+        texte = QLabel(f"Appel lancé vers {qui}\n{numero}\n\n"
+                       "Parlez dans le téléphone.")
+        b_raccrocher = QPushButton("  Raccrocher  ")
+        b_fermer = QPushButton("  Fermer  ")
+        for b in (b_raccrocher, b_fermer):
+            b.setAutoDefault(False)
+        boutons = QHBoxLayout()
+        boutons.addStretch()
+        boutons.addWidget(b_raccrocher)
+        boutons.addWidget(b_fermer)
+        disposition = QVBoxLayout(boite)
+        disposition.addWidget(texte)
+        disposition.addLayout(boutons)
+
+        def _raccrocher():
+            _threading.Thread(target=lambda: _adb_bloquant(
+                "-s", serie, "shell", "input", "keyevent", "KEYCODE_ENDCALL", delai=5),
+                daemon=True).start()
+            self.lbl_statut.setStyleSheet("color: #e0a050;")
+            self.lbl_statut.setText(f"Appel vers {qui} terminé.")
+            boite.close()
+
+        b_raccrocher.clicked.connect(_raccrocher)
+        b_fermer.clicked.connect(boite.close)
+        boite.show()
 
     def _ajouter_au_champ_cible(self, libelle, ids=None):
         """Ajoute les contacts sélectionnés (ou ids, pour « … à tous ») au
@@ -30162,7 +30285,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 10/11/2026 00h48")
+        self.setWindowTitle("COURRIER ADRIEN — 10/11/2026 20h09")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35520,7 +35643,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 10/11/2026 à 00h48")
+        lbl_version = QLabel("Version du 10/11/2026 à 20h09")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
