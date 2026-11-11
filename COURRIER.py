@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-10 21h08"
+VERSION_BUILD = "2026-11-11 18h33"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -943,6 +943,47 @@ _TYPES_FICHIER_LOCAL_AUTORISES = frozenset({
     "ResourceTypeFontResource", "ResourceTypeMedia", "ResourceTypeFavicon",
 })
 
+def url_fichier_reseau(url):
+    """Vrai pour une adresse file:// qui désigne un AUTRE ordinateur
+    (file://serveur/..., file:////serveur/..., \\\\serveur\\...).
+    Sécurité (11/11/2026) : charger une telle adresse, même une simple
+    image de mail, fait envoyer par Windows l'identité de la session à ce
+    serveur (fuite NTLM, sans aucun clic). Un mail légitime n'en contient
+    jamais ; les fichiers du disque local (cache, icônes, aperçus) restent
+    autorisés. url : QUrl ou texte."""
+    try:
+        if not hasattr(url, "scheme"):
+            from PySide6.QtCore import QUrl as _QUrl
+            texte = str(url or "").strip()
+            if texte.startswith(("\\\\", "//")):
+                return True
+            url = _QUrl(texte)
+        if url.scheme().lower() != "file":
+            return False
+        hote = url.host().lower()
+        chemin = url.path()
+        return (hote not in ("", "localhost") or chemin.startswith(("//", "\\\\", "/\\"))
+                or url.toString().lower().startswith(("file:\\\\", "file:/\\")))
+    except Exception:
+        return True
+
+
+# Protocoles qu'un lien de mail ou de page web peut ouvrir DANS COURRIER.
+# Les autres (msteams:, zoommtg:, tel:, skype:...) ouvrent un programme de
+# l'ordinateur : demandé le 11/11/2026, une confirmation est demandée avant.
+PROTOCOLES_NAVIGATION_INTERNES = frozenset({
+    "http", "https", "file", "data", "blob", "about", "qrc", "javascript",
+})
+# Protocoles connus pour être détournés par des pirates (outil de
+# diagnostic « Follina », recherche Windows vers un partage piégé,
+# lanceurs Office, aide Windows...) : refusés sans même demander.
+PROTOCOLES_LIEN_REFUSES = frozenset({
+    "ms-msdt", "search-ms", "search", "ms-officecmd", "ms-cxh", "ms-cxh-full",
+    "ms-appinstaller", "ms-its", "mk", "its", "hcp", "mhtml", "vbscript",
+    "jar", "res", "shell", "ms-diagnostics", "ms-help",
+})
+
+
 def installer_protections_web(profil):
     """Installe sur un profil QtWebEngine le bloqueur de pub réseau et les
     ascenseurs rouges (valables pour toutes les pages chargées avec ce
@@ -954,6 +995,12 @@ def installer_protections_web(profil):
         def interceptRequest(self, info):
             try:
                 url = info.requestUrl()
+                # Sécurité (11/11/2026) : aucune ressource file:// venant
+                # d'un autre ordinateur (fuite NTLM), quel que soit son type.
+                if url_fichier_reseau(url):
+                    print(f"[SECURITE] Adresse réseau file:// bloquée : {url.toString()[:200]}")
+                    info.block(True)
+                    return
                 # Sécurité (09/10/2026) : un mail est affiché depuis un
                 # fichier local (Apercu\), et LocalContentCanAccessFileUrls
                 # doit rester actif pour les images du cache disque. Sans ce
@@ -982,6 +1029,12 @@ def installer_protections_web(profil):
     intercepteur = _IntercepteurPub(profil)
     profil.setUrlRequestInterceptor(intercepteur)
     profil._intercepteur_pub = intercepteur
+    try:
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        profil.settings().setUnknownUrlSchemePolicy(
+            QWebEngineSettings.UnknownUrlSchemePolicy.DisallowUnknownUrlSchemes)
+    except Exception as e:
+        print(f"[SECURITE] Politique des protocoles inconnus non appliquée : {e}")
 
     script = QWebEngineScript()
     script.setName("ascenseur_web")
@@ -30318,7 +30371,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 10/11/2026 21h08")
+        self.setWindowTitle("COURRIER ADRIEN — 11/11/2026 18h33")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31978,8 +32031,22 @@ class ClientMail(QMainWindow):
                 # être "le" programme mail par défaut pour ce cas d'usage
                 # précis (le plus courant : cliquer un lien mail en lisant
                 # un message dans COURRIER lui-même).
-                if url.scheme().lower() == "mailto":
+                schema = url.scheme().lower()
+                if schema == "mailto":
                     fenetre_principale.ouvrir_mailto(url.toString())
+                    return False
+                # Sécurité (11/11/2026) : fichier sur un autre ordinateur
+                # (fuite NTLM) et protocoles qui lancent un programme de
+                # l'ordinateur (msteams:, zoommtg:, mais aussi ms-msdt: de
+                # l'attaque « Follina ») — voir _proposer_lien_programme.
+                if url_fichier_reseau(url):
+                    print(f"[SECURITE] Lien file:// réseau refusé : {url.toString()[:200]}")
+                    return False
+                if schema and schema not in PROTOCOLES_NAVIGATION_INTERNES:
+                    if nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked:
+                        QTimer.singleShot(0, lambda u=url.toString(): fenetre_principale._proposer_lien_programme(u))
+                    else:
+                        print(f"[SECURITE] Ouverture automatique refusée ({schema}:) : {url.toString()[:200]}")
                     return False
                 hote = url.host().lower()
                 if any(hote == d or hote.endswith("." + d)
@@ -32017,6 +32084,15 @@ class ClientMail(QMainWindow):
             self._page_lecture = PageLecture(PROFIL_WEB_NOMME, self.webview)
         else:
             self._page_lecture = PageLecture(self.webview)
+        # Le profil refuse les protocoles inconnus (installer_protections_web) ;
+        # ce panneau les laisse arriver jusqu'à acceptNavigationRequest au
+        # clic, pour demander confirmation (liens Teams, Zoom..., 11/11/2026).
+        try:
+            from PySide6.QtWebEngineCore import QWebEngineSettings as _QWES
+            self._page_lecture.settings().setUnknownUrlSchemePolicy(
+                _QWES.UnknownUrlSchemePolicy.AllowUnknownUrlSchemesFromUserInteraction)
+        except Exception:
+            pass
         franciser_menu_web(self._page_lecture)
         # Contournement Service Worker franceinfo.fr (10/08/2026) : enquête
         # complète via débogage distant QtWebEngine (QTWEBENGINE_REMOTE_
@@ -35676,7 +35752,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 10/11/2026 à 21h08")
+        lbl_version = QLabel("Version du 11/11/2026 à 18h33")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -46795,72 +46871,6 @@ __JS_TRADUCTION__
         except Exception:
             pass
 
-    def _serveur_http_local(self, chemin_fichier):
-        """Démarre un serveur HTTP local (une seule fois) et retourne l'URL du fichier."""
-        import http.server, threading, socket
-
-        if not hasattr(self, '_http_port'):
-            s = socket.socket()
-            s.bind(('127.0.0.1', 0))
-            port = s.getsockname()[1]
-            s.close()
-
-            class MailHandler(http.server.BaseHTTPRequestHandler):
-                def do_GET(self):
-                    import tempfile, os, urllib.request, urllib.parse
-                    path = self.path.lstrip('/')
-
-                    # Proxy d'images : /img?url=<encoded_url>
-                    if path.startswith('img?url='):
-                        url_image = urllib.parse.unquote(path[8:])
-                        try:
-                            req = urllib.request.Request(url_image, headers={
-                                'User-Agent': 'Mozilla/5.0'
-                            })
-                            with urllib.request.urlopen(req, timeout=10, context=CONTEXTE_SSL) as r:
-                                data = r.read()
-                                ct = r.headers.get('Content-Type', 'image/jpeg')
-                            self.send_response(200)
-                            self.send_header('Content-Type', ct)
-                            self.send_header('Access-Control-Allow-Origin', '*')
-                            self.end_headers()
-                            self.wfile.write(data)
-                        except Exception:
-                            self.send_response(404)
-                            self.end_headers()
-                        return
-
-                    # Servir fichier HTML local
-                    chemin = os.path.join(tempfile.gettempdir(), path)
-                    try:
-                        with open(chemin, 'rb') as f:
-                            data = f.read()
-                        self.send_response(200)
-                        self.send_header('Content-Type', 'text/html; charset=utf-8')
-                        self.send_header('Access-Control-Allow-Origin', '*')
-                        self.end_headers()
-                        self.wfile.write(data)
-                    except Exception:
-                        self.send_response(404)
-                        self.end_headers()
-
-                def log_message(self, *args):
-                    pass
-
-                def log_error(self, *args):
-                    pass
-
-                def handle_error(self, request, client_address):
-                    pass
-
-            srv = http.server.HTTPServer(('127.0.0.1', port), MailHandler)
-            t = threading.Thread(target=srv.serve_forever, daemon=True)
-            t.start()
-            self._http_port = port
-
-        nom = os.path.basename(chemin_fichier)
-        return f"http://127.0.0.1:{self._http_port}/{nom}"
-
     def _nettoyer_dossier_apercu(self):
         """Vide DOSSIER_APERCU au démarrage. Ce dossier n'est utilisé que par
         COURRIER pour ses fichiers d'aperçu temporaires (corps de mail,
@@ -46896,19 +46906,6 @@ __JS_TRADUCTION__
         # sélection automatique retombait sur ce même mail → clé identique →
         # affichage abandonné, panneau blanc jusqu'à un clic ailleurs.
         self._cle_cache_html_affichee = None
-
-    def _ouvrir_dans_navigateur(self, url):
-        """Ouvre un lien cliqué dans le corps du mail avec le navigateur par
-        défaut de Windows (boutons d'action de newsletter, liens de
-        redirection, pages web en général), plutôt que de naviguer dans
-        l'aperçu CEF intégré ou de tenter un téléchargement."""
-        try:
-            os.startfile(url)
-            self.label_statut.setText("  Lien ouvert dans le navigateur")
-            QTimer.singleShot(4000, self._maj_statut)
-        except Exception as e:
-            self.label_statut.setText(f"  Impossible d'ouvrir le lien : {e}")
-            QTimer.singleShot(4000, self._maj_statut)
 
     def _sur_clic_adresse_dans_bandeau(self, adresse, nom):
         """Clic sur une adresse dans le bandeau De/À/Cc/Cci du panneau de
@@ -48832,6 +48829,45 @@ __JS_TRADUCTION__
             self._ouvrir_url_externe(url)
         self.btn_page_bloquee_url.hide()
 
+    def _proposer_lien_programme(self, url):
+        """Lien cliqué dans le panneau de lecture qui veut ouvrir un programme
+        de l'ordinateur (msteams:, zoommtg:, tel:...) : demande confirmation
+        (11/11/2026, demandé par l'utilisateur, qui reçoit souvent des
+        invitations Teams). Les protocoles détournés par les pirates
+        (PROTOCOLES_LIEN_REFUSES) sont refusés sans question."""
+        from PySide6.QtWidgets import QMessageBox
+        schema = (url.split(":", 1)[0] if ":" in url else "").lower()
+        if getattr(self, "_question_lien_ouverte", False):
+            return
+        if schema in PROTOCOLES_LIEN_REFUSES or url_fichier_reseau(url):
+            print(f"[SECURITE] Lien dangereux refusé ({schema}:) : {url[:200]}")
+            QMessageBox.warning(
+                self, "Lien bloqué",
+                f"Ce lien a été bloqué par sécurité.\n\nIl utilise le protocole « {schema} », "
+                f"connu pour être détourné par des pirates pour lancer des programmes "
+                f"à votre insu.\n\nAdresse : {url[:300]}")
+            return
+        self._question_lien_ouverte = True
+        try:
+            boite = QMessageBox(self)
+            boite.setIcon(QMessageBox.Icon.Question)
+            boite.setWindowTitle("Ouvrir un programme ?")
+            boite.setText(f"Ce lien veut ouvrir un programme de votre ordinateur "
+                          f"(protocole « {schema} »).\n\nL'ouvrir ?")
+            boite.setInformativeText(f"Adresse : {url[:300]}{'…' if len(url) > 300 else ''}")
+            oui = boite.addButton("Ouvrir", QMessageBox.ButtonRole.AcceptRole)
+            non = boite.addButton("Annuler", QMessageBox.ButtonRole.RejectRole)
+            boite.setDefaultButton(non)
+            boite.exec()
+            if boite.clickedButton() is oui:
+                try:
+                    os.startfile(url)
+                except Exception as e:
+                    self.label_statut.setText(f"  Impossible d'ouvrir le lien : {e}")
+                    QTimer.singleShot(4000, self._maj_statut)
+        finally:
+            self._question_lien_ouverte = False
+
     def _ouvrir_url_externe(self, url):
         """Ouvre une URL dans le navigateur par défaut de Windows.
         Corrigé le 03/08/2026 (bug remonté par l'utilisateur) : privilégiait
@@ -48839,6 +48875,13 @@ __JS_TRADUCTION__
         savoir si c'était vraiment le navigateur par défaut de la machine —
         os.startfile() délègue entièrement ce choix à Windows, qui ouvre
         le navigateur réellement configuré comme tel."""
+        # Sécurité (11/11/2026) : seulement des pages web ou des fichiers
+        # locaux ; un autre protocole passe par la confirmation.
+        schema = re.match(r"([A-Za-z][A-Za-z0-9+.-]*):", url or "")
+        schema = schema.group(1).lower() if schema and len(schema.group(1)) > 1 else ""
+        if url_fichier_reseau(url) or (schema and schema not in ("http", "https", "file")):
+            self._proposer_lien_programme(url)
+            return
         try:
             os.startfile(url)
         except Exception:
