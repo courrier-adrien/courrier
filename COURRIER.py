@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-11 18h33"
+VERSION_BUILD = "2026-11-11 23h37"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -3781,6 +3781,175 @@ def _marquer_bouton_actif(bouton, actif):
     bouton.setProperty("actif", actif)
     bouton.style().unpolish(bouton)
     bouton.style().polish(bouton)
+
+
+# ── Mode d'affichage SIMPLE / EXPERT / PERSONNALISÉ (11/11/2026, demandé) ──
+# Le bouton MODE (premier en haut à gauche) ouvre DialogueModeAffichage.
+# SIMPLE cache les boutons avancés pour les débutants, EXPERT affiche tout,
+# PERSONNALISÉ laisse cocher bouton par bouton. Seul l'affichage change :
+# les fonctions restent les mêmes. Un bouton caché mais en activité
+# (fenêtre ouverte, MAILING lancé, écran du téléphone affiché) reste
+# visible tant que dure l'activité. Pas de glisser-déposer (demandé).
+FICHIER_MODE_AFFICHAGE = os.path.join(DOSSIER_APP, "mode_affichage.json")
+
+# (clé, libellé, explication) — dans l'ordre des barres
+BOUTONS_MODULABLES = [
+    ("controle", "CONTRÔLE",     "Poste de contrôle : ce que fait COURRIER, compte par compte"),
+    ("macros",   "MACROS",       "Actions automatiques enregistrées, avec leur bouton en bas"),
+    ("modeles",  "MODÈLES",      "Textes tout prêts à reprendre dans un nouveau message"),
+    ("sons",     "SONS",         "Son joué à l'arrivée d'un mail, compte par compte"),
+    ("mailing",  "MAILING",      "Envoyer un même message à beaucoup de destinataires"),
+    ("rss",      "RSS to Email", "Recevoir les nouveautés de sites internet sous forme de mails"),
+    ("tel",      "TÉL",          "Afficher et piloter l'écran du téléphone relié"),
+    ("sms",      "SMS",          "Envoyer des SMS par le téléphone relié"),
+    ("console",  "CONSOLE",      "Fenêtre technique de diagnostic (barre du bas)"),
+]
+MODES_AFFICHAGE = {"simple": "SIMPLE", "expert": "EXPERT", "perso": "PERSO"}
+
+
+def charger_mode_affichage():
+    """{"mode": "simple"|"expert"|"perso", "caches": [clé, ...]}. Les
+    boutons cachés de SIMPLE et EXPERT sont fixes ; "caches" ne sert qu'à
+    PERSONNALISÉ. Par défaut EXPERT : rien ne change pour qui a déjà
+    COURRIER."""
+    config = {"mode": "expert", "caches": []}
+    try:
+        with open(FICHIER_MODE_AFFICHAGE, encoding="utf-8") as f:
+            lu = json.load(f)
+        if lu.get("mode") in MODES_AFFICHAGE:
+            config["mode"] = lu["mode"]
+        config["caches"] = [c for c in lu.get("caches", [])
+                            if any(c == b[0] for b in BOUTONS_MODULABLES)]
+    except Exception:
+        pass
+    return config
+
+
+def sauver_mode_affichage(config):
+    try:
+        with open(FICHIER_MODE_AFFICHAGE, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[MODE] Enregistrement impossible : {e}")
+
+
+def boutons_caches_du_mode(config):
+    """Ensemble des clés de BOUTONS_MODULABLES à cacher."""
+    if config["mode"] == "simple":
+        return {b[0] for b in BOUTONS_MODULABLES}
+    if config["mode"] == "perso":
+        return set(config["caches"])
+    return set()
+
+
+class DialogueModeAffichage(QDialog):
+    """Fenêtre du bouton MODE : trois gros boutons SIMPLE / EXPERT /
+    PERSONNALISÉ, puis une case par bouton modulable. Tout s'applique
+    aussitôt (appliquer(config)) : on voit la barre changer derrière.
+    Cocher ou décocher une case passe d'office en PERSONNALISÉ."""
+
+    def __init__(self, parent, appliquer):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QCheckBox
+        self._appliquer = appliquer
+        self._config = charger_mode_affichage()
+        self.setWindowTitle("Mode d'affichage")
+        self.setStyleSheet(
+            "QDialog { background-color: #2a2a2a; } "
+            "QLabel { color: white; font-family: Verdana; font-size: 12px; } "
+            "QCheckBox { color: white; font-family: Verdana; font-size: 12px; font-weight: bold; spacing: 8px; } "
+            "QCheckBox::indicator { width: 14px; height: 14px; border: 2px solid #cccccc; "
+            "background-color: #2a2a2a; } "
+            "QCheckBox::indicator:checked { background-color: #A52A2A; border-color: white; } "
+            + STYLE_BOUTON)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+
+        intro = QLabel("Choisissez les boutons affichés. Seul l'affichage change : "
+                       "rien n'est supprimé, et vous pouvez revenir en arrière à tout moment.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addSpacing(4)
+
+        # Trois choix : le choix en cours est en blé (sélectionné, trio de
+        # couleurs de COURRIER), les autres dans le rouge habituel
+        ligne_modes = QHBoxLayout()
+        ligne_modes.setSpacing(8)
+        self._boutons_modes = {}
+        for cle, libelle, bulle in [
+            ("simple", "SIMPLE", "Pour débuter : les boutons avancés sont cachés"),
+            ("expert", "EXPERT", "Tous les boutons sont affichés"),
+            ("perso",  "PERSONNALISÉ", "Vous cochez vous-même les boutons à afficher"),
+        ]:
+            b = QPushButton(libelle)
+            b.setToolTip(bulle)
+            b.setMinimumHeight(34)
+            b.clicked.connect(lambda _=False, m=cle: self._choisir_mode(m))
+            ligne_modes.addWidget(b, 1)
+            self._boutons_modes[cle] = b
+        layout.addLayout(ligne_modes)
+        layout.addSpacing(6)
+
+        layout.addWidget(QLabel("Boutons affichés (cochés) :"))
+        self._cases = {}
+        for cle, libelle, explication in BOUTONS_MODULABLES:
+            case = QCheckBox(libelle)
+            case.setMinimumHeight(case.sizeHint().height())
+            case.toggled.connect(self._case_changee)
+            layout.addWidget(case)
+            detail = QLabel(explication)
+            detail.setStyleSheet("color: #aaaaaa; font-size: 11px; padding-left: 30px;")
+            detail.setWordWrap(True)
+            layout.addWidget(detail)
+            self._cases[cle] = case
+
+        note = QLabel("Les autres boutons (NOUVEAU, RÉPONDRE, ADRESSES…) restent toujours affichés.")
+        note.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+        note.setWordWrap(True)
+        layout.addSpacing(4)
+        layout.addWidget(note)
+
+        ligne_bas = QHBoxLayout()
+        ligne_bas.addStretch(1)
+        fermer = QPushButton("FERMER")
+        fermer.clicked.connect(self.accept)
+        ligne_bas.addWidget(fermer)
+        layout.addLayout(ligne_bas)
+
+        self._maj_affichage()
+        self.setMinimumWidth(460)
+
+    def _maj_affichage(self):
+        caches = boutons_caches_du_mode(self._config)
+        for cle, case in self._cases.items():
+            case.blockSignals(True)
+            case.setChecked(cle not in caches)
+            case.blockSignals(False)
+        for cle, b in self._boutons_modes.items():
+            if cle == self._config["mode"]:
+                b.setStyleSheet("QPushButton { background-color: #F5DEB3; color: black; "
+                                "border-bottom-color: #8a6510; border-right-color: #8a6510; }")
+            else:
+                b.setStyleSheet("")
+
+    def _enregistrer(self):
+        sauver_mode_affichage(self._config)
+        self._appliquer(self._config)
+        self._maj_affichage()
+
+    def _choisir_mode(self, mode):
+        if mode == "perso" and self._config["mode"] != "perso":
+            # On part de ce qui est affiché maintenant
+            self._config["caches"] = sorted(boutons_caches_du_mode(self._config))
+        self._config["mode"] = mode
+        self._enregistrer()
+
+    def _case_changee(self, _coche):
+        self._config["mode"] = "perso"
+        self._config["caches"] = [cle for cle, case in self._cases.items()
+                                  if not case.isChecked()]
+        self._enregistrer()
 
 def charger_abonnements_rss():
     """Retourne {"flux": [{"id", "url", "nom", "compte", "items_vus": [str, ...]}, ...]}"""
@@ -30371,7 +30540,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 11/11/2026 18h33")
+        self.setWindowTitle("COURRIER ADRIEN — 11/11/2026 23h37")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31086,6 +31255,19 @@ class ClientMail(QMainWindow):
             }
         """ + STYLE_BOUTON_HAUT_ACTIF
 
+        # MODE tout à gauche, avant CONTRÔLE (11/11/2026, demandé) : choix
+        # SIMPLE / EXPERT / PERSONNALISÉ des boutons affichés (voir
+        # DialogueModeAffichage). Son libellé dit le mode en cours.
+        self.btn_mode = QPushButton("MODE")
+        self.btn_mode.setStyleSheet(STYLE_BOUTON_HAUT)
+        self.btn_mode.setToolTip("Choisir les boutons affichés : SIMPLE, EXPERT ou PERSONNALISÉ")
+        self.btn_mode.clicked.connect(self._suivre_fenetre(self.btn_mode, self.ouvrir_mode_affichage))
+        layout_haut.addWidget(self.btn_mode)
+        layout_haut.addSpacing(3)
+        # clé de BOUTONS_MODULABLES → widgets à cacher ensemble (le premier
+        # est le bouton qui peut rester visible tant qu'il est actif)
+        self._widgets_modulables = {}
+
         # Groupe gauche : outils — CONTRÔLE tout à gauche (10/10/2026, demandé)
         btn_controle = QPushButton("CONTRÔLE")
         btn_controle.setStyleSheet(STYLE_BOUTON_HAUT)
@@ -31349,6 +31531,19 @@ class ClientMail(QMainWindow):
         btn_supprimer_barre.setStyleSheet(STYLE_BOUTON_HAUT)
         btn_supprimer_barre.clicked.connect(self.supprimer_message)
         layout_haut.addWidget(btn_supprimer_barre)
+
+        # Boutons que le mode d'affichage peut cacher (CONSOLE, dans la
+        # barre du bas, est ajouté à sa création)
+        self._widgets_modulables.update({
+            "controle": [btn_controle],
+            "macros":   [btn_macros],
+            "modeles":  [btn_modeles],
+            "sons":     [btn_sons],
+            "mailing":  [btn_mailing],
+            "rss":      [btn_rss],
+            "tel":      [btn_tel, btn_tel_menu],
+            "sms":      [btn_sms],
+        })
 
         # Barre adaptée à la largeur (10/10/2026, affichage Windows 125 % :
         # les boutons ne tenaient plus et Qt coupait leur texte, ex.
@@ -33226,8 +33421,12 @@ if (typeof module === 'object') {
             except Exception:
                 pass
         btn_console.clicked.connect(_basculer_console2)
-        layout_statut.addWidget(_tiret())
+        tiret_console = _tiret()
+        layout_statut.addWidget(tiret_console)
         layout_statut.addWidget(btn_console)
+        # Caché en mode SIMPLE, avec son tiret (voir DialogueModeAffichage)
+        self._widgets_modulables["console"] = [btn_console, tiret_console]
+        self._appliquer_mode_affichage()
 
         # Bouton À PROPOS (16/08/2026, demandé — écran affichant la licence
         # du logiciel, placé ici en bas à droite plutôt que dans la barre
@@ -35592,6 +35791,39 @@ if (typeof module === 'object') {
 
         for btn, actif in etat.items():
             _marquer_bouton_actif(btn, actif)
+        # Un bouton caché qui vient de s'allumer reparaît, et disparaît de
+        # nouveau une fois éteint
+        self._appliquer_mode_affichage()
+
+    def ouvrir_mode_affichage(self):
+        """Bouton MODE : fenêtre SIMPLE / EXPERT / PERSONNALISÉ."""
+        DialogueModeAffichage(self, self._appliquer_mode_affichage).exec()
+
+    def _appliquer_mode_affichage(self, config=None):
+        """Cache ou affiche les boutons de BOUTONS_MODULABLES selon le mode
+        (mode_affichage.json). Un bouton caché reste visible s'il est
+        orange par activité (fenêtre ouverte, MAILING lancé, écran du
+        téléphone...), mais pas pour un état permanent lu dans un fichier
+        (RSS to Email orange dès qu'il y a des flux abonnés)."""
+        if not hasattr(self, "_widgets_modulables"):
+            return
+        if config is not None:
+            self._config_mode_affichage = dict(config)
+        elif not hasattr(self, "_config_mode_affichage"):
+            self._config_mode_affichage = charger_mode_affichage()
+        config = self._config_mode_affichage
+        caches = boutons_caches_du_mode(config)
+        etat_fichiers = getattr(self, "_etat_fichiers_boutons", {})
+        for cle, widgets in self._widgets_modulables.items():
+            principal = widgets[0]
+            en_activite = bool(principal.property("actif")) and not etat_fichiers.get(principal)
+            visible = cle not in caches or en_activite
+            for w in widgets:
+                if w.isHidden() == visible:
+                    w.setVisible(visible)
+        libelle = "MODE " + MODES_AFFICHAGE[config["mode"]]
+        if self.btn_mode.text() != libelle:
+            self.btn_mode.setText(libelle)
 
     def _verifier_rss_arriere_plan(self):
         """Déclenchée par le minuteur toutes les 30 minutes (18/08/2026) —
@@ -35752,7 +35984,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 11/11/2026 à 18h33")
+        lbl_version = QLabel("Version du 11/11/2026 à 23h37")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 

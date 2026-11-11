@@ -195,6 +195,7 @@
   <h3>Barre du haut, à gauche : les outils</h3>
   <table>
     <tr><th>Bouton</th><th>Rôle</th></tr>
+    <tr><td><span class="btn">MODE EXPERT</span></td><td>Choix des boutons affichés : SIMPLE, EXPERT ou PERSONNALISÉ (voir <a href="#mode">plus bas</a>).</td></tr>
     <tr><td><span class="btn">CONTRÔLE</span></td><td>Poste de contrôle : ce que fait le logiciel, compte par compte (<a href="#controle">section 24</a>).</td></tr>
     <tr><td><span class="btn">COMPTES</span></td><td>Ajouter, modifier ou supprimer un compte (<a href="#saisie-comptes">section 4</a>).</td></tr>
     <tr><td><span class="btn">SPAM</span></td><td>Liste des expéditeurs indésirables (<a href="#spam">section 15</a>).</td></tr>
@@ -209,13 +210,28 @@
     <tr><td><span class="btn">INTERNET</span></td><td>Ouvre le mail affiché dans un navigateur installé sur l'ordinateur.</td></tr>
     <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span></td><td>Recherche, puis retour à l'affichage normal (<a href="#recherche">section 16</a>).</td></tr>
   </table>
+  <h3 id="mode">Mode SIMPLE, EXPERT ou PERSONNALISÉ</h3>
+  <p>Le premier bouton en haut à gauche choisit les boutons affichés. Son nom indique le mode en cours : <span class="btn">MODE SIMPLE</span>, <span class="btn">MODE EXPERT</span> ou <span class="btn">MODE PERSO</span>. Un clic ouvre une petite fenêtre avec trois choix :</p>
+  <table>
+    <tr><th>Mode</th><th>Ce qui est affiché</th></tr>
+    <tr><td><span class="btn">SIMPLE</span></td><td>Pour débuter : les boutons avancés sont cachés. Il s'agit de <span class="btn">CONTRÔLE</span> <span class="btn">MACROS</span> <span class="btn">MODÈLES</span> <span class="btn">SONS</span> <span class="btn">MAILING</span> <span class="btn">RSS to Email</span> <span class="btn">TÉL</span> <span class="btn">⚙</span> <span class="btn">SMS</span> en haut, et de <span class="btn">CONSOLE</span> en bas.</td></tr>
+    <tr><td><span class="btn">EXPERT</span></td><td>Tous les boutons. C'est le réglage de départ.</td></tr>
+    <tr><td><span class="btn">PERSONNALISÉ</span></td><td>Vous cochez vous-même, bouton par bouton, ceux que vous voulez voir.</td></tr>
+  </table>
+  <ul>
+    <li>Le changement est immédiat : la barre change derrière la fenêtre, sans valider ni redémarrer.</li>
+    <li>Cocher ou décocher une case passe en PERSONNALISÉ, en partant de ce qui était affiché. Par exemple, partez de SIMPLE et cochez seulement <span class="btn">MAILING</span>.</li>
+    <li>Seul l'affichage change : rien n'est supprimé, et vos réglages, macros, modèles et abonnements continuent de fonctionner.</li>
+    <li>Un bouton caché réapparaît tant que ce qu'il commande est en cours (sa fenêtre ouverte, MAILING lancé, écran du téléphone affiché…), puis disparaît de nouveau.</li>
+    <li>Les autres boutons (<span class="btn">COMPTES</span> <span class="btn">ADRESSES</span> <span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span>…) restent toujours affichés.</li>
+  </ul>
   <h3>Barre du haut, à droite : les actions sur les mails</h3>
   <p><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span> (renvoie le mail à l'identique) et <span class="btn">SUPPRIMER</span> (supprime le ou les mails sélectionnés).</p>
   <h3>Boutons en orange : ce qui est en cours</h3>
   <p>Un bouton passe de rouge à orange quand ce qu'il commande est en cours. Par exemple <span class="btn actif">TODO</span> au lieu de <span class="btn">TODO</span>. D'un coup d'œil, vous voyez ce qui est en service :</p>
   <table>
     <tr><th>Bouton</th><th>Orange quand…</th></tr>
-    <tr><td><span class="btn">CONTRÔLE</span> <span class="btn">COMPTES</span> <span class="btn">SPAM</span> <span class="btn">MACROS</span> <span class="btn">MODÈLES</span> <span class="btn">SONS</span> <span class="btn">ADRESSES</span></td><td>sa fenêtre est ouverte.</td></tr>
+    <tr><td><span class="btn">MODE</span> <span class="btn">CONTRÔLE</span> <span class="btn">COMPTES</span> <span class="btn">SPAM</span> <span class="btn">MACROS</span> <span class="btn">MODÈLES</span> <span class="btn">SONS</span> <span class="btn">ADRESSES</span></td><td>sa fenêtre est ouverte.</td></tr>
     <tr><td><span class="btn">MAILING</span></td><td>MAILING, lancé par ce bouton, est ouvert.</td></tr>
     <tr><td><span class="btn">RSS to Email</span></td><td>au moins un flux RSS est abonné, ou sa fenêtre est ouverte.</td></tr>
     <tr><td><span class="btn">TÉL</span></td><td>l'écran du téléphone est affiché sur l'ordinateur.</td></tr>
@@ -686,6 +702,7 @@
   <h2>24. CONTRÔLE et CONSOLE</h2>
   <p><span class="btn">CONTRÔLE</span> montre ce que fait le logiciel, compte par compte : relèves en cours et à venir, nombre de mails et de dossiers, images qui n'ont pas pu être téléchargées. La liste de ces images peut être nettoyée (<b>Supprimer la sélection</b>, ou touche <kbd>Suppr</kbd>).</p>
   <p><span class="btn">CONSOLE</span> affiche le journal technique en direct. Il est utile pour comprendre un problème ou le signaler.</p>
+  <p>En mode SIMPLE, ces deux boutons sont cachés. Si on vous les demande pour un dépannage, passez en <span class="btn">EXPERT</span> par le bouton MODE (<a href="#mode">section 3</a>).</p>
 </section>
 
 <section id="raccourcis">
