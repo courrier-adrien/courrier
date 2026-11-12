@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-11 23h37"
+VERSION_BUILD = "2026-11-12 01h05"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -3872,8 +3872,9 @@ class DialogueModeAffichage(QDialog):
         layout.addWidget(intro)
         layout.addSpacing(4)
 
-        # Trois choix : le choix en cours est en blé (sélectionné, trio de
-        # couleurs de COURRIER), les autres dans le rouge habituel
+        # Trois choix : le choix en cours en or #DAA520, comme les boutons
+        # orange de la barre du haut (11/11/2026, demandé ; d'abord en blé),
+        # les autres dans le rouge habituel
         ligne_modes = QHBoxLayout()
         ligne_modes.setSpacing(8)
         self._boutons_modes = {}
@@ -3928,7 +3929,7 @@ class DialogueModeAffichage(QDialog):
             case.blockSignals(False)
         for cle, b in self._boutons_modes.items():
             if cle == self._config["mode"]:
-                b.setStyleSheet("QPushButton { background-color: #F5DEB3; color: black; "
+                b.setStyleSheet("QPushButton { background-color: #DAA520; color: black; "
                                 "border-bottom-color: #8a6510; border-right-color: #8a6510; }")
             else:
                 b.setStyleSheet("")
@@ -19775,6 +19776,149 @@ class DialogueRenommerDossierImap(QDialog):
         _proteger_thread_dialogue(getattr(self, '_renommeur', None))
         super().done(r)
 
+def saisie_heure_auto(champ):
+    """Champ d'heure qui pose les deux-points tout seul (12/11/2026,
+    demandé) : taper 0003 donne 00:03, 920 donne 9:20. Les deux premiers
+    chiffres reçoivent « : » dès qu'ils font une heure (00 à 23) ; un
+    point tapé devient « : ». Effacer le « : » ne le remet pas (on ne
+    complète qu'en avançant). Utilisé par la fenêtre TODO et le REPORT
+    d'un rappel."""
+    import re as _re
+    champ.setMaxLength(5)
+    champ.setPlaceholderText("00:00")
+    precedent = [champ.text()]
+
+    def _corriger(texte):
+        avance = len(texte) > len(precedent[0])
+        t = texte.replace(".", ":").replace(",", ":").replace("h", ":").replace("H", ":")
+        # « 12 » reçoit déjà « : » : un séparateur tapé ensuite ne double pas
+        t = _re.sub(r":+", ":", t)
+        if _re.fullmatch(r"\d{4}", t):
+            t = t[:2] + ":" + t[2:]
+        elif _re.fullmatch(r"\d{3}", t) and int(t[:2]) > 23:
+            t = t[:1] + ":" + t[1:]
+        elif avance and _re.fullmatch(r"\d{2}", t) and int(t) <= 23:
+            t += ":"
+        if t != texte:
+            champ.setText(t)
+        precedent[0] = t
+
+    champ.textEdited.connect(_corriger)
+
+
+def habiller_calendrier(champ_date):
+    """Calendrier déroulant d'un QDateEdit au style de COURRIER :
+    navigation sombre, sélection rouge, week-ends en rouge. Mis en
+    commun (11/11/2026) entre la fenêtre TODO et le REPORT d'un rappel."""
+    # Personnaliser le QCalendarWidget popup
+    cal = champ_date.calendarWidget()
+    cal.setLocale(cal.locale())  # garder le français
+    # Style du calendrier : barre de navigation sombre, sélection rouge
+    # Flèches mois précédent/suivant (QToolButton) : fond rouge permanent,
+    # sinon la flèche sombre se perd sur le fond noir hors survol
+    # On garde le fond blanc natif pour la grille (entêtes lisibles en noir)
+    cal.setStyleSheet("""
+        QCalendarWidget QAbstractItemView {
+            selection-background-color: #A52A2A;
+            selection-color: white;
+            font-family: Verdana; font-size: 11px;
+        }
+        QCalendarWidget QWidget#qt_calendar_navigationbar {
+            background-color: #1a1a1a;
+        }
+        QCalendarWidget QToolButton {
+            background-color: #1a1a1a; color: white;
+            font-family: Verdana; font-size: 11px; font-weight: bold;
+        }
+        QCalendarWidget QToolButton::menu-indicator { image: none; }
+        QCalendarWidget QToolButton:hover { background-color: #A52A2A; }
+        QCalendarWidget QToolButton#qt_calendar_prevmonth,
+        QCalendarWidget QToolButton#qt_calendar_nextmonth {
+            background-color: #A52A2A; border: none;
+            min-width: 22px; min-height: 20px;
+        }
+        QCalendarWidget QToolButton#qt_calendar_prevmonth:hover,
+        QCalendarWidget QToolButton#qt_calendar_nextmonth:hover {
+            background-color: #c03030;
+        }
+        QCalendarWidget QMenu {
+            background-color: #1e1e1e; color: white;
+        }
+        QCalendarWidget QMenu::item:selected { background-color: #A52A2A; }
+        QCalendarWidget QSpinBox {
+            background-color: #1e1e1e; color: white;
+            border: 1px solid #5a5a5a; font-family: Verdana; font-size: 11px;
+        }
+    """)
+    from PySide6.QtGui import QTextCharFormat
+    from PySide6.QtCore import Qt as _Qt
+    # Entête (lun. mar. ... sam. dim.) : noir gras — doit être posé EN PREMIER
+    # pour que setWeekdayTextFormat ci-dessous puisse le surcharger sur sam/dim
+    hdr_fmt = QTextCharFormat()
+    hdr_fmt.setForeground(QColor("black"))
+    hdr_fmt.setFontWeight(700)
+    cal.setHeaderTextFormat(hdr_fmt)
+    # Samedis et dimanches : rouge dans la grille ET dans l'entête de colonne
+    fmt_rouge = QTextCharFormat()
+    fmt_rouge.setForeground(QColor("#cc2222"))
+    fmt_rouge.setFontWeight(700)
+    cal.setWeekdayTextFormat(_Qt.DayOfWeek.Saturday, fmt_rouge)
+    cal.setWeekdayTextFormat(_Qt.DayOfWeek.Sunday, fmt_rouge)
+    cal.setGridVisible(False)
+
+
+class DelegueRappelsAgenda(QStyledItemDelegate):
+    """Lignes de la liste TODO avec retour à la ligne fiable (12/11/2026).
+    Le retour à la ligne natif de QListWidget réservait parfois deux
+    lignes et n'en dessinait qu'une (trous vides) : ici, la hauteur
+    (sizeHint) et le dessin (paint) passent par le même calcul, sur la
+    largeur réelle de la liste. Le fond, la sélection et le trait du bas
+    restent ceux de la feuille de style (::item, marge de 6 px)."""
+    MARGE = 6
+
+    def __init__(self, liste):
+        super().__init__(liste)
+        self._liste = liste
+
+    def _zone_texte(self, largeur):
+        return max(50, largeur - 2 * self.MARGE)
+
+    def _police(self, option, index):
+        """Police réellement dessinée : celle de la ligne (gras pour un
+        rappel à venir) complétée par celle de la liste (Verdana 11 px de
+        la feuille de style). Sans ce resolve, on mesurait avec la police
+        de base de Windows, plus étroite, et le texte dessiné débordait."""
+        f = index.data(Qt.ItemDataRole.FontRole)
+        if f is None:
+            return QFont(self._liste.font())
+        return QFont(f).resolve(self._liste.font())
+
+    def sizeHint(self, option, index):
+        from PySide6.QtGui import QFontMetrics
+        largeur = self._liste.viewport().width()
+        fm = QFontMetrics(self._police(option, index))
+        rect = fm.boundingRect(QRect(0, 0, self._zone_texte(largeur), 100000),
+                               int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft),
+                               index.data() or "")
+        return QSize(largeur, rect.height() + 2 * self.MARGE + 1)
+
+    def paint(self, painter, option, index):
+        # Fond, sélection, trait du bas par le style ; texte dessiné ici
+        opt = type(option)(option)
+        self.initStyleOption(opt, index)
+        texte = opt.text
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        painter.save()
+        painter.setFont(self._police(option, index))
+        painter.setPen(QColor("white"))
+        zone = option.rect.adjusted(self.MARGE, self.MARGE, -self.MARGE, -self.MARGE - 1)
+        painter.drawText(zone, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft
+                                   | Qt.AlignmentFlag.AlignVCenter), texte)
+        painter.restore()
+
+
 class DialogueAgenda(QDialog):
     """Agenda simple : rappels programmés (date + heure + texte), avec
     pop-up automatique à l'heure prévue. La vérification des rappels
@@ -19821,8 +19965,27 @@ class DialogueAgenda(QDialog):
         layout.addWidget(QLabel("Rappels programmés :"))
 
         self.liste = QListWidget()
-        self.liste.setWordWrap(True)
+        # Texte complet, jamais tronqué (12/11/2026, demandé) : la fenêtre
+        # s'élargit selon le rappel le plus long jusqu'à la largeur de
+        # l'écran (_ajuster_largeur), et au-delà le texte va à la ligne.
+        # Retour à la ligne par DelegueRappelsAgenda : celui de Qt
+        # réservait parfois deux lignes et n'en dessinait qu'une (trous).
+        self.liste.setWordWrap(False)
         self.liste.setUniformItemSizes(False)
+        self.liste.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.liste.setItemDelegate(DelegueRappelsAgenda(self.liste))
+
+        class _SurveillantLargeur(QObject):
+            """Hauteurs recalculées quand la largeur de la liste change"""
+            def eventFilter(s, obj, event):
+                # Différé : après la mise en page de Qt (l'ascenseur qui
+                # apparaît rétrécit encore la liste), sinon des hauteurs
+                # calculées pour une liste plus large restaient en place
+                if event.type() == QEvent.Type.Resize:
+                    QTimer.singleShot(0, self.liste.doItemsLayout)
+                return False
+        self._surveillant_largeur = _SurveillantLargeur(self.liste)
+        self.liste.viewport().installEventFilter(self._surveillant_largeur)
         self.liste.itemClicked.connect(self._charger_en_edition)
         layout.addWidget(self.liste)
 
@@ -19845,61 +20008,7 @@ class DialogueAgenda(QDialog):
         self.champ_date.setDate(QDate.currentDate())
         self.champ_date.setDisplayFormat("dd/MM/yyyy")
         ligne_date_heure.addWidget(self.champ_date)
-        # Personnaliser le QCalendarWidget popup
-        cal = self.champ_date.calendarWidget()
-        cal.setLocale(cal.locale())  # garder le français
-        # Style du calendrier : barre de navigation sombre, sélection rouge
-        # Flèches mois précédent/suivant (QToolButton) : fond rouge permanent,
-        # sinon la flèche sombre se perd sur le fond noir hors survol
-        # On garde le fond blanc natif pour la grille (entêtes lisibles en noir)
-        cal.setStyleSheet("""
-            QCalendarWidget QAbstractItemView {
-                selection-background-color: #A52A2A;
-                selection-color: white;
-                font-family: Verdana; font-size: 11px;
-            }
-            QCalendarWidget QWidget#qt_calendar_navigationbar {
-                background-color: #1a1a1a;
-            }
-            QCalendarWidget QToolButton {
-                background-color: #1a1a1a; color: white;
-                font-family: Verdana; font-size: 11px; font-weight: bold;
-            }
-            QCalendarWidget QToolButton::menu-indicator { image: none; }
-            QCalendarWidget QToolButton:hover { background-color: #A52A2A; }
-            QCalendarWidget QToolButton#qt_calendar_prevmonth,
-            QCalendarWidget QToolButton#qt_calendar_nextmonth {
-                background-color: #A52A2A; border: none;
-                min-width: 22px; min-height: 20px;
-            }
-            QCalendarWidget QToolButton#qt_calendar_prevmonth:hover,
-            QCalendarWidget QToolButton#qt_calendar_nextmonth:hover {
-                background-color: #c03030;
-            }
-            QCalendarWidget QMenu {
-                background-color: #1e1e1e; color: white;
-            }
-            QCalendarWidget QMenu::item:selected { background-color: #A52A2A; }
-            QCalendarWidget QSpinBox {
-                background-color: #1e1e1e; color: white;
-                border: 1px solid #5a5a5a; font-family: Verdana; font-size: 11px;
-            }
-        """)
-        from PySide6.QtGui import QTextCharFormat
-        from PySide6.QtCore import Qt as _Qt
-        # Entête (lun. mar. ... sam. dim.) : noir gras — doit être posé EN PREMIER
-        # pour que setWeekdayTextFormat ci-dessous puisse le surcharger sur sam/dim
-        hdr_fmt = QTextCharFormat()
-        hdr_fmt.setForeground(QColor("black"))
-        hdr_fmt.setFontWeight(700)
-        cal.setHeaderTextFormat(hdr_fmt)
-        # Samedis et dimanches : rouge dans la grille ET dans l'entête de colonne
-        fmt_rouge = QTextCharFormat()
-        fmt_rouge.setForeground(QColor("#cc2222"))
-        fmt_rouge.setFontWeight(700)
-        cal.setWeekdayTextFormat(_Qt.DayOfWeek.Saturday, fmt_rouge)
-        cal.setWeekdayTextFormat(_Qt.DayOfWeek.Sunday, fmt_rouge)
-        cal.setGridVisible(False)
+        habiller_calendrier(self.champ_date)
 
         # Sélecteur d'heure par créneaux de 30 minutes (comme capture)
         import datetime as _dt
@@ -19907,8 +20016,8 @@ class DialogueAgenda(QDialog):
         heure_defaut = f"{maintenant.hour:02d}:{maintenant.minute:02d}"
         self.combo_heure = QLineEdit(heure_defaut)
         self.combo_heure.setFixedWidth(70)
-        self.combo_heure.setPlaceholderText("9.20")
-        self.combo_heure.setToolTip("Format libre : 9.20 ou 9:20 ou 22.30")
+        saisie_heure_auto(self.combo_heure)
+        self.combo_heure.setToolTip("Tapez 0920 : les deux-points se posent tout seuls (9.20 ou 9:20 marchent aussi)")
         ligne_date_heure.addWidget(self.combo_heure)
 
         ligne_date_heure.addStretch(1)
@@ -20028,6 +20137,38 @@ class DialogueAgenda(QDialog):
             police.setBold(dt is not None and dt > maintenant)
             item.setFont(police)
             self.liste.addItem(item)
+        self._ajuster_largeur()
+
+    def _ajuster_largeur(self):
+        """Élargit la fenêtre pour que le rappel le plus long tienne sur une
+        ligne, sans dépasser la largeur de l'écran (12/11/2026, demandé) ;
+        au-delà, DelegueRappelsAgenda le fait passer à la ligne. Ne
+        rétrécit jamais une fenêtre que l'utilisateur a élargie."""
+        from PySide6.QtGui import QFontMetrics
+        texte_max = 0
+        self.liste.ensurePolished()  # police de la feuille de style appliquée
+        for i in range(self.liste.count()):
+            it = self.liste.item(i)
+            police = QFont(it.font()).resolve(self.liste.font())  # comme DelegueRappelsAgenda
+            texte_max = max(texte_max, QFontMetrics(police).horizontalAdvance(it.text()))
+        if not texte_max:
+            return
+        marges = self.layout().contentsMargins()
+        # texte + marges de ligne + bord de liste + ascenseur (32 px) + marges
+        voulue = (texte_max + 2 * DelegueRappelsAgenda.MARGE + 2 + 32 + 16
+                  + marges.left() + marges.right())
+        ecran = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        voulue = min(voulue, ecran.width() - 20)
+        # Avant l'affichage, width() vaut 640 (taille provisoire de Qt) et
+        # non la vraie largeur : on compare alors au minimum de la fenêtre
+        actuelle = self.width() if self.isVisible() else self.minimumWidth()
+        if voulue <= actuelle:
+            return
+        self.resize(voulue, self.height())
+        # Ramener la fenêtre dans l'écran si elle déborde à droite
+        cadre = self.frameGeometry()
+        if cadre.right() > ecran.right():
+            self.move(max(ecran.left(), ecran.right() - cadre.width()), self.y())
 
     def _charger_en_edition(self, item):
         """Charge un rappel existant dans le formulaire pour le modifier."""
@@ -20066,7 +20207,8 @@ class DialogueAgenda(QDialog):
             self.lbl_statut.setText("Entrez un texte pour le rappel.")
             return
         date_ = self.champ_date.date()
-        heure_raw = self.combo_heure.text().strip().replace(".", ":")
+        # rstrip : « 23: » laissé tel quel (deux-points automatiques) = 23:00
+        heure_raw = self.combo_heure.text().strip().replace(".", ":").rstrip(":")
         heure_str = heure_raw if ":" in heure_raw else f"{heure_raw}:00"
         try:
             h, m = int(heure_str.split(":")[0]), int(heure_str.split(":")[1])
@@ -30540,7 +30682,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 11/11/2026 23h37")
+        self.setWindowTitle("COURRIER ADRIEN — 12/11/2026 01h05")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -31257,11 +31399,14 @@ class ClientMail(QMainWindow):
 
         # MODE tout à gauche, avant CONTRÔLE (11/11/2026, demandé) : choix
         # SIMPLE / EXPERT / PERSONNALISÉ des boutons affichés (voir
-        # DialogueModeAffichage). Son libellé dit le mode en cours.
+        # DialogueModeAffichage). Son libellé dit le mode en cours. Toujours
+        # orange, comme CHRONO : un mode est forcément choisi (demandé) —
+        # donc pas de _suivre_fenetre, qui l'éteindrait à la fermeture.
         self.btn_mode = QPushButton("MODE")
         self.btn_mode.setStyleSheet(STYLE_BOUTON_HAUT)
         self.btn_mode.setToolTip("Choisir les boutons affichés : SIMPLE, EXPERT ou PERSONNALISÉ")
-        self.btn_mode.clicked.connect(self._suivre_fenetre(self.btn_mode, self.ouvrir_mode_affichage))
+        self.btn_mode.clicked.connect(self.ouvrir_mode_affichage)
+        _marquer_bouton_actif(self.btn_mode, True)
         layout_haut.addWidget(self.btn_mode)
         layout_haut.addSpacing(3)
         # clé de BOUTONS_MODULABLES → widgets à cacher ensemble (le premier
@@ -35984,7 +36129,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 11/11/2026 à 23h37")
+        lbl_version = QLabel("Version du 12/11/2026 à 01h05")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -36243,22 +36388,38 @@ if (typeof module === 'object') {
         # fonctionnement que le délai d'envoi des mails (_ouvrir_dialogue_delai,
         # calcul dans la mise en file) — HH.MM, et si l'heure est déjà passée
         # aujourd'hui, c'est le lendemain à cette heure-là.
-        combo_report.addItem("Heure précise", None)
+        # Devenu « Date et heure précises » (11/11/2026, demandé) : date au
+        # calendrier et heure libre, comme dans la fenêtre TODO.
+        combo_report.addItem("Date et heure précises", None)
         ligne_report.addWidget(lbl_report)
         ligne_report.addWidget(combo_report, 1)
         layout.addLayout(ligne_report)
 
-        from PySide6.QtWidgets import QLineEdit
+        from PySide6.QtWidgets import QLineEdit, QDateEdit
+        from PySide6.QtCore import QDate
         STYLE_CHAMP_HEURE = "background:#1e1e1e; color:white; border:1px solid #555; padding:2px;"
         conteneur_heure = QWidget()
         ligne_heure = QHBoxLayout(conteneur_heure)
         ligne_heure.setContentsMargins(0, 0, 0, 0)
-        champ_heure = QLineEdit("08.00")
-        champ_heure.setFixedWidth(80)
+        champ_date = QDateEdit()
+        champ_date.setCalendarPopup(True)
+        champ_date.setDisplayFormat("dd/MM/yyyy")
+        # Date et heure de départ = maintenant (12/11/2026, demandé), comme
+        # dans la fenêtre TODO : on peut reporter au jour même, à toute heure
+        champ_date.setDate(QDate.currentDate())
+        champ_date.setMinimumDate(QDate.currentDate())
+        champ_date.setStyleSheet(STYLE_CHAMP_HEURE)
+        habiller_calendrier(champ_date)
+        champ_heure = QLineEdit(datetime.datetime.now().strftime("%H:%M"))
+        champ_heure.setFixedWidth(60)
         champ_heure.setStyleSheet(STYLE_CHAMP_HEURE)
-        lbl_fmt = QLabel("(HH.MM)")
+        saisie_heure_auto(champ_heure)
+        champ_heure.setToolTip("Tapez 0920 : les deux-points se posent tout seuls (9.20 ou 9:20 marchent aussi)")
+        lbl_fmt = QLabel("(HH:MM)")
         lbl_fmt.setStyleSheet("color:#aaa; font-size:10px;")
         ligne_heure.addSpacing(lbl_report.sizeHint().width() + ligne_report.spacing())
+        ligne_heure.addWidget(champ_date)
+        ligne_heure.addWidget(QLabel("à"))
         ligne_heure.addWidget(champ_heure)
         ligne_heure.addWidget(lbl_fmt)
         ligne_heure.addStretch(1)
@@ -36269,30 +36430,45 @@ if (typeof module === 'object') {
             heure_precise = combo_report.currentData() is None
             conteneur_heure.setVisible(heure_precise)
             if heure_precise:
-                champ_heure.setFocus()
-                champ_heure.selectAll()
+                # Curseur sur le jour de la date, pas sur l'heure
+                # (12/11/2026, demandé) : on tape le jour, ←/→ ou Tab
+                # pour passer au mois, à l'année puis à l'heure
+                from PySide6.QtWidgets import QDateTimeEdit
+                champ_date.setFocus()
+                champ_date.setSelectedSection(QDateTimeEdit.Section.DaySection)
             boite.adjustSize()
         combo_report.currentIndexChanged.connect(_sur_choix_report)
 
         def _date_report():
-            """Date/heure du report choisi, ou None si l'heure précise saisie
-            n'est pas valide (le champ passe alors en rouge)."""
+            """Date/heure du report choisi, ou None si la date et l'heure
+            saisies ne sont pas valides ou déjà passées (l'heure passe
+            alors en rouge). Heure libre comme dans la fenêtre TODO : 9.20,
+            9:20, ou 9 seul pour 9.00."""
             maintenant = datetime.datetime.now()
             minutes = combo_report.currentData()
             if minutes is not None:
                 return maintenant + datetime.timedelta(minutes=minutes)
+            texte = champ_heure.text().strip().replace(":", ".").rstrip(".")
+            if "." not in texte:
+                texte += ".00"
             try:
-                h, m = map(int, champ_heure.text().strip().replace(":", ".").split("."))
-                cible = maintenant.replace(hour=h, minute=m, second=0, microsecond=0)
+                h, m = map(int, texte.split("."))
+                d = champ_date.date()
+                cible = datetime.datetime(d.year(), d.month(), d.day(), h, m)
             except ValueError:
+                cible = None
+            if cible is None or cible <= maintenant:
                 champ_heure.setStyleSheet(STYLE_CHAMP_HEURE.replace("#555", "#ff4040"))
+                champ_heure.setToolTip("Heure non valide, ou date et heure déjà passées")
                 champ_heure.setFocus()
                 champ_heure.selectAll()
                 return None
-            if cible <= maintenant:
-                cible += datetime.timedelta(days=1)
             return cible
-        champ_heure.textEdited.connect(lambda _t: champ_heure.setStyleSheet(STYLE_CHAMP_HEURE))
+        def _heure_normale(*_):
+            champ_heure.setStyleSheet(STYLE_CHAMP_HEURE)
+            champ_heure.setToolTip("Tapez 0920 : les deux-points se posent tout seuls (9.20 ou 9:20 marchent aussi)")
+        champ_heure.textEdited.connect(_heure_normale)
+        champ_date.dateChanged.connect(_heure_normale)
 
         ligne_btn = QHBoxLayout()
         ligne_btn.addStretch(1)
@@ -37145,6 +37321,20 @@ if (typeof module === 'object') {
         return None
 
     def on_messages_charges(self, messages, confirmation_silencieuse=False):
+        """Enveloppe (12/11/2026) : après chaque chargement de la liste, un
+        dossier sans aucun mail affiche le logo dans le panneau de lecture
+        (demandé), y compris à l'ouverture d'un dossier déjà vide. Ici
+        plutôt que dans _on_messages_charges_liste, qui a plusieurs sorties
+        anticipées (liste déjà à jour, glisser-déposer en cours…)."""
+        resultat = self._on_messages_charges_liste(messages, confirmation_silencieuse)
+        if (not getattr(self.liste_messages, '_drag_en_cours', False)
+                and not getattr(self, '_filtre_actif', False)
+                and self._liste_sans_mail()):
+            self._item_selectionne = None
+            self._afficher_panneau_vide()
+        return resultat
+
+    def _on_messages_charges_liste(self, messages, confirmation_silencieuse=False):
         # Pas de reconstruction PENDANT un glisser-déposer (18/09/2026,
         # remonté par l'utilisateur pour la 6e fois — "la liste monte et
         # descend quand on drag un mail dans un dossier" — malgré les cinq
@@ -38477,10 +38667,15 @@ if (typeof module === 'object') {
             layout.addWidget(rb)
 
         ligne_heure = QHBoxLayout()
-        champ_heure = QLineEdit(config.get("heure", "08.00"))
+        champ_heure = QLineEdit(config.get("heure", "08:00").replace(".", ":"))
         champ_heure.setFixedWidth(80)
-        champ_heure.setStyleSheet("background:#1e1e1e; color:white; border:1px solid #555; padding:2px;")
-        lbl_fmt = QLabel("(HH.MM)")
+        STYLE_CHAMP_DELAI = "background:#1e1e1e; color:white; border:1px solid #555; padding:2px;"
+        champ_heure.setStyleSheet(STYLE_CHAMP_DELAI)
+        # Deux-points automatiques (12/11/2026, demandé), comme TODO et REPORT
+        saisie_heure_auto(champ_heure)
+        champ_heure.setToolTip("Tapez 0920 : les deux-points se posent tout seuls (9.20 ou 9:20 marchent aussi)")
+        champ_heure.textEdited.connect(lambda _t: champ_heure.setStyleSheet(STYLE_CHAMP_DELAI))
+        lbl_fmt = QLabel("(HH:MM)")
         lbl_fmt.setStyleSheet("color:#aaa; font-size:10px;")
         ligne_heure.addSpacing(20)
         ligne_heure.addWidget(champ_heure)
@@ -38509,7 +38704,25 @@ if (typeof module === 'object') {
             elif rb_30mn.isChecked():  m = "30mn"
             elif rb_heure.isChecked(): m = "heure"
             else: m = "1mn"
-            sauvegarder_delai_envoi({"mode": m, "heure": champ_heure.text().strip()})
+            # Heure remise au propre (« 9 » ou « 23: » → 09:00, 23:00) ; une
+            # heure non valide passe en rouge au lieu de partir dans 1 minute
+            texte = champ_heure.text().strip().replace(".", ":").rstrip(":")
+            if ":" not in texte:
+                texte += ":00"
+            try:
+                hh, mm = map(int, texte.split(":"))
+                if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                    raise ValueError
+                heure = f"{hh:02d}:{mm:02d}"
+            except ValueError:
+                if m != "heure":
+                    heure = config.get("heure", "08:00")
+                else:
+                    champ_heure.setStyleSheet(STYLE_CHAMP_DELAI.replace("#555", "#ff4040"))
+                    champ_heure.setFocus()
+                    champ_heure.selectAll()
+                    return
+            sauvegarder_delai_envoi({"mode": m, "heure": heure})
             self._maj_label_delai()
             dlg.accept()
         btn_ok.clicked.connect(_valider)
@@ -40373,6 +40586,14 @@ if (typeof module === 'object') {
                 if suivant is None or suivant.data(ROLE_SEPARATEUR):
                     self.liste_messages.takeItem(i)
             i -= 1
+        # Plus aucun mail (12/11/2026, signalé) : après la suppression du
+        # dernier mail, son séparateur de date restait seul et était pris
+        # pour « le mail suivant » → rien n'effaçait le mail supprimé du
+        # panneau. Appelée après chaque suppression, déplacement ou mail
+        # disparu du serveur : c'est l'endroit où la liste devient vide.
+        if self._liste_sans_mail():
+            self._item_selectionne = None
+            self._afficher_panneau_vide()
 
     def _supprimer_items(self, items):
         """Suppression optimiste : l'UI et le cache local sont mis à jour
@@ -47122,6 +47343,50 @@ __JS_TRADUCTION__
                     pass  # fichier encore verrouillé par une appli externe — pas grave, on retentera la prochaine fois
         except Exception:
             pass
+
+    def _afficher_panneau_vide(self):
+        """Écran « vide » du panneau de lecture quand la liste ne contient
+        plus aucun mail (12/11/2026, demandé) : le logo de COURRIER en
+        grand au milieu, au lieu du dernier mail supprimé resté affiché.
+        Page locale (file:///) : la barre d'adresse reste masquée comme
+        pour un mail. Recréée si besoin (Apercu est vidé au démarrage)."""
+        # Déjà affiché : ne pas recharger à chaque relève d'un dossier vide
+        if self.webview.url().toLocalFile().endswith("panneau_vide.html"):
+            return
+        self._vider_cef()
+        try:
+            os.makedirs(DOSSIER_APERCU, exist_ok=True)
+            logo = os.path.join(DOSSIER_APERCU, "logo_panneau_vide.png")
+            if not os.path.exists(logo):
+                QIcon(os.path.join(DOSSIER_ICONES, "courrier.ico")).pixmap(256, 256).save(logo)
+            page = os.path.join(DOSSIER_APERCU, "panneau_vide.html")
+            if True:  # réécrite à chaque fois : une retouche s'y voit aussitôt
+                with open(page, "w", encoding="utf-8") as f:
+                    f.write("""<!doctype html><html><head><meta charset="utf-8">
+<style>
+  html, body { height: 100%; margin: 0; background: #1e1e1e; overflow: hidden; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center;
+         font-family: Verdana, sans-serif; user-select: none; }
+  img { width: min(256px, 45vw); height: auto; }
+  .nom { margin-top: 18px; color: #6a6a6a; font-size: 18px; font-weight: bold; letter-spacing: 2px; }
+  .info { margin-top: 8px; color: #ffffff; font-size: 12px; }
+</style></head><body>
+  <img src="logo_panneau_vide.png" alt="">
+  <div class="nom">COURRIER ADRIEN</div>
+  <div class="info">Aucun mail dans ce dossier</div>
+</body></html>""")
+            self.webview.setUrl(QUrl.fromLocalFile(page))
+        except Exception as e:
+            print(f"[PANNEAU-VIDE] {e}")
+
+    def _liste_sans_mail(self):
+        """Vrai si la liste ne contient plus aucun mail (séparateurs de
+        date mis à part)."""
+        for i in range(self.liste_messages.count()):
+            it = self.liste_messages.item(i)
+            if it and not it.data(ROLE_SEPARATEUR):
+                return False
+        return True
 
     def _vider_cef(self):
         if getattr(self, '_video_web', False):

@@ -195,7 +195,7 @@
   <h3>Barre du haut, à gauche : les outils</h3>
   <table>
     <tr><th>Bouton</th><th>Rôle</th></tr>
-    <tr><td><span class="btn">MODE EXPERT</span></td><td>Choix des boutons affichés : SIMPLE, EXPERT ou PERSONNALISÉ (voir <a href="#mode">plus bas</a>).</td></tr>
+    <tr><td><span class="btn actif">MODE EXPERT</span></td><td>Choix des boutons affichés : SIMPLE, EXPERT ou PERSONNALISÉ (voir <a href="#mode">plus bas</a>).</td></tr>
     <tr><td><span class="btn">CONTRÔLE</span></td><td>Poste de contrôle : ce que fait le logiciel, compte par compte (<a href="#controle">section 24</a>).</td></tr>
     <tr><td><span class="btn">COMPTES</span></td><td>Ajouter, modifier ou supprimer un compte (<a href="#saisie-comptes">section 4</a>).</td></tr>
     <tr><td><span class="btn">SPAM</span></td><td>Liste des expéditeurs indésirables (<a href="#spam">section 15</a>).</td></tr>
@@ -211,7 +211,7 @@
     <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span></td><td>Recherche, puis retour à l'affichage normal (<a href="#recherche">section 16</a>).</td></tr>
   </table>
   <h3 id="mode">Mode SIMPLE, EXPERT ou PERSONNALISÉ</h3>
-  <p>Le premier bouton en haut à gauche choisit les boutons affichés. Son nom indique le mode en cours : <span class="btn">MODE SIMPLE</span>, <span class="btn">MODE EXPERT</span> ou <span class="btn">MODE PERSO</span>. Un clic ouvre une petite fenêtre avec trois choix :</p>
+  <p>Le premier bouton en haut à gauche choisit les boutons affichés. Son nom indique le mode en cours : <span class="btn actif">MODE SIMPLE</span>, <span class="btn actif">MODE EXPERT</span> ou <span class="btn actif">MODE PERSO</span>. Un clic ouvre une petite fenêtre avec trois choix :</p>
   <table>
     <tr><th>Mode</th><th>Ce qui est affiché</th></tr>
     <tr><td><span class="btn">SIMPLE</span></td><td>Pour débuter : les boutons avancés sont cachés. Il s'agit de <span class="btn">CONTRÔLE</span> <span class="btn">MACROS</span> <span class="btn">MODÈLES</span> <span class="btn">SONS</span> <span class="btn">MAILING</span> <span class="btn">RSS to Email</span> <span class="btn">TÉL</span> <span class="btn">⚙</span> <span class="btn">SMS</span> en haut, et de <span class="btn">CONSOLE</span> en bas.</td></tr>
@@ -231,13 +231,14 @@
   <p>Un bouton passe de rouge à orange quand ce qu'il commande est en cours. Par exemple <span class="btn actif">TODO</span> au lieu de <span class="btn">TODO</span>. D'un coup d'œil, vous voyez ce qui est en service :</p>
   <table>
     <tr><th>Bouton</th><th>Orange quand…</th></tr>
-    <tr><td><span class="btn">MODE</span> <span class="btn">CONTRÔLE</span> <span class="btn">COMPTES</span> <span class="btn">SPAM</span> <span class="btn">MACROS</span> <span class="btn">MODÈLES</span> <span class="btn">SONS</span> <span class="btn">ADRESSES</span></td><td>sa fenêtre est ouverte.</td></tr>
+    <tr><td><span class="btn">CONTRÔLE</span> <span class="btn">COMPTES</span> <span class="btn">SPAM</span> <span class="btn">MACROS</span> <span class="btn">MODÈLES</span> <span class="btn">SONS</span> <span class="btn">ADRESSES</span></td><td>sa fenêtre est ouverte.</td></tr>
     <tr><td><span class="btn">MAILING</span></td><td>MAILING, lancé par ce bouton, est ouvert.</td></tr>
     <tr><td><span class="btn">RSS to Email</span></td><td>au moins un flux RSS est abonné, ou sa fenêtre est ouverte.</td></tr>
     <tr><td><span class="btn">TÉL</span></td><td>l'écran du téléphone est affiché sur l'ordinateur.</td></tr>
     <tr><td><span class="btn">SMS</span></td><td>une fenêtre SMS est ouverte.</td></tr>
     <tr><td><span class="btn">TODO</span></td><td>au moins un rappel est encore à venir (un rappel passé resté dans la liste ne compte pas), ou sa fenêtre est ouverte.</td></tr>
     <tr><td><span class="btn">CHRONO</span></td><td>toujours : on peut y choisir un autre tri.</td></tr>
+    <tr><td><span class="btn">MODE</span></td><td>toujours : un mode (SIMPLE, EXPERT ou PERSONNALISÉ) est forcément choisi.</td></tr>
     <tr><td><span class="btn">RECHERCHER</span></td><td>sa fenêtre est ouverte, puis tant que les résultats d'une recherche sont affichés.</td></tr>
     <tr><td><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span></td><td>une fenêtre de rédaction ouverte par ce bouton est encore ouverte.</td></tr>
   </table>
@@ -463,9 +464,9 @@
   <p>Le bouton <span class="btn">DÉLAI</span>, en bas de la fenêtre, règle le délai appliqué au bouton <b>Envoyer</b> :</p>
   <ul>
     <li><b>1 minute</b>, <b>15 minutes</b> ou <b>30 minutes</b> ;</li>
-    <li><b>Heure précise</b>, au format HH.MM (par exemple <code>08.00</code>). Si l'heure est déjà passée, le mail part le lendemain à cette heure-là.</li>
+    <li><b>Heure précise</b>, par exemple <code>0800</code> : les deux-points se posent tout seuls, comme dans le TODO. Si l'heure est déjà passée, le mail part le lendemain à cette heure-là.</li>
   </ul>
-  <p>Le délai choisi reste affiché sur le bouton (« DÉLAI 15mn », « DÉLAI 08.00 »…). Les mails en attente sont indiqués dans la barre du bas.</p>
+  <p>Le délai choisi reste affiché sur le bouton (« DÉLAI 15mn », « DÉLAI 08:00 »…). Les mails en attente sont indiqués dans la barre du bas.</p>
   <div class="note"><b>Astuce :</b> un délai d'une minute suffit pour rattraper un mail parti trop vite, une pièce jointe oubliée ou un mauvais destinataire.</div>
 </section>
 
@@ -597,8 +598,8 @@
 
 <section id="todo">
   <h2>19. TODO (rappels)</h2>
-  <p>Bouton <span class="btn">TODO</span>. Saisissez le texte du rappel, la date et l'heure (format libre : <code>9.20</code>, <code>9:20</code> ou <code>22.30</code>), puis cliquez sur <b>Ajouter</b>. Vous pouvez choisir un son (bouton <b>Fichier</b>, et <b>▶</b> pour l'écouter).</p>
-  <p>À l'heure prévue, une fenêtre s'affiche avec le son. Cliquez sur <b>OK</b>, ou sur <b>Reporter</b> : dans 10 minutes, 30 minutes, 1 heure, demain à la même heure, dans une semaine, ou à une heure précise.</p>
+  <p>Bouton <span class="btn">TODO</span>. Saisissez le texte du rappel, la date et l'heure. Pour l'heure, tapez simplement les chiffres : <code>0920</code> donne <code>09:20</code>, les deux-points se posent tout seuls (<code>9.20</code> ou <code>9:20</code> marchent aussi), puis cliquez sur <b>Ajouter</b>. Vous pouvez choisir un son (bouton <b>Fichier</b>, et <b>▶</b> pour l'écouter).</p>
+  <p>À l'heure prévue, une fenêtre s'affiche avec le son. Cliquez sur <b>OK</b>, ou sur <b>Reporter</b> : dans 10 minutes, 30 minutes, 1 heure, demain à la même heure, dans une semaine, ou à une <b>date et une heure précises</b> : la date se choisit au calendrier et l'heure se tape comme dans la fenêtre TODO (<code>0003</code> donne <code>00:03</code>). Cochez d'abord le ou les rappels à reporter.</p>
 </section>
 
 <section id="mailing">
