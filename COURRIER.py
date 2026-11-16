@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-12 02h04"
+VERSION_BUILD = "2026-11-16 02h48"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -5240,6 +5240,8 @@ def _sons_pour_telephone():
 FICHIER_SYNCHRO_TELEPHONE = os.path.join(DOSSIER_APP, "synchro_telephone.json")
 PORT_SYNCHRO_SPAM = 47631
 _synchro_spam_faite = _threading.Event()
+_synchro_carnet_faite = _threading.Event()   # bouton Synchro ANDROID du carnet (16/11/2026)
+_synchro_carnet_bilan = {}
 _synchro_spam_bilan = {}
 _synchro_spam_ecoute = [False]
 
@@ -5286,20 +5288,59 @@ def _traiter_synchro_spam(ligne, secret):
             return None
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
-    nb_ajouts, nb_retraits = _fusionner_spam_telephone(json.dumps({"spam_ajouts": ajouts, "spam_retraits": retraits}))
+    # 15/11/2026 : dates de mise en spam (hors sceau : une date n'ouvre ni ne ferme rien)
+    dates_tel = d.get("spam_dates") if isinstance(d.get("spam_dates"), dict) else {}
+    nb_ajouts, nb_retraits = _fusionner_spam_telephone(json.dumps({"spam_ajouts": ajouts, "spam_retraits": retraits,
+                                                                   "spam_dates": dates_tel}))
     liste = sorted(charger_expediteurs_spam())
+    dates_connues = charger_dates_spam()
     _ecrire_synchro_telephone(confirme=True)
     _synchro_spam_bilan.update(ajouts=nb_ajouts, retraits=nb_retraits)
     _synchro_spam_faite.set()
-    return json.dumps({"spam": liste, "sceau": _sceau_synchro(secret, nonce, "reponse", ",".join(liste))}, ensure_ascii=False)
+    return json.dumps({"spam": liste, "spam_dates": {a: dates_connues[a] for a in liste if a in dates_connues},
+                       "sceau": _sceau_synchro(secret, nonce, "reponse", ",".join(liste))}, ensure_ascii=False)
+
+def _repondre_synchro(client):
+    """Une connexion du téléphone (fil à part) : sa demande, notre réponse."""
+    try:
+        with client:
+            client.settimeout(15)
+            lecture = client.makefile("rb")
+            ligne = lecture.readline(30_000_000).decode("utf-8", "replace")
+            if not ligne.strip():
+                return   # connexion vide (voir _ecouter_synchro_spam) : rien à dire, rien à noter
+            secret = _lire_synchro_telephone().get("secret")
+            # 15/11/2026 : deux sortes de demandes, la liste de spam et la synchro automatique
+            if not secret:
+                reponse = None
+            else:
+                try:
+                    sorte = json.loads(ligne).get("format")
+                except (ValueError, AttributeError):
+                    sorte = None
+                if sorte == "courrier-adrien-synchro-auto-1":
+                    reponse = _traiter_synchro_auto(ligne, secret)
+                elif sorte == "courrier-adrien-synchro-carnet-1":
+                    reponse = _traiter_synchro_carnet(json.loads(ligne), secret)
+                elif sorte == "courrier-adrien-synchro-modeles-1":
+                    reponse = _traiter_synchro_modeles(json.loads(ligne), secret)
+                else:
+                    reponse = _traiter_synchro_spam(ligne, secret)
+            client.sendall(((reponse or "REFUS") + "\n").encode("utf-8"))
+    except OSError:
+        pass   # délai dépassé ou téléphone parti : sans suite (ces lignes remplissaient le journal)
 
 def _ecouter_synchro_spam():
-    """Fil de fond : attend le téléphone sur 127.0.0.1, seule porte du tunnel adb."""
+    """Fil de fond : attend le téléphone sur 127.0.0.1, seule porte du tunnel adb.
+    15/11/2026 : chaque connexion a son propre fil. Une connexion qui n'envoie rien (le tunnel
+    adb en ouvre régulièrement) bloquait l'écoute 15 s : la vraie demande du téléphone attendait
+    derrière et il abandonnait (« Réception impossible »), et le journal se remplissait de
+    « [SYNCHRO SPAM] timed out »."""
     import socket
     try:
         serveur = socket.socket()
         serveur.bind(("127.0.0.1", PORT_SYNCHRO_SPAM))
-        serveur.listen(1)
+        serveur.listen(8)
     except OSError as e:
         print(f"[SYNCHRO SPAM] Écoute impossible : {e}")
         _synchro_spam_ecoute[0] = False
@@ -5307,24 +5348,58 @@ def _ecouter_synchro_spam():
     while True:
         try:
             client, _adresse = serveur.accept()
-            with client:
-                client.settimeout(15)
-                lecture = client.makefile("rb")
-                ligne = lecture.readline(2_000_000).decode("utf-8", "replace")
-                secret = _lire_synchro_telephone().get("secret")
-                reponse = _traiter_synchro_spam(ligne, secret) if secret else None
-                client.sendall(((reponse or "REFUS") + "\n").encode("utf-8"))
+            _threading.Thread(target=_repondre_synchro, args=(client,), daemon=True).start()
         except OSError as e:
             print(f"[SYNCHRO SPAM] {e}")
 
-def _preparer_synchro_telephone(serie):
-    """Écoute + tunnel adb vers ce téléphone. Bloquant (adb). Rien tant qu'aucune copie n'a créé le secret."""
+def _preparer_synchro_telephone(serie, prevenir=False):
+    """Écoute + tunnel adb vers ce téléphone. Bloquant (adb). Rien tant qu'aucune copie n'a créé le secret.
+    [prevenir] (15/11/2026, liaison TÉL) : le téléphone est prévenu qu'il vient d'être relié ; il fait
+    alors les synchros cochées dans ses Réglages (rien si aucune n'est cochée), en arrière-plan."""
     if not _lire_synchro_telephone().get("secret"):
         return
     if not _synchro_spam_ecoute[0]:
         _synchro_spam_ecoute[0] = True
         _threading.Thread(target=_ecouter_synchro_spam, daemon=True).start()
     _adb_bloquant("-s", serie, "reverse", f"tcp:{PORT_SYNCHRO_SPAM}", f"tcp:{PORT_SYNCHRO_SPAM}")
+    if prevenir:
+        _adb_bloquant("-s", serie, "shell", "am", "broadcast", "-n", "fr.courrieradrien.android/.SynchroRecepteur")
+
+def _synchro_carnet_telephone(serie):
+    """Bouton Synchro ANDROID du carnet (16/11/2026) : le téléphone, prévenu par adb (même sans
+    l'appli ouverte), fait la synchro de son carnet ; on attend qu'elle soit faite. Rend le bilan."""
+    _preparer_synchro_telephone(serie)
+    _synchro_carnet_faite.clear()
+    _adb_bloquant("-s", serie, "shell", "am", "broadcast", "-n", "fr.courrieradrien.android/.SynchroRecepteur",
+                  "--es", "quoi", "adresses")
+    if not _synchro_carnet_faite.wait(40):
+        return ("Le téléphone n'a pas répondu. Vérifiez que COURRIER ADRIEN ANDROID est à jour "
+                "et que le téléphone est déverrouillé, puis recommencez.")
+    b = dict(_synchro_carnet_bilan)
+    if b.get("erreur") == "pas_de_base":
+        return "Première fois : sur le téléphone, écran Adresses, touchez « Recevoir de COURRIER »."
+    noms = b.get("noms", {})
+
+    def _ligne(titre, cle):
+        liste = noms.get(cle, [])
+        if not liste:
+            return f"   • {titre} : aucun"
+        montres = liste[:40]
+        suite = f"\n      … et {len(liste) - 40} autre(s)" if len(liste) > 40 else ""
+        return f"   • {titre} : {len(liste)}\n" + "\n".join("      – " + n for n in montres) + suite
+    return "\n".join([
+        f"Synchro faite : {b.get('contacts', 0)} contacts dans chacun des deux carnets.",
+        "",
+        "Du carnet COURRIER ADRIEN Windows vers le carnet Android :",   # Windows d'abord : on est sur le PC
+        _ligne("nouveaux contacts", "venues_pc"),
+        _ligne("contacts modifiés", "modifiees_pc"),
+        _ligne("supprimés sur Windows, donc aussi sur Android", "supprimees_tel"),
+        "",
+        "Du carnet COURRIER ADRIEN Android vers le carnet Windows :",
+        _ligne("nouveaux contacts", "venues_tel"),
+        _ligne("contacts modifiés", "modifiees_tel"),
+        _ligne("supprimés sur Android, donc aussi sur Windows", "supprimees_pc"),
+    ])
 
 def _synchro_spam_telephone(serie):
     """Bouton de la fenêtre SPAM : demande au téléphone d'appeler, attend qu'il l'ait fait. Rend le bilan à afficher."""
@@ -5340,6 +5415,249 @@ def _synchro_spam_telephone(serie):
             f"bloqué(s), {_synchro_spam_bilan.get('retraits', 0)} débloqué(s).")
 
 
+def _image_locale_en_donnees(html):
+    """15/11/2026 : images d'un modèle enregistrées avec un chemin du PC (src="file:///C:/...", image
+    distante mise en cache par l'éditeur) : intégrées (data:) pour le téléphone, qui ne voit pas le disque."""
+    if not html or "file:///" not in html:
+        return html
+    import base64, re as _re, urllib.parse
+    def _remplacer(m):
+        chemin = urllib.parse.unquote(m.group(2)).replace("/", os.sep)
+        try:
+            with open(chemin, "rb") as f:
+                donnees = f.read()
+        except OSError:
+            return m.group(0)
+        ext = os.path.splitext(chemin)[1].lower().lstrip(".")
+        mime = {"jpg": "jpeg", "svg": "svg+xml"}.get(ext, ext) or "png"
+        return f'src={m.group(1)}data:image/{mime};base64,{base64.b64encode(donnees).decode("ascii")}{m.group(1)}'
+    return _re.sub(r"""src\s*=\s*(["'])file:///([^"']+)\1""", _remplacer, html, flags=_re.IGNORECASE)
+
+def _modeles_pour_telephone(modeles):
+    return {a: {k: (_image_locale_en_donnees(v) if isinstance(v, str) else v) for k, v in m.items()}
+            for a, m in modeles.items()}
+
+def _contenu_pour_telephone(macros=False, sons=False, modeles=False, rss=False, carnet=False):
+    """Macros, sons, modèles, flux RSS tels que le téléphone les attend : pour la copie
+    (_envoyer_comptes_android) et pour la synchro automatique (15/11/2026)."""
+    contenu = {}
+    if macros:
+        contenu["macros"] = charger_macros().get("macros", [])
+    if sons:
+        contenu["sons"] = _sons_pour_telephone()
+    if modeles:
+        contenu["modeles"] = _modeles_pour_telephone(charger_modeles())
+    if rss:   # 04/11/2026 : flux avec leur mémoire « déjà vus » ; les flux locaux (file://) restent sur le PC
+        contenu["rss"] = [{k: f[k] for k in ("id", "url", "nom", "compte", "type", "motif", "items_vus", "etag",
+                                             "last_modified", "site_lien", "site_description") if k in f}
+                          for f in charger_abonnements_rss().get("flux", [])
+                          if str(f.get("url", "")).lower().startswith(("http://", "https://"))]
+    if carnet:   # 15/11/2026 : carnet d'adresses de COURRIER ADRIEN ANDROID, le même que celui-ci
+        c = charger_carnet()
+        contenu["carnet"] = {"dossiers": c.get("dossiers", []), "contacts": c.get("contacts", [])}
+        _ecrire_base_carnet(contenu["carnet"])   # les deux carnets sont identiques : base des synchros suivantes
+    return contenu
+
+# Synchro du carnet avec le téléphone (15/11/2026) : la « base » est l'état commun des deux carnets
+# à la dernière copie ou synchro. Comparée à elle, chaque fiche dit ce qui a changé de chaque côté.
+FICHIER_BASE_CARNET = os.path.join(DOSSIER_APP, "carnet_synchro_base.json")
+
+def _ecrire_base_carnet(carnet):
+    try:
+        with open(FICHIER_BASE_CARNET, "w", encoding="utf-8") as f:
+            json.dump(carnet, f, ensure_ascii=False)
+    except OSError as e:
+        print(f"[SYNCHRO CARNET] base non enregistrée : {e}")
+
+def _lire_base_carnet():
+    try:
+        with open(FICHIER_BASE_CARNET, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+def _reunir_notes(a, b):
+    """Note modifiée des deux côtés : rien n'est perdu (l'une contient l'autre, ou les deux à la suite)."""
+    if not a or b in a:
+        return a or b
+    if a in b:
+        return b
+    return a.rstrip() + "\n" + b.lstrip()
+
+def fusionner_carnets(pc, tel, base):
+    """Fusion des carnets du PC et du téléphone par rapport à leur base commune. Champ par champ : ce qui
+    n'a changé que d'un côté est pris ; changé des deux côtés, la modification la plus récente l'emporte
+    (les notes sont réunies). Fiche supprimée d'un côté et inchangée de l'autre : supprimée ; modifiée
+    de l'autre entre-temps : gardée. Rend (carnet du PC fusionné, fiches supprimées du PC, bilan)."""
+    P = {c.get("id"): c for c in pc.get("contacts", []) if c.get("id")}
+    T = {c.get("id"): c for c in tel.get("contacts", []) if c.get("id")}
+    B = {c.get("id"): c for c in base.get("contacts", []) if c.get("id")}
+
+    def _v(c, k):
+        return (c.get(k) or "") if c else ""
+
+    def _inchangee(c, b):
+        return all(_v(c, k) == _v(b, k) for k in CHAMPS_FICHE_SYNCHRO)
+
+    bilan = {"venues_tel": 0, "modifiees_tel": 0, "supprimees_pc": 0, "supprimees_tel": 0, "conflits": 0}
+    # 16/11/2026 (demandé) : les noms, pour un bilan lisible, dans les deux sens
+    noms = {"venues_tel": [], "modifiees_tel": [], "supprimees_pc": [], "supprimees_tel": [],
+            "venues_pc": [], "modifiees_pc": []}
+
+    def _nom(c):
+        return ((c.get("nom") or "").strip() or (c.get("email") or "").strip()
+                or (c.get("portable") or "").strip() or (c.get("fixe") or "").strip() or "(sans nom)")
+    resultat, supprimees_pc = [], []
+    for i in list(P) + [i for i in T if i not in P]:
+        p, t, b = P.get(i), T.get(i), B.get(i)
+        if p and t:
+            r = dict(p)
+            change = False
+            for k in CHAMPS_FICHE_SYNCHRO:
+                pv, tv = _v(p, k), _v(t, k)
+                if pv == tv:
+                    continue
+                if b is not None and pv == _v(b, k):
+                    r[k] = tv
+                    change = True
+                elif b is not None and tv == _v(b, k):
+                    pass
+                else:
+                    bilan["conflits"] += 1
+                    if k == "notes":
+                        r[k] = _reunir_notes(pv, tv)
+                    elif (t.get("modifie") or 0) > (p.get("modifie") or 0):
+                        r[k] = tv
+                    change = change or r[k] != pv
+            if change:
+                bilan["modifiees_tel"] += 1
+                noms["modifiees_tel"].append(_nom(r))
+                r["modifie"] = max(p.get("modifie") or 0, t.get("modifie") or 0)
+            if any(_v(r, k) != _v(t, k) for k in CHAMPS_FICHE_SYNCHRO):
+                noms["modifiees_pc"].append(_nom(r))   # le téléphone reçoit des changements faits ici
+            resultat.append(r)
+        elif p:
+            if b is not None and _inchangee(p, b):
+                supprimees_pc.append(p)   # supprimée sur le téléphone
+                bilan["supprimees_pc"] += 1
+                noms["supprimees_pc"].append(_nom(p))
+            else:
+                resultat.append(p)   # nouvelle sur le PC, ou modifiée ici depuis : gardée
+                noms["venues_pc"].append(_nom(p))
+        else:
+            if b is not None and _inchangee(t, b):
+                bilan["supprimees_tel"] += 1   # supprimée sur le PC : le téléphone la perd aussi
+                noms["supprimees_tel"].append(_nom(t))
+            else:
+                r = {k: t[k] for k in ("id", "modifie", "cle_tel", *CHAMPS_FICHE_SYNCHRO) if t.get(k)}
+                r.setdefault("nom", "")
+                r.setdefault("email", "")
+                r.setdefault("dossier", "")
+                resultat.append(r)
+                bilan["venues_tel"] += 1
+                noms["venues_tel"].append(_nom(r))
+    dossiers = list(pc.get("dossiers", []))
+    connus = {d.lower() for d in dossiers}
+    for d in list(tel.get("dossiers", [])) + [c.get("dossier", "") for c in resultat]:
+        if d and d.lower() not in connus:
+            dossiers.append(d)
+            connus.add(d.lower())
+    fusion = dict(pc)
+    fusion["contacts"], fusion["dossiers"] = resultat, dossiers
+    bilan["noms"] = {k: sorted(v, key=lambda n: n.lower()) for k, v in noms.items()}
+    return fusion, supprimees_pc, bilan
+
+def _traiter_synchro_modeles(d, secret):
+    """Le téléphone envoie ses modèles (avec leurs dates) ; pour chaque compte et chaque emplacement,
+    le plus récent l'emporte. On enregistre, et le téléphone reçoit le résultat (identique)."""
+    import hmac, hashlib
+    try:
+        nonce, texte = d["nonce"], d["modeles"]
+        if not hmac.compare_digest(_sceau_synchro(secret, nonce, hashlib.sha256(texte.encode("utf-8")).hexdigest()), d["sceau"]):
+            return None
+        tel = json.loads(texte)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    pc, dates = charger_modeles(), charger_dates_modeles()
+    venus = 0
+    for a in set(tel) | set(pc):
+        t = tel.get(a, {})
+        for em in ("nouveau", "reponse"):
+            dt, dp = t.get("date_" + em) or 0, dates.get(a, {}).get(em) or 0
+            ht, hp = t.get(em) or "", pc.get(a, {}).get(em) or ""
+            if a in tel and dt > dp and ht != hp:
+                pc.setdefault(a, {})[em] = ht
+                dates.setdefault(a, {})[em] = dt
+                venus += 1
+    pc = {a: v for a, v in pc.items() if any(v.get(em) for em in ("nouveau", "reponse"))
+          or any(dates.get(a, {}).values())}
+    if venus:
+        sauvegarder_modeles(pc, horodater=False)
+        _ecrire_dates_modeles(dates)
+    resultat = {a: {"nouveau": _image_locale_en_donnees(v.get("nouveau", "")),
+                    "reponse": _image_locale_en_donnees(v.get("reponse", "")),
+                    "date_nouveau": dates.get(a, {}).get("nouveau", 0),
+                    "date_reponse": dates.get(a, {}).get("reponse", 0)} for a, v in pc.items()}
+    print(f"[SYNCHRO MODÈLES] {len(resultat)} compte(s), {venus} modèle(s) venu(s) du téléphone")
+    contenu = json.dumps({"modeles": resultat, "venus": venus}, ensure_ascii=False)
+    return json.dumps({"contenu": contenu, "sceau": _sceau_synchro(secret, nonce, "reponse",
+                       hashlib.sha256(contenu.encode("utf-8")).hexdigest())}, ensure_ascii=False)
+
+def _traiter_synchro_carnet(d, secret):
+    """Le téléphone envoie son carnet ; on le fusionne avec le nôtre, on enregistre, on lui rend le
+    résultat (identique des deux côtés). Demande et réponse scellées par le secret partagé."""
+    import hmac, hashlib
+    try:
+        nonce, texte = d["nonce"], d["carnet"]
+        if not hmac.compare_digest(_sceau_synchro(secret, nonce, hashlib.sha256(texte.encode("utf-8")).hexdigest()), d["sceau"]):
+            return None
+        tel = json.loads(texte)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    base = _lire_base_carnet()
+    if base is None:
+        reponse = {"erreur": "pas_de_base"}
+        _synchro_carnet_bilan.clear()
+        _synchro_carnet_bilan["erreur"] = "pas_de_base"
+    else:
+        fusion, supprimees, bilan = fusionner_carnets(charger_carnet(), tel, base)
+        if supprimees:
+            noter_suppressions_telephone(fusion, supprimees)   # contacts du téléphone : proposé à « Envoyer au tél. »
+        sauvegarder_carnet(fusion, horodater=False)   # sauvegarde automatique faite avant : bouton Restaurer
+        partage = {"dossiers": fusion.get("dossiers", []), "contacts": fusion.get("contacts", [])}
+        _ecrire_base_carnet(partage)
+        reponse = {"carnet": partage, "bilan": bilan}
+        print(f"[SYNCHRO CARNET] {len(partage['contacts'])} contacts, {bilan}")
+        _synchro_carnet_bilan.clear()
+        _synchro_carnet_bilan.update(bilan, contacts=len(partage["contacts"]))
+    _synchro_carnet_faite.set()
+    contenu = json.dumps(reponse, ensure_ascii=False)
+    return json.dumps({"contenu": contenu, "sceau": _sceau_synchro(secret, nonce, "reponse",
+                       hashlib.sha256(contenu.encode("utf-8")).hexdigest())}, ensure_ascii=False)
+
+def _traiter_synchro_auto(ligne, secret):
+    """Synchro automatique (15/11/2026) : le téléphone, prévenu qu'il vient d'être relié, demande
+    ce que l'utilisateur a coché dans ses Réglages (macros, modèles, sons, RSS). Demande scellée par le
+    secret partagé ; réponse scellée elle aussi (empreinte du contenu). None si la demande est refusée."""
+    import hmac, hashlib
+    try:
+        d = json.loads(ligne)
+        nonce, quoi = d["nonce"], d["quoi"]
+        if (d.get("format") != "courrier-adrien-synchro-auto-1" or not isinstance(quoi, list)
+                or not all(isinstance(q, str) for q in quoi)
+                or not hmac.compare_digest(_sceau_synchro(secret, nonce, ",".join(quoi)), d["sceau"])):
+            return None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    contenu = json.dumps(_contenu_pour_telephone(macros="macros" in quoi, sons="sons" in quoi,
+                                                 modeles="modeles" in quoi, rss="rss" in quoi,
+                                                 carnet="carnet" in quoi), ensure_ascii=False)
+    empreinte = hashlib.sha256(contenu.encode("utf-8")).hexdigest()
+    _ecrire_synchro_telephone(confirme=True)
+    print(f"[SYNCHRO AUTO] envoyé au téléphone : {', '.join(quoi) or 'rien'}")
+    return json.dumps({"contenu": contenu, "sceau": _sceau_synchro(secret, nonce, "reponse", empreinte)}, ensure_ascii=False)
+
+
 def _fusionner_spam_telephone(ligne):
     """Retour de la copie de la liste de spam (04/11/2026) : expéditeurs bloqués et débloqués sur
     le téléphone depuis la copie précédente, ajoutés à la liste de COURRIER. Rend (ajouts, retraits)."""
@@ -5347,9 +5665,10 @@ def _fusionner_spam_telephone(ligne):
         d = json.loads(ligne)
         ajouts = {a for a in d.get("spam_ajouts", []) if isinstance(a, str)}
         retraits = {a for a in d.get("spam_retraits", []) if isinstance(a, str)}
+        dates = d.get("spam_dates") if isinstance(d.get("spam_dates"), dict) else {}
     except (ValueError, AttributeError, TypeError):
         return 0, 0
-    acceptees = ajouter_expediteurs_spam(ajouts)
+    acceptees = ajouter_expediteurs_spam(ajouts, dates)
     retirer_expediteurs_spam(retraits)
     return len(acceptees), len(retraits)
 
@@ -5381,21 +5700,13 @@ def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False,
             "mdp": (c.get("mdp") or "") if avec_mdp and (c.get("protocole") or "imap") != "graph" else "",
         } for c in comptes],
     }
-    if macros:
-        contenu["macros"] = charger_macros().get("macros", [])
-    if sons:
-        contenu["sons"] = _sons_pour_telephone()
-    if modeles:
-        contenu["modeles"] = charger_modeles()
+    contenu.update(_contenu_pour_telephone(macros=macros, sons=sons, modeles=modeles))
     if spam:   # 04/11/2026 : expéditeurs bloqués de la fenêtre SPAM
         contenu["spam"] = sorted(charger_expediteurs_spam())
+        contenu["spam_dates"] = charger_dates_spam()   # 15/11/2026 : dates de mise en spam
         contenu["secret_synchro"] = _secret_synchro_spam()
         _preparer_synchro_telephone(serie)
-    if rss:   # 04/11/2026 : flux avec leur mémoire « déjà vus » ; les flux locaux (file://) restent sur le PC
-        contenu["rss"] = [{k: f[k] for k in ("id", "url", "nom", "compte", "type", "motif", "items_vus", "etag",
-                                             "last_modified", "site_lien", "site_description") if k in f}
-                          for f in charger_abonnements_rss().get("flux", [])
-                          if str(f.get("url", "")).lower().startswith(("http://", "https://"))]
+    contenu.update(_contenu_pour_telephone(rss=rss))
     paquet_json = json.dumps(contenu, ensure_ascii=False).encode("utf-8") + b"\n"
     _adb_bloquant("-s", serie, "shell", "am", "start", "-n", f"{paquet}/.MainActivity",
                   "--ei", "port_comptes", str(port_tel), "--es", "jeton_comptes", jeton)
@@ -6799,7 +7110,7 @@ def connecter_telephone(parent=None, apres=None, si_echec=None, attendre_ecran=F
 
     def _apres(serie):
         # tunnel de la synchro de la liste de spam : le bouton du téléphone peut alors joindre COURRIER
-        _threading.Thread(target=_preparer_synchro_telephone, args=(serie,), daemon=True).start()
+        _threading.Thread(target=_preparer_synchro_telephone, args=(serie, True), daemon=True).start()
         if attendre_ecran:
             attente_telephone_etape("Téléphone trouvé. Ouverture de son écran…")
         attente_telephone_fermer(apres_ecran=attendre_ecran)
@@ -8312,7 +8623,7 @@ class DialogueSMS(QDialog):
             QProgressBar { background-color: #1a1a1a; border: 1px solid #555; text-align: center; color: white; }
             QProgressBar::chunk { background-color: #A52A2A; }
             QPushButton:disabled { background-color: #555; color: #888; border-bottom: 1px solid #333; }
-        """ + STYLE_BOUTON)
+        """ + STYLE_BOUTON + STYLE_SCROLLBAR)  # barres rouges comme la fenêtre principale (13/11/2026)
 
         # Colonne des pièces jointes à droite (08/10/2026), comme Rédiger
         layout_externe = QHBoxLayout(self)
@@ -8457,7 +8768,8 @@ class DialogueSMS(QDialog):
         self.journal = QTextEdit()
         self.journal.setReadOnly(True)
         self.journal.setMinimumHeight(100)
-        self.journal.setStyleSheet("background-color: #1a1a1a; color: #cccccc; border: 1px solid #444; font-size: 14px;")
+        self.journal.setStyleSheet("QTextEdit { background-color: #1a1a1a; color: #cccccc; border: 1px solid #444; font-size: 14px; }"
+                                   + STYLE_SCROLLBAR)
         layout.addWidget(self.journal)
 
         h_bas = QHBoxLayout()
@@ -9064,9 +9376,29 @@ def charger_carnet():
 _nb_ecritures_carnet = 0  # compteur des enregistrements, voir DialogueCarnetAdresses.done
 
 
-def sauvegarder_carnet(carnet):
+# Synchro avec le carnet de COURRIER ADRIEN ANDROID (15/11/2026) : chaque fiche porte la date de sa
+# dernière modification (« modifie », millisecondes), posée ici à chaque enregistrement pour les fiches
+# nouvelles ou changées. Elle départage une fiche modifiée des deux côtés entre deux synchros.
+CHAMPS_FICHE_SYNCHRO = ("nom", "email", "email2", "dossier", "portable", "fixe", "autres_tel", "notes")
+
+
+def _horodater_fiches(carnet):
+    ancien = {c.get("id"): c for c in charger_carnet().get("contacts", [])}
+    maintenant = int(time.time() * 1000)
+    for c in carnet.get("contacts", []):
+        a = ancien.get(c.get("id"))
+        if a is None or any((a.get(k) or "") != (c.get(k) or "") for k in CHAMPS_FICHE_SYNCHRO):
+            c["modifie"] = maintenant
+
+
+def sauvegarder_carnet(carnet, horodater=True):
     global _nb_ecritures_carnet
     _nb_ecritures_carnet += 1
+    if horodater:
+        try:
+            _horodater_fiches(carnet)
+        except Exception as e:
+            print(f"[CARNET] date de modification non posée : {e}")
     _sauvegarde_auto_carnet()
     try:
         with open(FICHIER_CARNET, "w", encoding="utf-8") as f:
@@ -9185,6 +9517,9 @@ def _parser_csv_foxmail(chemin, encodage):
 COLONNES_NOM = ("nom", "name")
 COLONNES_EMAIL = ("email", "e-mail", "adresse courriel", "courriel",
                   "adresse e-mail", "adresse email", "mail")
+# 2e adresse mail d'un contact (16/11/2026, demandé : certaines personnes en ont deux)
+COLONNES_EMAIL2 = ("email 2", "e-mail 2", "mail 2", "email2", "courriel 2", "adresse email 2",
+                   "adresse e-mail 2", "deuxième email", "deuxieme email", "autre email")
 COLONNES_DOSSIER = ("dossier", "catégorie", "categorie", "folder")
 COLONNES_PORTABLE = ("téléphone portable", "telephone portable", "portable",
                      "mobile", "téléphone mobile", "telephone mobile", "mobile phone",
@@ -9231,6 +9566,7 @@ def _parser_csv_generique(chemin, encodage, separateur=","):
 
         idx_nom = trouver_colonne(*COLONNES_NOM)
         idx_email = trouver_colonne(*COLONNES_EMAIL)
+        idx_email2 = trouver_colonne(*COLONNES_EMAIL2)
         idx_dossier = trouver_colonne(*COLONNES_DOSSIER)
         idx_portable = trouver_colonne(*COLONNES_PORTABLE)
         idx_fixe = trouver_colonne(*COLONNES_FIXE)
@@ -9250,13 +9586,16 @@ def _parser_csv_generique(chemin, encodage, separateur=","):
             portable = formater_numero_telephone(_champ(idx_portable).rstrip(";, "))
             fixe = formater_numero_telephone(_champ(idx_fixe).rstrip(";, "))
             autres = formater_autres_telephones(_champ(idx_autres))
+            email2 = _champ(idx_email2)
             if "@" not in email:
                 email = ""
+            if "@" not in email2 or email2.lower() == email.lower():
+                email2 = ""
             if not email and not portable and not fixe and not autres:
                 continue
             nom = _champ(idx_nom)
             dossier = _champ(idx_dossier)
-            contacts.append({"nom": nom, "email": email, "dossier": dossier,
+            contacts.append({"nom": nom, "email": email, "email2": email2, "dossier": dossier,
                              "fixe": fixe, "portable": portable,
                              "autres_tel": autres, "notes": _champ(idx_notes)})
             if dossier and dossier not in dossiers_vus:
@@ -9321,7 +9660,7 @@ def importer_csv_carnet(chemin):
             if existant.get("dossier", "") in dossiers_generiques and c.get("dossier", "") not in dossiers_generiques:
                 existant["dossier"] = c["dossier"]
             # Réimport d'un fichier avec les numéros : complète les contacts existants
-            for champ_tel in ("fixe", "portable", "autres_tel", "notes"):
+            for champ_tel in ("email2", "fixe", "portable", "autres_tel", "notes"):
                 if c.get(champ_tel) and not existant.get(champ_tel):
                     existant[champ_tel] = c[champ_tel]
             continue
@@ -9339,10 +9678,10 @@ def exporter_csv_carnet(chemin, contacts):
     détecte correctement l'encodage."""
     with open(chemin, "w", encoding="utf-8-sig", newline="") as f:
         ecrivain = csv.writer(f)
-        ecrivain.writerow(["Nom", "Email", "Dossier", "Téléphone fixe", "Téléphone portable",
+        ecrivain.writerow(["Nom", "Email", "Email 2", "Dossier", "Téléphone fixe", "Téléphone portable",
                            "Autres téléphones", "Notes"])
         for c in contacts:
-            ecrivain.writerow([c.get("nom", ""), c.get("email", ""), c.get("dossier", ""),
+            ecrivain.writerow([c.get("nom", ""), c.get("email", ""), c.get("email2", ""), c.get("dossier", ""),
                                c.get("fixe", ""), c.get("portable", ""),
                                c.get("autres_tel", ""), c.get("notes", "")])
 
@@ -9370,9 +9709,9 @@ def exporter_excel_carnet(chemin, carnet):
         return nom
 
     def _onglet(nom, liste, avec_dossier):
-        colonnes = (["Nom", "Email", "Téléphone fixe", "Téléphone portable", "Autres téléphones", "Notes"]
+        colonnes = (["Nom", "Email", "Email 2", "Téléphone fixe", "Téléphone portable", "Autres téléphones", "Notes"]
                     + (["Dossier"] if avec_dossier else []))
-        lignes = [[c.get("nom", ""), c.get("email", ""), c.get("fixe", ""), c.get("portable", ""),
+        lignes = [[c.get("nom", ""), c.get("email", ""), c.get("email2", ""), c.get("fixe", ""), c.get("portable", ""),
                    c.get("autres_tel", ""), c.get("notes", "")]
                   + ([c.get("dossier", "")] if avec_dossier else []) for c in liste]
         largeurs = [min(60, max([len(t)] + [len(l[i]) for l in lignes]) + 2) for i, t in enumerate(colonnes)]
@@ -9509,6 +9848,7 @@ def importer_excel_carnet(chemin):
             return next((entete.index(n) for n in noms if n in entete), None)
 
         i_nom, i_email, i_dossier = _idx(COLONNES_NOM), _idx(COLONNES_EMAIL), _idx(COLONNES_DOSSIER)
+        i_email2 = _idx(COLONNES_EMAIL2)
         i_port, i_fixe = _idx(COLONNES_PORTABLE), _idx(COLONNES_FIXE)
         i_autres, i_notes = _idx(COLONNES_AUTRES_TEL), _idx(COLONNES_NOTES)
         if i_email is None and i_port is None and i_fixe is None and i_autres is None:
@@ -9522,12 +9862,15 @@ def importer_excel_carnet(chemin):
             portable = formater_numero_telephone(_v(i_port, _numero))
             fixe = formater_numero_telephone(_v(i_fixe, _numero))
             autres = formater_autres_telephones(_v(i_autres))
+            email2 = _v(i_email2)
             if "@" not in email:
                 email = ""
+            if "@" not in email2 or email2.lower() == email.lower():
+                email2 = ""
             if not email and not portable and not fixe and not autres:
                 continue
             dossier = _v(i_dossier) if i_dossier is not None else dossier_onglet
-            lus.append(({"nom": _v(i_nom), "email": email, "fixe": fixe, "portable": portable,
+            lus.append(({"nom": _v(i_nom), "email": email, "email2": email2, "fixe": fixe, "portable": portable,
                          "autres_tel": autres, "notes": _v(i_notes)}, dossier))
     if not lus:
         return 0, 0, "Aucun contact exploitable trouvé dans ce classeur."
@@ -9553,7 +9896,7 @@ def importer_excel_carnet(chemin):
         cle = _cle(c, dossier)
         existant = existants.get(cle)
         if existant is not None:
-            for champ in ("fixe", "portable", "autres_tel", "notes"):
+            for champ in ("email2", "fixe", "portable", "autres_tel", "notes"):
                 if c.get(champ) and not existant.get(champ):
                     existant[champ] = c[champ]
             continue
@@ -9691,10 +10034,11 @@ def lire_contacts_telephone(serie, progression=None):
             continue
         autres = portables[1:] + fixes[1:]
         texte_notes = "\n".join(dict.fromkeys(notes.get(cid, [])))
-        if len(adresses) > 1:  # le carnet n'a qu'une adresse : les autres vont en note
-            texte_notes = "\n".join(m for m in (texte_notes, "Autres mails : " + " ; ".join(adresses[1:])) if m)
+        if len(adresses) > 2:  # Email et Email 2 dans le carnet (16/11/2026) : les suivantes vont en note
+            texte_notes = "\n".join(m for m in (texte_notes, "Autres mails : " + " ; ".join(adresses[2:])) if m)
         contacts.append({
             "nom": nom, "email": adresses[0] if adresses else "",
+            "email2": adresses[1] if len(adresses) > 1 else "",
             "portable": portables[0] if portables else "", "fixe": fixes[0] if fixes else "",
             "autres_tel": " ; ".join(autres), "notes": texte_notes,
             "dossiers": groupes_de.get(cid) or [DOSSIER_CONTACTS_TELEPHONE],
@@ -9756,8 +10100,9 @@ def fusionner_contacts_telephone(contacts_tel, enregistrer=False, cles_telephone
         for n in (c.get("autres_tel", "") or "").split(";"):
             if len(_cle_numero(n)) >= 6:
                 par_numero.setdefault(_cle_numero(n), []).append(c)
-        if c.get("email"):
-            par_mail.setdefault(c["email"].strip().lower(), []).append(c)
+        for champ in ("email", "email2"):
+            if c.get(champ):
+                par_mail.setdefault(c[champ].strip().lower(), []).append(c)
         if c.get("nom", "").strip():
             par_nom.setdefault(c["nom"].strip().lower(), []).append(c)
 
@@ -9797,12 +10142,16 @@ def fusionner_contacts_telephone(contacts_tel, enregistrer=False, cles_telephone
         trouves = par_cle.get(t.get("cle_tel")) if t.get("cle_tel") else None
         a_lier = None
         if trouves is None:
+            # Tous les numéros sont essayés (12/11/2026, bug remonté : le
+            # portable, partagé avec une fiche WhatsApp, arrêtait la recherche
+            # avant le fixe, unique, qui aurait permis de lier la fiche)
             for n in numeros_t:
                 if n in par_numero:
-                    trouves = par_numero[n]
-                    if vus_num.get(n) == 1 and _une_seule_personne(trouves):
-                        a_lier = trouves
-                    break
+                    if trouves is None:
+                        trouves = par_numero[n]
+                    if vus_num.get(n) == 1 and _une_seule_personne(par_numero[n]):
+                        trouves = a_lier = par_numero[n]
+                        break
         if trouves is None and t["email"]:
             trouves = par_mail.get(t["email"].lower())
             if trouves and vus_mail.get(t["email"].lower()) == 1 and _une_seule_personne(trouves):
@@ -9833,6 +10182,12 @@ def fusionner_contacts_telephone(contacts_tel, enregistrer=False, cles_telephone
                 for champ in ("email", "portable", "fixe", "notes"):
                     if t[champ] and not c.get(champ):
                         c[champ] = t[champ]
+                        modifie = True
+                # 2e adresse du téléphone (16/11/2026) : en Email 2 si la fiche n'en a pas
+                deja_mails = {(c.get(k) or "").strip().lower() for k in ("email", "email2")}
+                for m in (t.get("email2", ""), t.get("email", "")):
+                    if m and not c.get("email2") and m.strip().lower() not in deja_mails:
+                        c["email2"] = m.strip()
                         modifie = True
                 # Numéros du téléphone absents de la fiche : ajoutés aux autres
                 connus = {_cle_numero(n) for n in [c.get("portable", ""), c.get("fixe", "")]
@@ -9955,6 +10310,56 @@ def actions_suppression_telephone(details, cles_a_supprimer):
     return actions
 
 
+def lier_fiches_telephone(details):
+    """Pose les liens carnet ↔ téléphone qui manquent, au moment de l'envoi
+    (12/11/2026, bug remonté : fiche importée avant la correction du numéro
+    partagé, jamais liée, donc jamais mise à jour sur le téléphone). Même
+    règle qu'à l'import : un numéro ou un mail présent sur UNE seule fiche du
+    téléphone, et des fiches du carnet d'une seule personne, pas encore
+    liées. Ne change rien d'autre dans le carnet. Retourne les noms liés."""
+    carnet = charger_carnet()
+    contacts = carnet.get("contacts", [])
+    deja = {c["cle_tel"] for c in contacts if c.get("cle_tel")}
+    vus_num, vus_mail = {}, {}
+    for d in details.values():
+        for n in d["numeros"]:
+            vus_num[n] = vus_num.get(n, 0) + 1
+        for m in d["mails"]:
+            vus_mail[m] = vus_mail.get(m, 0) + 1
+    par_numero, par_mail = {}, {}
+    for c in contacts:
+        if c.get("cle_tel"):
+            continue
+        for n in [c.get("portable", ""), c.get("fixe", "")] + (c.get("autres_tel", "") or "").split(";"):
+            if len(_cle_numero(n)) >= 6:
+                par_numero.setdefault(_cle_numero(n), []).append(c)
+        for champ in ("email", "email2"):
+            if (c.get(champ) or "").strip():
+                par_mail.setdefault(c[champ].strip().lower(), []).append(c)
+
+    def _une_personne(fiches):
+        return len({(c.get("nom", "") or "").strip().lower() for c in fiches}) == 1
+    lies = []
+    for cle, d in details.items():
+        if cle in deja:
+            continue
+        cible = next((par_numero[n] for n in d["numeros"]
+                      if vus_num.get(n) == 1 and n in par_numero and _une_personne(par_numero[n])), None)
+        if cible is None:
+            cible = next((par_mail[m] for m in d["mails"]
+                          if vus_mail.get(m) == 1 and m in par_mail and _une_personne(par_mail[m])), None)
+        if not cible or any(c.get("cle_tel") for c in cible):
+            continue
+        for c in cible:
+            c["cle_tel"] = cle
+        deja.add(cle)
+        lies.append(cible[0].get("nom", ""))
+    if lies:
+        sauvegarder_carnet(carnet)
+        print(f"[CARNET] envoi au téléphone : {len(lies)} fiche(s) liée(s) : {lies}")
+    return lies
+
+
 def preparer_envoi_telephone(details, cles=None):
     """Ce qu'il faut ajouter sur le téléphone, d'après le carnet (seulement
     les fiches des clés `cles` si elle est donnée : contacts sélectionnés) :
@@ -9995,18 +10400,43 @@ def preparer_envoi_telephone(details, cles=None):
                     numeros_vus.add(_cle_numero(n))
         mails_vus = set(d["mails"])
         for c in fiches:
-            m = (c.get("email") or "").strip()
-            if m and "@" in m and m.lower() not in mails_vus:
-                a_faire.append({"mime": "email_v2", "valeur": m, "type": "1"})
-                mails_vus.add(m.lower())
+            for m in ((c.get("email") or "").strip(), (c.get("email2") or "").strip()):
+                if m and "@" in m and m.lower() not in mails_vus:
+                    a_faire.append({"mime": "email_v2", "valeur": m, "type": "1"})
+                    mails_vus.add(m.lower())
         # Note : seulement si le téléphone n'en a aucune (rien n'est remplacé).
         # La ligne « Autres mails : » vient du téléphone lui-même : pas renvoyée.
-        if not any(texte.strip() for _i, _r, texte in d["notes"]):
-            note = next(((c.get("notes") or "").strip() for c in fiches if (c.get("notes") or "").strip()), "")
-            note = "\n".join(l for l in note.split("\n") if not l.startswith("Autres mails : ")).strip()
+        note = next(((c.get("notes") or "").strip() for c in fiches if (c.get("notes") or "").strip()), "")
+        note = "\n".join(l for l in note.split("\n") if not l.startswith("Autres mails : ")).strip()
+        notes_tel = [(i, r, t) for i, r, t in d["notes"] if t.strip()]
+        if not notes_tel:
             if note:
                 vide = next((i for i, r, _t in d["notes"] if r == raw), None)
                 a_faire.append({"mime": "note", "valeur": note, "type": "", "note_vide": vide})
+        elif note and len(notes_tel) == 1 and notes_tel[0][1] in {rid for rid, _c in modifiables}:
+            # Note complétée dans le carnet (12/11/2026, demandé) : remplacée
+            # sur le téléphone seulement si rien ne s'y perd, c.-à-d. si le
+            # texte du téléphone se retrouve entier dans celui du carnet
+            # (que des ajouts). Sinon (modifiée des deux côtés) : signalé,
+            # pas touché. La ligne « Autres mails : » du téléphone est gardée.
+            data_id, _r, texte_tel = notes_tel[0]
+            lignes_tel = texte_tel.replace("\r", "").split("\n")
+            autres_mails = [l for l in lignes_tel if l.startswith("Autres mails : ")]
+            propre_tel = "\n".join(l for l in lignes_tel if not l.startswith("Autres mails : "))
+            norm = lambda s: "\n".join(l.strip() for l in s.replace("\r", "").strip().split("\n"))
+            a, b = norm(propre_tel), norm(note)
+            if a != b:
+                import difflib
+                ops = difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+                action_note = {"mime": "note", "valeur": "\n".join([note] + autres_mails),
+                               "type": "", "note_vide": data_id, "ancienne": texte_tel}
+                if all(op in ("equal", "insert") for op, *_ in ops):
+                    a_faire.append(action_note)
+                else:
+                    # Modifiée des deux côtés : l'utilisateur choisit fiche par
+                    # fiche (12/11/2026, demandé), voir _envoyer_telephone
+                    stats.setdefault("notes_a_choisir", []).append(
+                        dict(action_note, nom=nom, raw=raw, propre_tel=propre_tel.strip(), note_carnet=note))
         if a_faire:
             stats["fiches"] += 1
             for a in a_faire:
@@ -10226,10 +10656,11 @@ def contacts_carnet_depuis_copie(lignes, titres):
         if not portables and not fixes and not mails:
             continue
         texte = "\n".join(notes + list(dict.fromkeys(extras)))
-        if len(mails) > 1:
-            texte = "\n".join(m for m in (texte, "Autres mails : " + " ; ".join(mails[1:])) if m)
+        if len(mails) > 2:  # Email et Email 2 dans le carnet (16/11/2026)
+            texte = "\n".join(m for m in (texte, "Autres mails : " + " ; ".join(mails[2:])) if m)
         for dossier in dossiers or [DOSSIER_CONTACTS_TELEPHONE]:
             contacts.append({"nom": f["nom"], "email": mails[0] if mails else "",
+                             "email2": mails[1] if len(mails) > 1 else "",
                              "portable": portables[0] if portables else "", "fixe": fixes[0] if fixes else "",
                              "autres_tel": " ; ".join(portables[1:] + fixes[1:]), "notes": texte,
                              "dossier": dossier})
@@ -10493,7 +10924,9 @@ def envoyer_au_telephone(serie, actions, progression=None):
         if a["mime"] == "note" and a.get("note_vide"):
             commandes.append(f"content update --user 0 --uri content://com.android.contacts/data "
                              f"--bind data1:s:{_valeur_bind(a['valeur'])} --where \"_id={a['note_vide']}\"")
-            journal["ajouts"].append({"op": "note_remplie", "data_id": a["note_vide"], "nom": a["nom"]})
+            # "ancienne" : texte d'avant, si la note n'était pas vide (12/11/2026)
+            journal["ajouts"].append({"op": "note_remplie", "data_id": a["note_vide"], "nom": a["nom"],
+                                      "ancienne": a.get("ancienne", "")})
         else:
             commandes.append(f"content insert --user 0 --uri content://com.android.contacts/data "
                              f"--bind raw_contact_id:i:{a['raw']} "
@@ -10563,9 +10996,11 @@ def annuler_envoi_telephone(serie, progression=None):
         elif a["op"] == "raw_cree":  # contact recréé par une remise : retiré en entier
             commande = (f"content delete --user 0 --uri content://com.android.contacts/raw_contacts "
                         f"--where \"_id={a['data_id']}\"")
-        else:  # note vide remplie : remise à vide
+        else:  # note remplie ou complétée : remise comme avant (vide ou ancien texte)
+            ancienne = a.get("ancienne", "")
+            valeur = _valeur_bind(ancienne) if ancienne else "''"
             commande = (f"content update --user 0 --uri content://com.android.contacts/data "
-                        f"--bind data1:s:'' --where \"_id={a['data_id']}\"")
+                        f"--bind data1:s:{valeur} --where \"_id={a['data_id']}\"")
         commandes.append(commande)
         noms.append(a.get("nom", ""))
         n += 1
@@ -10602,11 +11037,10 @@ def _charger_suggestions_carnet():
     carnet = charger_carnet()
     suggestions = []
     for c in carnet.get("contacts", []):
-        email = c.get("email", "").strip()
-        if not email:
-            continue
         nom = c.get("nom", "").strip()
-        suggestions.append(f"{nom} <{email}>" if nom else email)
+        for email in (c.get("email", "").strip(), (c.get("email2") or "").strip()):
+            if email:
+                suggestions.append(f"{nom} <{email}>" if nom else email)
     return suggestions
 
 class _FiltreFocusCompletion(QObject):
@@ -10692,7 +11126,7 @@ def installer_completion_destinataires(champ, chargeur=None, comparer_chiffres=F
         }
         QListView::item { padding: 4px 8px; }
         QListView::item:selected { background-color: #A52A2A; color: white; }
-    """)
+    """ + STYLE_SCROLLBAR)  # barre rouge, comme partout (13/11/2026)
     # Conserver les références : sinon Python les libère et l'autocomplétion
     # s'arrête silencieusement.
     champ._completeur_carnet = completeur
@@ -11471,7 +11905,38 @@ def charger_modeles():
             pass
     return {}
 
-def sauvegarder_modeles(data):
+# Synchro des modèles avec COURRIER ADRIEN ANDROID (15/11/2026) : date de la dernière modification
+# de chaque modèle ({adresse: {"nouveau": ms, "reponse": ms}}), posée à chaque enregistrement.
+# Dans les deux sens, le modèle le plus récemment modifié l'emporte (vide = supprimé).
+FICHIER_DATES_MODELES = os.path.join(DOSSIER_MODELES, "modeles_dates.json")
+
+def charger_dates_modeles():
+    try:
+        with open(FICHIER_DATES_MODELES, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+def _ecrire_dates_modeles(dates):
+    try:
+        os.makedirs(DOSSIER_MODELES, exist_ok=True)
+        with open(FICHIER_DATES_MODELES, "w", encoding="utf-8") as f:
+            json.dump(dates, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"[MODÈLES] dates non enregistrées : {e}")
+
+def sauvegarder_modeles(data, horodater=True):
+    if horodater:
+        try:
+            ancien, dates = charger_modeles(), charger_dates_modeles()
+            maintenant = int(time.time() * 1000)
+            for a in set(ancien) | set(data):
+                for em in ("nouveau", "reponse"):
+                    if (ancien.get(a, {}).get(em) or "") != (data.get(a, {}).get(em) or ""):
+                        dates.setdefault(a, {})[em] = maintenant
+            _ecrire_dates_modeles(dates)
+        except Exception as e:
+            print(f"[MODÈLES] date de modification non posée : {e}")
     try:
         os.makedirs(DOSSIER_MODELES, exist_ok=True)
         with open(FICHIER_MODELES, "w", encoding="utf-8") as f:
@@ -11552,7 +12017,26 @@ def generer_html_macro(macro):
     for etape in macro.get("etapes", []):
         type_etape = etape.get("type")
         if type_etape == "texte":
-            morceaux.append(html.escape(etape.get("valeur", "")))
+            texte = html.escape(etape.get("valeur", ""))
+            # Mise en forme (12/11/2026) : span stylé, rien si aucune forme
+            forme = etape.get("forme") or {}
+            css = []
+            if forme.get("police"):
+                css.append(f"font-family: {forme['police']}")
+            if str(forme.get("taille", "")).isdigit():
+                css.append(f"font-size: {forme['taille']}px")
+            if forme.get("gras"):
+                css.append("font-weight: bold")
+            if forme.get("italique"):
+                css.append("font-style: italic")
+            deco = [d for cle, d in (("souligne", "underline"), ("barre", "line-through")) if forme.get(cle)]
+            if deco:
+                css.append("text-decoration: " + " ".join(deco))
+            if re.fullmatch(r"#[0-9a-fA-F]{6}", str(forme.get("couleur", ""))):
+                css.append(f"color: {forme['couleur']}")
+            if css and texte:
+                texte = f'<span style="{"; ".join(css)}">{texte}</span>'
+            morceaux.append(texte)
         elif type_etape == "saut_ligne":
             morceaux.append("<br>")
         elif type_etape == "presse_papiers":
@@ -11688,6 +12172,29 @@ def nom_affichage_dossier(nom_brut_segment):
 # spam, pour rediriger automatiquement leurs prochains mails (voir
 # ReleveArrierePlan et ChargeurMessages, recherche "expediteurs_spam").
 FICHIER_EXPEDITEURS_SPAM = os.path.join(DOSSIER_APP, "expediteurs_spam.json")
+# Date de mise en spam de chaque adresse (15/11/2026, demandé : trier la fenêtre SPAM par date).
+# Fichier à part : expediteurs_spam.json garde son format (liste simple). Millisecondes depuis 1970,
+# comme sur le téléphone. Les adresses bloquées avant le 15/11/2026 n'ont pas de date.
+FICHIER_DATES_SPAM = os.path.join(DOSSIER_APP, "expediteurs_spam_dates.json")
+
+def charger_dates_spam():
+    """{adresse: millisecondes} des adresses dont on connaît la date de mise en spam."""
+    try:
+        if os.path.exists(FICHIER_DATES_SPAM):
+            with open(FICHIER_DATES_SPAM, encoding="utf-8") as f:
+                d = json.load(f)
+            return {str(a): int(t) for a, t in d.items() if isinstance(t, (int, float))}
+    except Exception:
+        pass
+    return {}
+
+def _ecrire_dates_spam(dates):
+    try:
+        os.makedirs(os.path.dirname(FICHIER_DATES_SPAM), exist_ok=True)
+        with open(FICHIER_DATES_SPAM, "w", encoding="utf-8") as f:
+            json.dump(dates, f, ensure_ascii=False, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"[SPAM] Échec sauvegarde expediteurs_spam_dates.json : {e}")
 
 def charger_expediteurs_spam():
     """Ensemble (minuscules) des adresses expéditeur apprises via le bouton
@@ -11709,7 +12216,7 @@ def _ressemble_a_une_adresse(valeur):
     local, _, domaine = valeur.partition("@")
     return bool(local) and "." in domaine and not domaine.startswith(".") and not domaine.endswith(".")
 
-def ajouter_expediteurs_spam(adresses):
+def ajouter_expediteurs_spam(adresses, dates=None):
     """Ajoute une ou plusieurs adresses à la liste apprise, sans doublons.
     Garde-fou (16/09/2026, demandé par l'utilisateur) : ignore tout ce qui
     ne ressemble pas à une vraie adresse email — jusqu'ici, un mail dont
@@ -11731,6 +12238,7 @@ def ajouter_expediteurs_spam(adresses):
         return set()
     liste = charger_expediteurs_spam()
     acceptees = {a.lower() for a in adresses if a and _ressemble_a_une_adresse(a.lower())}
+    deja = set(liste)
     liste.update(acceptees)
     try:
         os.makedirs(os.path.dirname(FICHIER_EXPEDITEURS_SPAM), exist_ok=True)
@@ -11739,6 +12247,22 @@ def ajouter_expediteurs_spam(adresses):
     except Exception as e:
         print(f"[SPAM] Échec sauvegarde expediteurs_spam.json : {e}")
         return set()
+    # Date de mise en spam (15/11/2026) : maintenant, ou celle du téléphone ([dates], en
+    # millisecondes) ; une adresse déjà bloquée garde sa date d'origine.
+    import time as _t_spam
+    dates_connues = charger_dates_spam()
+    maintenant = int(_t_spam.time() * 1000)
+    change = False
+    for a in acceptees:
+        if a in dates_connues:
+            continue
+        venue = (dates or {}).get(a)
+        if isinstance(venue, (int, float)) and venue > 0:
+            dates_connues[a] = int(venue); change = True
+        elif a not in deja:
+            dates_connues[a] = maintenant; change = True
+    if change:
+        _ecrire_dates_spam(dates_connues)
     return acceptees
 
 def retirer_expediteurs_spam(adresses):
@@ -11756,6 +12280,12 @@ def retirer_expediteurs_spam(adresses):
             json.dump(sorted(liste), f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[NON SPAM] Échec sauvegarde expediteurs_spam.json : {e}")
+    dates_connues = charger_dates_spam()
+    if any(a.lower() in dates_connues for a in adresses if a):
+        for a in adresses:
+            if a:
+                dates_connues.pop(a.lower(), None)
+        _ecrire_dates_spam(dates_connues)
 
 def extraire_adresse_pure(chaine_from):
     """Extrait l'adresse email nue (minuscules) d'un champ From du style
@@ -21174,7 +21704,7 @@ class DialogueCarnetAdresses(QDialog):
         btn_exporter_excel.clicked.connect(self._exporter_excel)
         # Restaurer… (07/10/2026) : revenir à une sauvegarde automatique
         # du carnet (voir _sauvegarde_auto_carnet)
-        btn_restaurer = QPushButton("Restaurer")
+        btn_restaurer = QPushButton("Restaurer le carnet d'adresses COURRIER ADRIEN Windows")
         btn_restaurer.setStyleSheet(STYLE_BOUTON)
         btn_restaurer.setToolTip("Revenir à un état précédent du carnet\n"
                                  "(sauvegardé automatiquement avant chaque modification)")
@@ -21186,28 +21716,49 @@ class DialogueCarnetAdresses(QDialog):
                                       "(créé automatiquement s'il n'existe pas)")
         btn_importer_excel.clicked.connect(self._importer_excel)
         # Importer du téléphone… (17/10/2026) : contacts du téléphone relié
-        btn_importer_tel = QPushButton("Importer du tél.")
+        btn_importer_tel = QPushButton("Importer contacts tél.")   # 16/11/2026 : contacts d'Android, pas le carnet de l'appli
         btn_importer_tel.setStyleSheet(STYLE_BOUTON)
-        btn_importer_tel.setToolTip("Contacts du téléphone relié (Wi-Fi ou USB) :\n"
+        btn_importer_tel.setToolTip("Contacts du téléphone relié (appli Contacts d'Android, Wi-Fi ou USB) :\n"
                                     "ses groupes deviennent des dossiers, les autres contacts\n"
-                                    "vont dans « Téléphone ». Rien n'est modifié sur le téléphone.")
+                                    "vont dans « Téléphone ». Rien n'est modifié sur le téléphone.\n"
+                                    "Le carnet de COURRIER ADRIEN ANDROID n'est pas concerné (bouton Synchronisation, en haut).")
         btn_importer_tel.clicked.connect(self._importer_telephone)
         # Envoyer au téléphone… (17/10/2026) : complète les fiches liées
-        btn_envoyer_tel = QPushButton("Envoyer au tél.")
+        btn_envoyer_tel = QPushButton("Envoyer aux contacts tél.")
         btn_envoyer_tel.setStyleSheet(STYLE_BOUTON)
-        btn_envoyer_tel.setToolTip("Complète sur le téléphone les fiches importées du téléphone :\n"
-                                   "numéros, mail et note qui leur manquent. Rien n'est remplacé\n"
-                                   "ni supprimé, et chaque envoi peut être annulé.")
+        btn_envoyer_tel.setToolTip("Complète dans les contacts d'Android les fiches importées du téléphone :\n"
+                                   "numéros, mail et note qui leur manquent, notes complétées\n"
+                                   "dans le carnet. Rien n'est perdu ni supprimé, et chaque\n"
+                                   "envoi peut être annulé.")
         btn_envoyer_tel.clicked.connect(self._envoyer_telephone)
-        ligne_haut.addWidget(btn_importer)
-        ligne_haut.addWidget(btn_importer_excel)
-        ligne_haut.addWidget(btn_importer_tel)
-        ligne_haut.addWidget(btn_envoyer_tel)
-        ligne_haut.addWidget(btn_exporter)
-        ligne_haut.addWidget(btn_exporter_excel)
-        ligne_haut.addStretch(1)
+        # Synchro ANDROID (16/11/2026, demandé) : le carnet de COURRIER ADRIEN ANDROID et celui-ci rendus
+        # identiques, comme le bouton « Synchroniser » de l'écran Adresses du téléphone
+        btn_synchro_android = QPushButton("Synchronisation des carnets d'adresses COURRIER ADRIEN Windows et Android")
+        btn_synchro_android.setStyleSheet(STYLE_BOUTON)
+        btn_synchro_android.setToolTip("Synchronise ce carnet avec celui de COURRIER ADRIEN ANDROID\n"
+                                       "(téléphone relié, Wi-Fi ou USB) : ajouts, modifications et\n"
+                                       "suppressions passent d'un côté à l'autre. Les contacts\n"
+                                       "d'Android ne sont pas touchés.")
+        btn_synchro_android.clicked.connect(self._synchro_android)
+        self.btn_synchro_android = btn_synchro_android
+        # 16/11/2026 (demandé) : en haut, l'essentiel = les deux carnets (Windows et Android) ;
+        # imports et exports en bas (ligne_fichiers, ajoutée au-dessus de la ligne Fermer)
+        ligne_haut.addWidget(btn_synchro_android)
         ligne_haut.addWidget(btn_restaurer)
+        ligne_haut.addStretch(1)
         layout_principal.addLayout(ligne_haut)
+        ligne_fichiers = QHBoxLayout()
+        for _b in (btn_importer, btn_importer_excel, btn_importer_tel, btn_exporter, btn_exporter_excel, btn_envoyer_tel):
+            ligne_fichiers.addWidget(_b)
+        ligne_fichiers.addStretch(1)
+        # Boutons jamais rognés : chacun garde sa largeur, la fenêtre s'élargit d'autant
+        for _ligne in (ligne_haut, ligne_fichiers):
+            for _i in range(_ligne.count()):
+                _w = _ligne.itemAt(_i).widget()
+                if _w is not None:
+                    _w.ensurePolished()   # feuille de style appliquée : sa vraie largeur
+                    _w.setMinimumWidth(_w.sizeHint().width())
+        self._lignes_boutons = (ligne_haut, ligne_fichiers)
 
         corps = QHBoxLayout()
 
@@ -21368,6 +21919,9 @@ class DialogueCarnetAdresses(QDialog):
         # btn_ajouter.setDefault(True), sur les 2 champs).
         self.champ_email = QLineEdit()
         self.champ_email.setPlaceholderText("Email")
+        # 2e adresse (16/11/2026, demandé : certaines personnes ont deux emails)
+        self.champ_email2 = QLineEdit()
+        self.champ_email2.setPlaceholderText("Email 2")
         # Téléphones (07/10/2026) : fixe sous Nom, portable sous Email —
         # deux champs distincts pour éviter toute confusion, seul le
         # portable sert aux SMS.
@@ -21409,14 +21963,16 @@ class DialogueCarnetAdresses(QDialog):
         ligne_ajout = QGridLayout()
         ligne_ajout.addWidget(self.champ_nom, 0, 0)
         ligne_ajout.addWidget(self.champ_email, 0, 1)
-        ligne_ajout.addWidget(self.combo_dossier_ajout, 0, 2)
-        ligne_ajout.addWidget(self.btn_ajouter, 0, 3)
+        ligne_ajout.addWidget(self.champ_email2, 0, 2)
+        ligne_ajout.addWidget(self.combo_dossier_ajout, 0, 3)
+        ligne_ajout.addWidget(self.btn_ajouter, 0, 4)
         ligne_ajout.addWidget(self.champ_fixe, 1, 0)
         ligne_ajout.addWidget(self.champ_portable, 1, 1)
-        ligne_ajout.addWidget(self.champ_autres_tel, 1, 2, 1, 2)
-        ligne_ajout.addWidget(self.champ_notes, 2, 0, 1, 4)
+        ligne_ajout.addWidget(self.champ_autres_tel, 1, 2, 1, 3)
+        ligne_ajout.addWidget(self.champ_notes, 2, 0, 1, 5)
         ligne_ajout.setColumnStretch(0, 1)
         ligne_ajout.setColumnStretch(1, 1)
+        ligne_ajout.setColumnStretch(2, 1)
         layout_principal.addLayout(ligne_ajout)
 
         # id du contact en cours de modification (None = mode "ajout normal") ;
@@ -21424,6 +21980,7 @@ class DialogueCarnetAdresses(QDialog):
         # _ajouter_contact() une fois l'enregistrement effectué.
         self._id_contact_en_edition = None
 
+        layout_principal.addLayout(ligne_fichiers)   # imports / exports (16/11/2026)
         ligne_bas = QHBoxLayout()
         self.lbl_statut = QLabel("")
         ligne_bas.addWidget(self.lbl_statut)
@@ -21762,6 +22319,60 @@ class DialogueCarnetAdresses(QDialog):
 
         b_raccrocher.clicked.connect(_raccrocher)
         b_fermer.clicked.connect(boite.close)
+
+        # Fermeture automatique quand l'appel se termine (12/11/2026,
+        # demandé) : raccroché sur le téléphone ou par le correspondant.
+        # Toutes les 2 s on lit l'état d'appel (mCallState : 0 = libre,
+        # 1 = sonne, 2 = en ligne ; une ligne par carte SIM, on garde la
+        # plus haute). La fenêtre se ferme au retour à 0, seulement après
+        # avoir vu l'appel en cours. Si l'état reste illisible ou libre
+        # 30 s, on arrête de surveiller : la fenêtre reste, comme avant.
+        etat = {"vu_en_cours": False, "en_lecture": False, "essais": 0}
+        relais = _RelaisTelephone(boite)
+        minuterie = QTimer(boite)
+        minuterie.setInterval(2000)
+
+        def _lire_etat():
+            sortie = _adb_bloquant("-s", serie, "shell", "dumpsys", "telephony.registry", delai=5)
+            valeurs = [int(v) for v in re.findall(r"mCallState=(\d)", sortie or "")]
+            return max(valeurs) if valeurs else None
+
+        def _etat_lu(valeur):
+            etat["en_lecture"] = False
+            if not isinstance(valeur, int):
+                valeur = None
+            if valeur:
+                etat["vu_en_cours"] = True
+            elif valeur == 0 and etat["vu_en_cours"]:
+                minuterie.stop()
+                self.lbl_statut.setStyleSheet("color: #e0a050;")
+                self.lbl_statut.setText(f"Appel vers {qui} terminé.")
+                boite.close()
+                return
+            if not etat["vu_en_cours"]:
+                etat["essais"] += 1
+                if etat["essais"] >= 15:
+                    minuterie.stop()
+
+        def _tic():
+            if etat["en_lecture"]:
+                return
+            etat["en_lecture"] = True
+
+            def _fil():
+                try:
+                    resultat = _lire_etat()
+                except Exception as e:
+                    resultat = e
+                try:
+                    relais.fini.emit(resultat)
+                except RuntimeError:
+                    pass  # fenêtre fermée entre-temps
+            _threading.Thread(target=_fil, daemon=True).start()
+
+        relais.fini.connect(_etat_lu)
+        minuterie.timeout.connect(_tic)
+        minuterie.start()
         boite.show()
 
     def _ajouter_au_champ_cible(self, libelle, ids=None):
@@ -22140,7 +22751,7 @@ class DialogueCarnetAdresses(QDialog):
     def _texte_contact(c):
         """Texte d'un contact dans la liste (07/10/2026) : "Nom — email" sur
         la 1re ligne, téléphones (fixe, portable) toujours en dessous."""
-        ligne1 = " — ".join(m for m in (c.get("nom", ""), c.get("email", "")) if m)
+        ligne1 = " — ".join(m for m in (c.get("nom", ""), c.get("email", ""), c.get("email2", "")) if m)
         ligne2 = " — ".join(m for m in (f"Fixe {c['fixe']}" if c.get("fixe") else "",
                                          f"Port. {c['portable']}" if c.get("portable") else "",
                                          f"Autres {c['autres_tel']}" if c.get("autres_tel") else "") if m)
@@ -22167,6 +22778,8 @@ class DialogueCarnetAdresses(QDialog):
         # dossiers (220) + marges et espacements (~75) + padding (14) +
         # colonne du dossier + ascenseur (~20)
         largeur = 220 + 75 + 14 + LARGEUR_COLONNE_DOSSIER + 10 + 20 + plus_long
+        for _ligne in getattr(self, "_lignes_boutons", ()):   # les lignes de boutons entières (16/11/2026)
+            largeur = max(largeur, _ligne.minimumSize().width() + 40)
         ecran = QApplication.primaryScreen()
         maxi = int(ecran.availableGeometry().width() * 0.95) if ecran else 1600
         return max(820, min(largeur, maxi))
@@ -22184,6 +22797,7 @@ class DialogueCarnetAdresses(QDialog):
                 continue
             if recherche and recherche not in c.get("nom", "").lower() \
                     and recherche not in c.get("email", "").lower() \
+                    and recherche not in (c.get("email2", "") or "").lower() \
                     and recherche not in (c.get("notes", "") or "").lower() \
                     and not (chiffres_recherche and chiffres_recherche in
                              re.sub(r"\D", "", c.get("fixe", "") + " " + c.get("portable", "")
@@ -22293,6 +22907,7 @@ class DialogueCarnetAdresses(QDialog):
     def _ajouter_contact(self):
         nom = self.champ_nom.text().strip()
         email = self.champ_email.text().strip()
+        email2 = self.champ_email2.text().strip()
         fixe = self.champ_fixe.text().strip()
         portable = self.champ_portable.text().strip()
         autres_tel = formater_autres_telephones(self.champ_autres_tel.text())
@@ -22301,6 +22916,10 @@ class DialogueCarnetAdresses(QDialog):
         if (email and "@" not in email) or (not email and not fixe and not portable and not autres_tel):
             self.lbl_statut.setStyleSheet("color: #e08080;")
             self.lbl_statut.setText("Entrez une adresse email valide ou un numéro de téléphone.")
+            return
+        if email2 and "@" not in email2:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("L'adresse Email 2 n'est pas valide.")
             return
         for numero, libelle in ((fixe, "fixe"), (portable, "portable")):
             if numero and not normaliser_numero_sms(numero):
@@ -22320,6 +22939,7 @@ class DialogueCarnetAdresses(QDialog):
                 if c.get("id") == id_en_cours:
                     c["nom"] = nom
                     c["email"] = email
+                    c["email2"] = email2
                     c["dossier"] = dossier
                     c["fixe"] = fixe
                     c["portable"] = portable
@@ -22335,7 +22955,7 @@ class DialogueCarnetAdresses(QDialog):
             self._rafraichir_contacts()
             return
         carnet.setdefault("contacts", []).append({
-            "id": uuid.uuid4().hex, "nom": nom, "email": email, "dossier": dossier,
+            "id": uuid.uuid4().hex, "nom": nom, "email": email, "email2": email2, "dossier": dossier,
             "fixe": fixe, "portable": portable, "autres_tel": autres_tel, "notes": notes,
         })
         sauvegarder_carnet(carnet)
@@ -22398,7 +23018,7 @@ class DialogueCarnetAdresses(QDialog):
             return _html.escape(t or "").replace("\n", "<br>")
 
         lignes = [f"<span style='font-size:16px; font-weight:bold;'>{_e(c.get('nom')) or '(sans nom)'}</span>"]
-        for libelle, champ in (("Dossier", "dossier"), ("Mail", "email"), ("Portable", "portable"),
+        for libelle, champ in (("Dossier", "dossier"), ("Mail", "email"), ("Mail 2", "email2"), ("Portable", "portable"),
                                ("Fixe", "fixe"), ("Autres téléphones", "autres_tel")):
             if c.get(champ):
                 lignes.append(f"<span style='color:#aaaaaa;'>{libelle} :</span> {_e(c[champ])}")
@@ -22417,9 +23037,45 @@ class DialogueCarnetAdresses(QDialog):
         QTimer.singleShot(0, _agrandir)
 
     def _vider_champs_contact(self):
-        for champ in (self.champ_nom, self.champ_email, self.champ_fixe, self.champ_portable,
+        for champ in (self.champ_nom, self.champ_email, self.champ_email2, self.champ_fixe, self.champ_portable,
                       self.champ_autres_tel, self.champ_notes):
             champ.clear()
+
+    def _synchro_android(self):
+        """Bouton Synchro ANDROID (16/11/2026) : le téléphone est prévenu par adb, il envoie son carnet,
+        COURRIER fusionne (_traiter_synchro_carnet) et les deux carnets deviennent identiques."""
+        if not _lire_synchro_telephone().get("confirme"):
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Le téléphone n'est pas encore lié à COURRIER : fenêtre SPAM, "
+                                    "« Synchro avec le téléphone » une première fois.")
+            return
+        principal = self._parent_courrier
+        if principal is None or not hasattr(principal, "_lancer_fil_export_android"):
+            return
+        self.btn_synchro_android.setEnabled(False)
+        self.lbl_statut.setStyleSheet("color: #e0a050;")
+        self.lbl_statut.setText("Synchro avec COURRIER ADRIEN ANDROID…")
+
+        def _fin(bilan):
+            try:
+                self.btn_synchro_android.setEnabled(True)
+                ok = str(bilan).startswith("Synchro faite")
+                self.lbl_statut.setStyleSheet("color: #80c080;" if ok else "color: #e08080;")
+                self.lbl_statut.setText(str(bilan))
+                self._charger_dossiers()
+                self._rafraichir_contacts()
+                # le bilan en fenêtre (16/11/2026, demandé : la ligne d'état passait inaperçue)
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox(QMessageBox.Icon.Information if ok else QMessageBox.Icon.Warning,
+                            "Synchronisation des carnets d'adresses", str(bilan),
+                            QMessageBox.StandardButton.Ok, self).exec()
+            except RuntimeError:
+                pass  # fenêtre fermée entre-temps
+
+        def _connecte(serie):
+            principal._lancer_fil_export_android(lambda: _synchro_carnet_telephone(serie), _fin)
+
+        connecter_telephone(self, _connecte, si_echec=lambda: _fin("Téléphone introuvable : rien n'a changé."))
 
     def _importer_telephone(self):
         """Importer du téléphone… (17/10/2026) : connexion habituelle (code de
@@ -22463,7 +23119,7 @@ class DialogueCarnetAdresses(QDialog):
             return
         if not any(c.get("cle_tel") for c in charger_carnet().get("contacts", [])):
             self.lbl_statut.setStyleSheet("color: #e08080;")
-            self.lbl_statut.setText("Aucune fiche liée au téléphone : faites d'abord « Importer du tél. ».")
+            self.lbl_statut.setText("Aucune fiche liée au téléphone : faites d'abord « Importer contacts tél. ».")
             return
         self.lbl_statut.setStyleSheet("color: #e0a050;")
         self.lbl_statut.setText("Connexion au téléphone…")
@@ -22502,6 +23158,48 @@ class DialogueCarnetAdresses(QDialog):
             except Exception as e:
                 relais.fini.emit(e)
         _threading.Thread(target=_fil, daemon=True).start()
+
+    def _choisir_note_telephone(self, choix, rang, total):
+        """Note modifiée des deux côtés (12/11/2026) : montre les différences
+        (barré rouge = seulement sur le téléphone, vert = seulement dans le
+        carnet). True = remplacer par celle du carnet, False = garder celle
+        du téléphone, None = annuler l'envoi."""
+        from PySide6.QtWidgets import QTextBrowser
+        boite = QDialog(self)
+        boite.setWindowTitle("Note différente sur le téléphone"
+                             + (f" ({rang}/{total})" if total > 1 else ""))
+        boite.setStyleSheet("QDialog { background-color: #2a2a2a; } "
+                            "QLabel { color: white; font-family: Verdana; font-size: 11px; } "
+                            "QTextBrowser { background-color: #1e1e1e; color: white; "
+                            "border: 1px solid #5a5a5a; font-family: Verdana; font-size: 12px; }"
+                            + STYLE_BOUTON)
+        boite.resize(620, 480)
+        intro = QLabel(f"<b>{html.escape(choix['nom'])}</b> : la note a été modifiée dans le carnet "
+                       "ET sur le téléphone.<br><br>"
+                       "<span style='color:#ff8080;text-decoration:line-through;'>Barré en rouge</span>"
+                       " : seulement sur le téléphone (perdu si on remplace).<br>"
+                       "<span style='color:#80e080;font-weight:bold;'>En vert</span>"
+                       " : seulement dans le carnet.")
+        intro.setWordWrap(True)
+        zone = QTextBrowser()
+        zone.setHtml(_differences_html(choix["propre_tel"], choix["note_carnet"]).replace("\n", "<br>"))
+        b_remplacer = QPushButton("  Remplacer par celle du carnet  ")
+        b_garder = QPushButton("  Garder celle du téléphone  ")
+        b_annuler = QPushButton("  Annuler l'envoi  ")
+        reponse = [None]
+        for b, valeur in ((b_remplacer, True), (b_garder, False), (b_annuler, None)):
+            b.setAutoDefault(False)
+            b.clicked.connect(lambda _c=False, v=valeur: (reponse.__setitem__(0, v), boite.accept()))
+        boutons = QHBoxLayout()
+        boutons.addStretch()
+        for b in (b_remplacer, b_garder, b_annuler):
+            boutons.addWidget(b)
+        disposition = QVBoxLayout(boite)
+        disposition.addWidget(intro)
+        disposition.addWidget(zone, 1)
+        disposition.addLayout(boutons)
+        boite.exec()
+        return reponse[0]
 
     def _boite_question(self, titre, texte, bouton_oui, bouton_non="Annuler"):
         from PySide6.QtWidgets import QMessageBox
@@ -22554,6 +23252,7 @@ class DialogueCarnetAdresses(QDialog):
                     if k in carnet.get("suppressions_tel", {}):
                         carnet["suppressions_tel"][k]["statut"] = "garder_sur_tel"
                 sauvegarder_carnet(carnet)
+        lier_fiches_telephone(details)  # liens manquants (12/11/2026)
         # Contacts sélectionnés liés au téléphone : envoyer seulement eux, ou tout
         ids = {it.data(Qt.ItemDataRole.UserRole) for it in self.liste_contacts.selectedItems()}
         cles = {c["cle_tel"] for c in charger_carnet().get("contacts", [])
@@ -22587,6 +23286,24 @@ class DialogueCarnetAdresses(QDialog):
             remarques.append(f"{st['introuvables']} fiche(s) liée(s) n'existent plus sur le téléphone : ignorées.")
         if st["non_modifiables"]:
             remarques.append(f"{st['non_modifiables']} fiche(s) seulement WhatsApp ou carte SIM : non modifiables.")
+        # Notes modifiées des deux côtés : question fiche par fiche (12/11/2026, demandé)
+        a_choisir = st.get("notes_a_choisir", [])
+        gardees = []
+        for i, choix in enumerate(a_choisir, 1):
+            reponse = self._choisir_note_telephone(choix, i, len(a_choisir))
+            if reponse is None:
+                self.lbl_statut.setText("Envoi annulé.")
+                return
+            if reponse:
+                if not any(a.get("raw") == choix["raw"] for a in actions):
+                    st["fiches"] += 1
+                st["notes"] += 1
+                actions.append({k: v for k, v in choix.items() if k not in ("propre_tel", "note_carnet")})
+            else:
+                gardees.append(choix["nom"])
+        if gardees:
+            remarques.append(f"{len(gardees)} note(s) du téléphone gardée(s) telle(s) quelle(s) : "
+                             + ", ".join(gardees[:10]) + (" …" if len(gardees) > 10 else ""))
         if not actions:
             self.lbl_statut.setStyleSheet("color: #80c080;")
             self.lbl_statut.setText("Le téléphone a déjà tout ce que contient le carnet. " + " ".join(remarques))
@@ -22597,13 +23314,21 @@ class DialogueCarnetAdresses(QDialog):
         lignes += [f"{st['fiches']} fiche(s) du téléphone à compléter :", ""] if st["fiches"] else []
         for cle, libelle in (("numeros", "numéro(s) de téléphone"), ("mails", "adresse(s) mail"),
                              ("notes", "note(s)")):
-            if st[cle]:
+            if cle == "notes":
+                completees = sum(1 for a in actions if a.get("mime") == "note" and a.get("ancienne"))
+                if st[cle] - completees:
+                    lignes.append(f"•  {st[cle] - completees} {libelle} à ajouter")
+                if completees:
+                    lignes.append(f"•  {completees} note(s) complétée(s) dans le carnet à mettre à jour")
+            elif st[cle]:
                 lignes.append(f"•  {st[cle]} {libelle} à ajouter")
         noms = sorted({a["nom"] for a in actions}, key=cle_tri_alpha)
         lignes += ["", "Fiches concernées : " + ", ".join(noms[:15]) + (" …" if len(noms) > 15 else "")]
         if remarques:
             lignes += [""] + remarques
-        lignes += ["", "Rien n'est remplacé ni supprimé sur le téléphone. Avant l'envoi, une sauvegarde de "
+        lignes += ["", "Rien n'est perdu ni supprimé sur le téléphone : une note n'y est remplacée que "
+                       "si tout son texte se retrouve dans celle du carnet, ou si vous l'avez choisi. "
+                       "Avant l'envoi, une sauvegarde de "
                        "tous ses contacts est faite dans Courrier Adrien, et l'envoi pourra être "
                        "annulé.", "", "Envoyer au téléphone ?"]
         if not self._boite_question("Envoyer au téléphone", "\n".join(lignes), "Envoyer"):
@@ -22859,7 +23584,7 @@ class DialogueCarnetAdresses(QDialog):
         if stats["lies"]:
             n = stats["lies"]
             lignes.append(f"•  {n} {_s(n, 'fiche du carnet sera reliée', 'fiches du carnet seront reliées')} "
-                          f"au téléphone (pour « Envoyer au tél. »).")
+                          f"au téléphone (pour « Envoyer aux contacts tél. »).")
         lignes += ["", ("Rien d'autre n'est effacé ni remplacé dans le carnet" if decision is True
                         else "Rien n'est effacé ni remplacé dans le carnet") + ", et rien n'est modifié "
                        "sur le téléphone. Le carnet est sauvegardé juste avant "
@@ -22895,6 +23620,7 @@ class DialogueCarnetAdresses(QDialog):
             return
         self.champ_nom.setText(contact.get("nom", ""))
         self.champ_email.setText(contact.get("email", ""))
+        self.champ_email2.setText(contact.get("email2", ""))
         self.champ_fixe.setText(contact.get("fixe", ""))
         self.champ_portable.setText(contact.get("portable", ""))
         self.champ_autres_tel.setText(contact.get("autres_tel", ""))
@@ -26390,7 +27116,16 @@ class FenetreRedaction(QDialog):
         # Boutons d'action en haut, dans l'ordre Envoyer / Accusé de réception / Annuler
         layout_btn_haut = QHBoxLayout()
         self.btn_envoyer = QPushButton("  Envoyer  ")
-        self.btn_envoyer.setStyleSheet(STYLE_BOUTON)
+        # Allumé en or le temps de l'envoi, jusqu'à la fermeture de la
+        # fenêtre (13/11/2026, demandé) — voir _allumer_bouton_envoi.
+        self.btn_envoyer.setStyleSheet(
+            STYLE_BOUTON + """
+            QPushButton[allume="true"] {
+                background-color: #DAA520; color: black;
+                border-bottom-color: #8a6510; border-right-color: #8a6510;
+            }
+            """
+        )
         self.btn_envoyer.clicked.connect(self.demarrer_envoi)
         # Même largeur que les boutons À / Copie / Copie cachée juste dessous
         # (LARGEUR_LIBELLES, 28/10/2026, demandé par l'utilisateur).
@@ -26409,8 +27144,14 @@ class FenetreRedaction(QDialog):
 
         self.btn_accuse_reception = QPushButton("  Accusé de réception  ")
         self.btn_accuse_reception.setCheckable(True)
+        # Coché = allumé en or, comme les autres boutons actifs (12/11/2026, demandé)
         self.btn_accuse_reception.setStyleSheet(
-            STYLE_BOUTON + "QPushButton:checked { background-color: #6b1414; border: 1px solid white; }"
+            STYLE_BOUTON + """
+            QPushButton:checked {
+                background-color: #DAA520; color: black;
+                border-bottom-color: #8a6510; border-right-color: #8a6510;
+            }
+            """
         )
         layout_btn_haut.addWidget(self.btn_accuse_reception)
 
@@ -26420,7 +27161,15 @@ class FenetreRedaction(QDialog):
         layout_btn_haut.addWidget(btn_annuler)
 
         btn_envoi_rapide = QPushButton("  Envoi rapide  ")
-        btn_envoi_rapide.setStyleSheet(STYLE_BOUTON)
+        btn_envoi_rapide.setStyleSheet(
+            STYLE_BOUTON + """
+            QPushButton[allume="true"] {
+                background-color: #DAA520; color: black;
+                border-bottom-color: #8a6510; border-right-color: #8a6510;
+            }
+            """
+        )
+        self.btn_envoi_rapide = btn_envoi_rapide
         btn_envoi_rapide.setToolTip(
             "Envoie immédiatement, sans tenir compte du délai programmé "
             "(DÉLAI / heure personnalisée), quel que soit le compte."
@@ -26774,6 +27523,13 @@ class FenetreRedaction(QDialog):
         # Aperçu de vérification d'une PJ (17/10/2026) : remplace le corps le
         # temps de la vérification, le corps est seulement masqué.
         layout.addWidget(self._construire_apercu_pj(), 1)
+
+        # Macros « texte pur » (déclencheur aucun) en bas de la rédaction
+        # (12/11/2026, demandé) : toujours à portée, même quand un autre
+        # programme s'intercale entre cette fenêtre et la fenêtre principale.
+        self._cadre_macros_redac, self._zone_macros_redac = creer_cadre_macros("cadreMacrosRedac")
+        layout.addWidget(self._cadre_macros_redac, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._regenerer_macros_redaction()
 
         layout_externe.addLayout(layout, 1)
 
@@ -27389,6 +28145,20 @@ class FenetreRedaction(QDialog):
         )
         self.webview.page().runJavaScript(js)
 
+    def _regenerer_macros_redaction(self):
+        """Boutons des macros « texte pur » du bas de la fenêtre ; relue à
+        chaque fermeture du gestionnaire de macros (fenêtre principale)."""
+        macros = [m for m in charger_macros().get("macros", [])
+                  if m.get("declencheur") == "aucun"]
+        def _inserer(m):
+            # Relue au clic : une macro modifiée et sauvegardée sans fermer
+            # le gestionnaire est prise telle qu'elle est maintenant
+            a_jour = next((x for x in charger_macros().get("macros", [])
+                           if x.get("id") == m.get("id")), m)
+            self.inserer_macro_au_curseur(a_jour)
+        remplir_cadre_macros(self._cadre_macros_redac, self._zone_macros_redac, macros,
+                             _inserer, sans_focus=True)
+
     def inserer_macro_au_curseur(self, macro):
         """Macro « texte pur » (déclencheur aucun, 07/11/2026) : insère son
         contenu au curseur du mail déjà ouvert, à chaque clic — pas de
@@ -27607,7 +28377,7 @@ class FenetreRedaction(QDialog):
             self._envoi_termine = False
             self._nb_tentatives_envoi = 0
             self._mode_file_attente = heure_envoi
-            self.btn_envoyer.setEnabled(False)
+            self._allumer_bouton_envoi(forcer_immediat)
             self.lbl_statut_envoi.setStyleSheet("color: #e0a050; font-family: Verdana; font-size: 11px;")
             self.lbl_statut_envoi.setText("Mise en file d'attente…")
             if self._chargement_termine:
@@ -27618,13 +28388,32 @@ class FenetreRedaction(QDialog):
         self._mode_file_attente = None
         self._envoi_termine = False
         self._nb_tentatives_envoi = 0
-        self.btn_envoyer.setEnabled(False)
+        self._allumer_bouton_envoi(forcer_immediat)
         self.lbl_statut_envoi.setStyleSheet("color: #e0a050; font-family: Verdana; font-size: 11px;")
         self.lbl_statut_envoi.setText("Envoi en cours…")
         if self._chargement_termine:
             self._tenter_recuperation_corps()
         else:
             self._finir_envoi()
+
+    def _allumer_bouton_envoi(self, rapide=False):
+        """Allume en or le bouton cliqué (Envoyer ou Envoi rapide) et
+        désactive les deux le temps de l'envoi : le bouton reste allumé
+        jusqu'à la fermeture de la fenêtre de rédaction. En cas d'échec,
+        _eteindre_bouton_envoi les rallume normalement."""
+        allume = self.btn_envoi_rapide if rapide else self.btn_envoyer
+        for b in (self.btn_envoyer, self.btn_envoi_rapide):
+            b.setEnabled(False)
+            b.setProperty("allume", b is allume)
+            b.style().unpolish(b)
+            b.style().polish(b)
+
+    def _eteindre_bouton_envoi(self):
+        for b in (self.btn_envoyer, self.btn_envoi_rapide):
+            b.setEnabled(True)
+            b.setProperty("allume", False)
+            b.style().unpolish(b)
+            b.style().polish(b)
 
     def _tenter_recuperation_corps(self):
         if self._envoi_termine:
@@ -27648,7 +28437,7 @@ class FenetreRedaction(QDialog):
         # contenu potentiellement obsolète ou vide. Mieux vaut bloquer
         # clairement que de perdre silencieusement ce qui a été rédigé.
         self._envoi_termine = True
-        self.btn_envoyer.setEnabled(True)
+        self._eteindre_bouton_envoi()
         self.lbl_statut_envoi.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
         self.lbl_statut_envoi.setText(
             "Le corps du message n'a pas pu être récupéré (rendu bloqué). "
@@ -28213,7 +29002,7 @@ class FenetreRedaction(QDialog):
         )
 
         if not liste_a:
-            self.btn_envoyer.setEnabled(True)
+            self._eteindre_bouton_envoi()
             self.lbl_statut_envoi.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
             self.lbl_statut_envoi.setText("Renseignez au moins un destinataire (À).")
             return
@@ -28346,7 +29135,7 @@ class FenetreRedaction(QDialog):
             self._envoyeur.start()
 
         except Exception as e:
-            self.btn_envoyer.setEnabled(True)
+            self._eteindre_bouton_envoi()
             self.lbl_statut_envoi.setText("")
             from PySide6.QtWidgets import QMessageBox
             msg_err = QMessageBox(self)
@@ -28363,7 +29152,7 @@ class FenetreRedaction(QDialog):
                 self.reponse_envoyee.emit(self._uid_original, formatdate(localtime=True), self._dossier_imap_original or "")
             self.accept()
         else:
-            self.btn_envoyer.setEnabled(True)
+            self._eteindre_bouton_envoi()
             self.lbl_statut_envoi.setText("")
             from PySide6.QtWidgets import QMessageBox
             msg_err = QMessageBox(self)
@@ -28708,8 +29497,18 @@ class GestionnaireMacros(QDialog):
         btn_nouvelle.clicked.connect(self._nouvelle_macro)
         btn_supprimer_macro = QPushButton(" − ")
         btn_supprimer_macro.clicked.connect(self._supprimer_macro)
+        # ▲/▼ (12/11/2026, demandé) : changent l'ordre des macros, donc
+        # l'ordre de leurs boutons dans la barre du bas (après Sauvegarder)
+        btn_monter_macro = QPushButton(" ▲ ")
+        btn_monter_macro.setToolTip("Monter la macro sélectionnée")
+        btn_monter_macro.clicked.connect(lambda: self._deplacer_macro(-1))
+        btn_descendre_macro = QPushButton(" ▼ ")
+        btn_descendre_macro.setToolTip("Descendre la macro sélectionnée")
+        btn_descendre_macro.clicked.connect(lambda: self._deplacer_macro(1))
         ligne_btns_macro.addWidget(btn_nouvelle)
         ligne_btns_macro.addWidget(btn_supprimer_macro)
+        ligne_btns_macro.addWidget(btn_monter_macro)
+        ligne_btns_macro.addWidget(btn_descendre_macro)
         colonne_gauche.addLayout(ligne_btns_macro)
         layout.addLayout(colonne_gauche)
 
@@ -28738,6 +29537,56 @@ class GestionnaireMacros(QDialog):
         self.liste_etapes = QListWidget()
         self.liste_etapes.currentRowChanged.connect(self._sur_changement_etape)
         colonne_droite.addWidget(self.liste_etapes, 1)
+
+        # Mise en forme du texte (12/11/2026, demandé) : mêmes éléments que la
+        # barre de rédaction. Agit sur l'étape texte sélectionnée, et sert
+        # aussi pour la prochaine étape texte ajoutée. Police/taille « Par
+        # défaut » = celles du mail où la macro est insérée.
+        conteneur_forme = QWidget()
+        barre_forme = FlowLayout(conteneur_forme, h_spacing=4, v_spacing=6)
+        barre_forme.setContentsMargins(0, 0, 0, 0)
+        self._maj_forme_en_cours = False
+        self.combo_police_etape = QComboBox()
+        self.combo_police_etape.addItem("Police par défaut", "")
+        for police in ("Verdana", "Arial", "Times New Roman", "Courier New", "Georgia", "Tahoma"):
+            self.combo_police_etape.addItem(police, police)
+        self.combo_police_etape.setFixedWidth(140)
+        self.combo_police_etape.currentIndexChanged.connect(lambda _i: self._sur_modif_forme())
+        barre_forme.addWidget(self.combo_police_etape)
+        self.combo_taille_etape = QComboBox()
+        self.combo_taille_etape.addItem("Taille", "")
+        for t in ("8", "9", "10", "11", "12", "14", "16", "18", "24", "32"):
+            self.combo_taille_etape.addItem(t, t)
+        self.combo_taille_etape.setFixedWidth(70)
+        self.combo_taille_etape.currentIndexChanged.connect(lambda _i: self._sur_modif_forme())
+        barre_forme.addWidget(self.combo_taille_etape)
+        style_bascule = STYLE_BOUTON + (
+            "QPushButton:checked { background-color: #DAA520; color: black; }")
+        self.btns_forme = {}
+        for cle, libelle, css in (
+            ("gras", " Gras ", "font-weight: bold;"),
+            ("italique", " Italique ", "font-style: italic;"),
+            ("souligne", " Souligné ", "text-decoration: underline;"),
+            ("barre", " Barré ", "text-decoration: line-through;"),
+        ):
+            b = QPushButton(libelle)
+            b.setCheckable(True)
+            b.setStyleSheet(style_bascule + "QPushButton { %s }" % css)
+            b.toggled.connect(lambda _c: self._sur_modif_forme())
+            barre_forme.addWidget(b)
+            self.btns_forme[cle] = b
+        self._couleur_etape = ""
+        self.btn_couleur_etape = QPushButton(" Couleur ")
+        self.btn_couleur_etape.setToolTip("Clic : choisir la couleur du texte\n"
+                                          "« × » à côté : revenir à la couleur par défaut")
+        self.btn_couleur_etape.clicked.connect(self._choisir_couleur_etape)
+        barre_forme.addWidget(self.btn_couleur_etape)
+        btn_sans_couleur = QPushButton(" × ")
+        btn_sans_couleur.setToolTip("Couleur par défaut")
+        btn_sans_couleur.clicked.connect(lambda: self._fixer_couleur_etape(""))
+        barre_forme.addWidget(btn_sans_couleur)
+        colonne_droite.addWidget(conteneur_forme)
+        self._fixer_couleur_etape("", maj=False)
 
         # Ligne d'ajout d'étape
         ligne_ajout = QHBoxLayout()
@@ -28846,6 +29695,17 @@ class GestionnaireMacros(QDialog):
             self.champ_nom.clear()
             self.liste_etapes.clear()
 
+    def _deplacer_macro(self, sens):
+        macros = self.donnees.get("macros", [])
+        i = self.macro_courante_index
+        j = i + sens
+        if not (0 <= i < len(macros)) or not (0 <= j < len(macros)):
+            return
+        macros[i], macros[j] = macros[j], macros[i]
+        self.macro_courante_index = j
+        self._charger_liste_macros()
+        self.liste_macros.setCurrentRow(j)
+
     def _sur_modif_nom(self, texte):
         macro = self._macro_courante()
         if macro is None:
@@ -28880,10 +29740,103 @@ class GestionnaireMacros(QDialog):
         for etape in macro.get("etapes", []):
             item = QListWidgetItem(self._resume_etape(etape))
             item.setData(Qt.ItemDataRole.UserRole, etape)
+            self._habiller_item_etape(item, etape)
             self.liste_etapes.addItem(item)
 
+    def _habiller_item_etape(self, item, etape):
+        """Montre dans la liste la mise en forme d'une étape texte (gras,
+        italique, souligné, barré, couleur) ; police et taille restent
+        celles de la liste pour garder les lignes lisibles."""
+        if etape.get("type") != "texte":
+            return
+        forme = etape.get("forme") or {}
+        f = self.liste_etapes.font()
+        f.setBold(bool(forme.get("gras")))
+        f.setItalic(bool(forme.get("italique")))
+        f.setUnderline(bool(forme.get("souligne")))
+        f.setStrikeOut(bool(forme.get("barre")))
+        item.setFont(f)
+        if forme.get("couleur"):
+            item.setForeground(QColor(forme["couleur"]))
+        extras = [x for x in (forme.get("police"), forme.get("taille") and f"{forme['taille']} px") if x]
+        if extras:
+            item.setText(f"{self._resume_etape(etape)}   ({', '.join(extras)})")
+
+    def _forme_affichee(self):
+        """Mise en forme choisie dans la barre, sans les valeurs par défaut."""
+        forme = {}
+        if self.combo_police_etape.currentData():
+            forme["police"] = self.combo_police_etape.currentData()
+        if self.combo_taille_etape.currentData():
+            forme["taille"] = self.combo_taille_etape.currentData()
+        for cle, b in self.btns_forme.items():
+            if b.isChecked():
+                forme[cle] = True
+        if self._couleur_etape:
+            forme["couleur"] = self._couleur_etape
+        return forme
+
+    def _etape_texte_selectionnee(self):
+        macro = self._macro_courante()
+        ligne = self.liste_etapes.currentRow()
+        if macro is None or not (0 <= ligne < len(macro.get("etapes", []))):
+            return None, -1
+        etape = macro["etapes"][ligne]
+        return (etape, ligne) if etape.get("type") == "texte" else (None, -1)
+
+    def _sur_modif_forme(self):
+        if self._maj_forme_en_cours:
+            return
+        etape, ligne = self._etape_texte_selectionnee()
+        if etape is None:
+            return
+        forme = self._forme_affichee()
+        if forme:
+            etape["forme"] = forme
+        else:
+            etape.pop("forme", None)
+        item = self.liste_etapes.item(ligne)
+        if item:
+            item.setText(self._resume_etape(etape))
+            self._habiller_item_etape(item, etape)
+
+    def _fixer_couleur_etape(self, couleur, maj=True):
+        self._couleur_etape = couleur
+        if couleur:
+            texte = "black" if QColor(couleur).lightness() > 140 else "white"
+            self.btn_couleur_etape.setStyleSheet(
+                STYLE_BOUTON + f"QPushButton {{ background-color: {couleur}; color: {texte}; }}")
+        else:
+            self.btn_couleur_etape.setStyleSheet(STYLE_BOUTON)
+        if maj:
+            self._sur_modif_forme()
+
+    def _choisir_couleur_etape(self):
+        from PySide6.QtWidgets import QColorDialog
+        depart = QColor(self._couleur_etape) if self._couleur_etape else QColor("black")
+        couleur = QColorDialog.getColor(depart, self)
+        if couleur.isValid():
+            self._fixer_couleur_etape(couleur.name())
+
     def _sur_changement_etape(self, index):
-        pass  # réservé pour une future édition en place
+        """Une étape texte sélectionnée : la barre de mise en forme affiche
+        la sienne. Une autre étape : la barre garde ses réglages (ils
+        serviront pour la prochaine étape texte ajoutée)."""
+        etape, _ligne = self._etape_texte_selectionnee()
+        if etape is None:
+            return
+        forme = etape.get("forme") or {}
+        self._maj_forme_en_cours = True
+        try:
+            i = self.combo_police_etape.findData(forme.get("police", ""))
+            self.combo_police_etape.setCurrentIndex(max(i, 0))
+            i = self.combo_taille_etape.findData(str(forme.get("taille", "")))
+            self.combo_taille_etape.setCurrentIndex(max(i, 0))
+            for cle, b in self.btns_forme.items():
+                b.setChecked(bool(forme.get(cle)))
+            self._fixer_couleur_etape(forme.get("couleur", ""), maj=False)
+        finally:
+            self._maj_forme_en_cours = False
 
     def _sur_changement_type_ajout(self, index):
         cle = self.combo_type_etape.itemData(index)
@@ -28903,6 +29856,9 @@ class GestionnaireMacros(QDialog):
             if not valeur:
                 return
             etape = {"type": "texte", "valeur": valeur}
+            forme = self._forme_affichee()
+            if forme:
+                etape["forme"] = forme
         else:
             etape = {"type": type_etape}
         macro.setdefault("etapes", []).append(etape)
@@ -30389,6 +31345,49 @@ class FenetreConsole(QWidget):
             f"{_t.strftime('%H:%M:%S')}")
 
 
+STYLE_BTN_MACRO = """
+    QPushButton {
+        background-color: #A52A2A; color: white;
+        border: none;
+        font-family: Verdana; font-size: 11px; font-weight: bold;
+        padding: 1px 6px;
+    }
+    QPushButton:hover { background-color: #DAA520; color: black; }
+"""
+
+
+def creer_cadre_macros(nom_objet="cadreMacros"):
+    """Cadre des boutons de macros (encadré blanc sur fond rouge), commun à
+    la fenêtre principale et aux fenêtres de rédaction (12/11/2026)."""
+    cadre = QFrame()
+    cadre.setObjectName(nom_objet)
+    cadre.setStyleSheet(
+        f"QFrame#{nom_objet} {{ border: 1px solid white; background-color: #A52A2A; }}")
+    cadre.setFixedHeight(22)
+    zone = QHBoxLayout(cadre)
+    zone.setContentsMargins(3, 2, 3, 2)
+    zone.setSpacing(4)
+    return cadre, zone
+
+
+def remplir_cadre_macros(cadre, zone, macros, action, style=STYLE_BTN_MACRO, sans_focus=False):
+    """Remplace les boutons du cadre par un bouton par macro ; action(macro)
+    au clic. Cadre masqué s'il n'y a aucune macro (18/10/2026, demandé)."""
+    while zone.count():
+        w = zone.takeAt(0).widget()
+        if w:
+            w.deleteLater()
+    for macro in macros:
+        btn = QPushButton(macro.get("nom", "MACRO"))
+        btn.setStyleSheet(style)
+        btn.setFixedHeight(16)
+        if sans_focus:
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.clicked.connect(lambda checked=False, m=macro: action(m))
+        zone.addWidget(btn)
+    cadre.setVisible(zone.count() > 0)
+
+
 def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     """Cadre COPIER / COUPER / COLLER de la barre du bas (25/10/2026,
     demandé, même encadré blanc que les macros ; repris dans photos,
@@ -30682,7 +31681,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 12/11/2026 02h04")
+        self.setWindowTitle("COURRIER ADRIEN — 16/11/2026 02h48")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -32249,6 +33248,38 @@ class ClientMail(QMainWindow):
         layout_url.addWidget(self.btn_page_bloquee_url)
         layout_url.addWidget(btn_copier_url)
         layout_url.addWidget(self.label_url, 1)
+
+        # Recherche dans la page (13/11/2026, demandé) : même case que pour
+        # les pièces jointes. Entrée = suivant, ▲ ▼ = précédent / suivant.
+        self._rech_web_champ = QLineEdit()
+        self._rech_web_champ.setPlaceholderText("Rechercher dans la page")
+        self._rech_web_champ.setClearButtonEnabled(True)
+        self._rech_web_champ.setFixedWidth(240)
+        self._rech_web_champ.setFixedHeight(22)
+        self._rech_web_champ.setStyleSheet(
+            "QLineEdit { background:#2a2a2a; color:white; border:1px solid #8a8a8a;"
+            " padding:0px 4px; font-family:Verdana; font-size:12px;"
+            " placeholder-text-color:white; }"
+            " QLineEdit:focus { border:1px solid #DAA520; }")
+        self._rech_web_btn_prec = QPushButton("▲")
+        self._rech_web_btn_suiv = QPushButton("▼")
+        for b in (self._rech_web_btn_prec, self._rech_web_btn_suiv):
+            b.setFixedHeight(22)
+            b.setStyleSheet(STYLE_BOUTON_BARRE_URL)
+        self._rech_web_btn_prec.setToolTip("Résultat précédent")
+        self._rech_web_btn_suiv.setToolTip("Résultat suivant (Entrée)")
+        self._rech_web_lbl = QLabel("")
+        self._rech_web_lbl.setStyleSheet("color:#e0a050; font-family:Verdana; font-size:10px;")
+        self._rech_web_lbl.setMinimumWidth(60)
+        self._rech_web_champ.returnPressed.connect(lambda: self._rech_web_chercher(1))
+        self._rech_web_btn_suiv.clicked.connect(lambda: self._rech_web_chercher(1))
+        self._rech_web_btn_prec.clicked.connect(lambda: self._rech_web_chercher(-1))
+        self._rech_web_champ.textChanged.connect(self._rech_web_reinitialiser)
+        layout_url.addWidget(self._rech_web_champ)
+        layout_url.addWidget(self._rech_web_btn_prec)
+        layout_url.addWidget(self._rech_web_btn_suiv)
+        layout_url.addWidget(self._rech_web_lbl)
+
         layout_url.addWidget(self.btn_traduire_url)
         layout_url.addWidget(self._btn_plein_url)
         self.barre_url.hide()
@@ -33165,6 +34196,8 @@ if (typeof module === 'object') {
         self._page_lecture.scripts().insert(SCRIPT_BADGE_IMAGES_EXTERNES)
 
         self.webview.setPage(self._page_lecture)
+        # Nouvelle page web : vider la case « Rechercher dans la page »
+        self.webview.urlChanged.connect(self._rech_web_reinitialiser)
         # Ctrl+molette (06/08/2026, bug remonté par l'utilisateur, toujours
         # présent malgré l'interception par eventFilter) : QWebEngineView
         # traite Ctrl+molette EN INTERNE, côté Chromium, avant même que Qt
@@ -33500,15 +34533,8 @@ if (typeof module === 'object') {
         # Macros regroupées dans un cadre (17/10/2026, demandé). Le
         # sélecteur par objectName évite que la bordure du cadre ne se
         # propage aux boutons qu'il contient.
-        cadre_macros = QFrame()
-        cadre_macros.setObjectName("cadreMacros")
-        cadre_macros.setStyleSheet(
-            "QFrame#cadreMacros { border: 1px solid white; background-color: #A52A2A; }")
-        cadre_macros.setFixedHeight(22)
+        cadre_macros, self._zone_boutons_macros = creer_cadre_macros()
         self._cadre_macros = cadre_macros
-        self._zone_boutons_macros = QHBoxLayout(cadre_macros)
-        self._zone_boutons_macros.setContentsMargins(3, 2, 3, 2)
-        self._zone_boutons_macros.setSpacing(4)
         layout_zone_mail.addWidget(cadre_macros, 0, 0, Qt.AlignmentFlag.AlignCenter)
         self._regenerer_boutons_macros(STYLE_BTN_BAS)
 
@@ -35670,33 +36696,22 @@ if (typeof module === 'object') {
         """(Re)construit les boutons de macros dans la barre du bas, à
         partir de macros.json. Appelée une fois à l'ouverture, puis à
         chaque fermeture du gestionnaire de macros."""
-        if style_btn_bas is None:
-            style_btn_bas = """
-                QPushButton {
-                    background-color: #A52A2A; color: white;
-                    border: none;
-                    font-family: Verdana; font-size: 11px; font-weight: bold;
-                    padding: 1px 8px;
-                }
-                QPushButton:hover { background-color: #DAA520; color: black; }
-            """
-        # Vider les boutons existants
-        while self._zone_boutons_macros.count():
-            item = self._zone_boutons_macros.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-
-        donnees = charger_macros()
-        for macro in donnees.get("macros", []):
-            btn = QPushButton(macro.get("nom", "MACRO"))
-            btn.setStyleSheet(style_btn_bas)
-            btn.setFixedHeight(16)
-            btn.clicked.connect(lambda checked=False, mid=macro.get("id"): self._lancer_macro(mid))
-            self._zone_boutons_macros.addWidget(btn)
-        # Cadre affiché seulement s'il contient au moins une macro
-        # (18/10/2026, demandé : un cadre vide restait visible sinon)
-        self._cadre_macros.setVisible(self._zone_boutons_macros.count() > 0)
+        # Macros « texte pur » (déclencheur aucun) retirées d'ici le
+        # 12/11/2026 (demandé) : elles sont en bas de chaque fenêtre de
+        # rédaction, toujours à portée même si un autre programme passe
+        # entre la rédaction et la fenêtre principale. Restent ici celles
+        # qui ouvrent une fenêtre (nouveau, répondre, transférer...).
+        macros = [m for m in charger_macros().get("macros", [])
+                  if m.get("declencheur") != "aucun"]
+        remplir_cadre_macros(self._cadre_macros, self._zone_boutons_macros, macros,
+                             lambda m: self._lancer_macro(m.get("id")),
+                             style_btn_bas or STYLE_BTN_MACRO)
+        for f in getattr(self, "_fenetres_redaction", []):
+            try:
+                if not getattr(f, "_fenetre_fermee", False):
+                    f._regenerer_macros_redaction()
+            except (RuntimeError, AttributeError):
+                continue
 
     def _lancer_macro(self, macro_id):
         """Déclenche une macro : ouvre la fenêtre de rédaction comme le
@@ -36129,7 +37144,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 12/11/2026 à 02h04")
+        lbl_version = QLabel("Version du 16/11/2026 à 02h48")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -40346,7 +41361,8 @@ if (typeof module === 'object') {
                 nom, adresse = parseaddr(msg_info.get("de", ""))
                 nom_carnet = next((c.get("nom", "").strip()
                                    for c in charger_carnet().get("contacts", [])
-                                   if adresse and (c.get("email") or "").strip().lower() == adresse.lower()
+                                   if adresse and adresse.lower() in ((c.get("email") or "").strip().lower(),
+                                                                      (c.get("email2") or "").strip().lower())
                                    and c.get("nom", "").strip()), "")
                 nom = nom_carnet or nom.strip().strip('"') or adresse
                 if nom:
@@ -42821,6 +43837,8 @@ if (typeof module === 'object') {
                 self._creer_nav_pdf()
             self._pdf_btn_zp.show()
             self._pdf_btn_zm.show()
+            self._rech_pj_reinitialiser()
+            self._rech_pj_afficher(False)
             self._maj_nav_images_pj()
             self._pdf_nav.show()
             # Focus clavier (07/08/2026, bug remonté par l'utilisateur :
@@ -43472,6 +44490,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         # Créer ou réutiliser la barre de navigation PDF
         if not hasattr(self, '_pdf_nav') or not self._pdf_nav:
             self._creer_nav_pdf()
+        self._rech_pj_reinitialiser()
+        self._rech_pj_afficher(True)
 
         # Mode PDF : afficher les boutons de navigation
         if hasattr(self, '_pdf_btn_prec'):
@@ -43542,6 +44562,49 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         h.addSpacing(10)
         h.addWidget(self._pdf_lbl)
         h.addStretch(1)
+
+        # Recherche dans la PJ affichée (13/11/2026, demandé) : PDF, Word,
+        # Excel. Entrée = suivant, ▲ ▼ = précédent / suivant.
+        from PySide6.QtWidgets import QLineEdit as _LE
+        self._rech_pj_champ = _LE()
+        self._rech_pj_champ.setPlaceholderText("Rechercher dans la pièce jointe")
+        self._rech_pj_champ.setClearButtonEnabled(True)
+        # Plus visible (13/11/2026, demandé) : texte plus gros et invite
+        # « Rechercher… » en blanc (grise par défaut, peu lisible).
+        self._rech_pj_champ.setFixedWidth(290)
+        self._rech_pj_champ.setFixedHeight(24)
+        self._rech_pj_champ.setStyleSheet(
+            "QLineEdit { background:#1e1e1e; color:white; border:1px solid #8a8a8a;"
+            " padding:1px 4px; font-family:Verdana; font-size:13px;"
+            " placeholder-text-color:white; }"
+            " QLineEdit:focus { border:1px solid #DAA520; }")
+        # La palette seule ne suffit pas (la feuille de style l'écrase) :
+        # placeholder-text-color ci-dessus (Qt ≥ 6.5) fait foi.
+        self._rech_pj_btn_prec = QPushButton(" ▲ ")
+        self._rech_pj_btn_suiv = QPushButton(" ▼ ")
+        for b in (self._rech_pj_btn_prec, self._rech_pj_btn_suiv):
+            b.setStyleSheet(STYLE_BOUTON)
+            b.setFixedHeight(22)
+        self._rech_pj_btn_prec.setToolTip("Résultat précédent")
+        self._rech_pj_btn_suiv.setToolTip("Résultat suivant (Entrée)")
+        self._rech_pj_lbl = _L("")
+        self._rech_pj_lbl.setStyleSheet("color:#e0a050; font-family:Verdana; font-size:10px;")
+        self._rech_pj_lbl.setMinimumWidth(70)
+        h.addWidget(self._rech_pj_champ)
+        h.addWidget(self._rech_pj_btn_prec)
+        h.addWidget(self._rech_pj_btn_suiv)
+        h.addWidget(self._rech_pj_lbl)
+        h.addSpacing(10)
+        self._rech_pj_champ.returnPressed.connect(lambda: self._rech_pj_chercher(1))
+        self._rech_pj_btn_suiv.clicked.connect(lambda: self._rech_pj_chercher(1))
+        self._rech_pj_btn_prec.clicked.connect(lambda: self._rech_pj_chercher(-1))
+        self._rech_pj_champ.textChanged.connect(self._rech_pj_texte_change)
+        self.webview.page().findTextFinished.connect(self._rech_pj_doc_resultat)
+        self._rech_pj_texte = ""
+        self._pdf_rech = []
+        self._pdf_rech_idx = -1
+        self._rech_pj_afficher(False)
+
         self._pdf_btn_plein.setStyleSheet(STYLE_BOUTON)
         self._pdf_btn_plein.setFixedHeight(22)
         h.addWidget(self._pdf_btn_plein)
@@ -43587,6 +44650,185 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 
         # Label image dans CEF — on va utiliser CEF pour afficher l'image via data URI
         # (plus simple que créer un nouveau widget)
+
+    # --- Recherche dans la PJ affichée (13/11/2026) ---
+    # Word/Excel/ODT/PowerPoint sont convertis en HTML : la recherche du
+    # moteur web (findText) suffit et surligne elle-même. Le PDF est rendu
+    # en images (voir _afficher_page_pdf) : le texte est cherché avec
+    # PyMuPDF et les résultats sont surlignés par des cadres posés sur les
+    # images (positions en fractions de page, indépendantes du zoom).
+
+    _JS_SURLIGNER_PDF = r'''
+(function() {{
+    document.querySelectorAll('.__rech_pdf__').forEach(function(e) {{ e.remove(); }});
+    var div = document.getElementById('__pdf_viewer__');
+    if (!div) return;
+    div.style.position = 'relative';
+    var liste = {js_liste}, courant = {idx}, cible = null;
+    liste.forEach(function(m, n) {{
+        var img = div.querySelector('img[data-page="' + m[0] + '"]');
+        if (!img) return;
+        var w = img.clientWidth, h = img.clientHeight;
+        var c = document.createElement('div');
+        c.className = '__rech_pdf__';
+        var actif = (n === courant);
+        c.style.cssText = 'position:absolute; pointer-events:none; border-radius:2px;'
+            + 'left:' + (img.offsetLeft + m[1] * w - 1) + 'px;'
+            + 'top:' + (img.offsetTop + m[2] * h - 1) + 'px;'
+            + 'width:' + (m[3] * w + 2) + 'px; height:' + (m[4] * h + 2) + 'px;'
+            + (actif ? 'background:rgba(255,140,0,0.45); outline:2px solid #ff8c00;'
+                     : 'background:rgba(255,230,0,0.40);');
+        div.appendChild(c);
+        if (actif) cible = c;
+    }});
+    if ({defiler} && cible) cible.scrollIntoView({{block: 'center', inline: 'nearest'}});
+}})();'''
+
+    def _rech_pj_afficher(self, visible):
+        if not hasattr(self, '_rech_pj_champ'):
+            return
+        for w in (self._rech_pj_champ, self._rech_pj_btn_prec,
+                  self._rech_pj_btn_suiv, self._rech_pj_lbl):
+            w.setVisible(visible)
+
+    def _rech_pj_reinitialiser(self):
+        """Nouvelle PJ affichée : champ vidé, surlignages effacés."""
+        if not hasattr(self, '_rech_pj_champ'):
+            return
+        self._pdf_rech = []
+        self._pdf_rech_idx = -1
+        self._rech_pj_texte = ""
+        self._rech_pj_champ.blockSignals(True)
+        self._rech_pj_champ.clear()
+        self._rech_pj_champ.blockSignals(False)
+        self._rech_pj_lbl.setText("")
+        try:
+            self.webview.page().findText("")
+        except Exception:
+            pass
+
+    def _rech_pj_texte_change(self, texte):
+        if not texte.strip():
+            self._rech_pj_reinitialiser()
+            try:
+                self.webview.page().runJavaScript(
+                    "document.querySelectorAll('.__rech_pdf__').forEach(function(e){e.remove();});")
+            except Exception:
+                pass
+
+    def _rech_pj_chercher(self, sens):
+        texte = self._rech_pj_champ.text().strip()
+        if not texte:
+            return
+        nouveau = texte != self._rech_pj_texte
+        self._rech_pj_texte = texte
+        if getattr(self, '_pdf_doc', None) is not None:
+            if nouveau:
+                self._pdf_rechercher(texte)
+                self._pdf_rech_idx = 0 if self._pdf_rech else -1
+            elif self._pdf_rech:
+                self._pdf_rech_idx = (self._pdf_rech_idx + sens) % len(self._pdf_rech)
+            self._pdf_surligner(defiler=True)
+        elif getattr(self, '_mode_doc', False):
+            from PySide6.QtWebEngineCore import QWebEnginePage as _WEP
+            self._rech_source = "pj"
+            if sens > 0:
+                self.webview.page().findText(texte)
+            else:
+                self.webview.page().findText(texte, _WEP.FindFlag.FindBackward)
+
+    # --- Recherche dans une page du navigateur intégré (13/11/2026) ---
+    def _rech_web_chercher(self, sens):
+        texte = self._rech_web_champ.text().strip()
+        if not texte:
+            return
+        if not getattr(self, '_rech_web_connecte', False):
+            # Page de lecture posée par setPage après la barre d'adresse :
+            # branché ici, au premier usage
+            self.webview.page().findTextFinished.connect(self._rech_web_resultat)
+            self._rech_web_connecte = True
+        from PySide6.QtWebEngineCore import QWebEnginePage as _WEP
+        self._rech_source = "web"
+        if sens > 0:
+            self.webview.page().findText(texte)
+        else:
+            self.webview.page().findText(texte, _WEP.FindFlag.FindBackward)
+
+    def _rech_web_resultat(self, resultat):
+        if getattr(self, '_rech_source', "") != "web":
+            return
+        if not self._rech_web_champ.text().strip():
+            self._rech_web_lbl.setText("")
+            return
+        try:
+            n, k = resultat.numberOfMatches(), resultat.activeMatch()
+        except Exception:
+            return
+        self._rech_web_lbl.setText(f"{k} / {n}" if n else "Introuvable")
+
+    def _rech_web_reinitialiser(self, *_):
+        """Champ vidé (croix) ou nouvelle page : surlignage et compteur effacés."""
+        if not hasattr(self, '_rech_web_champ'):
+            return
+        if self.sender() is not self._rech_web_champ:
+            self._rech_web_champ.blockSignals(True)
+            self._rech_web_champ.clear()
+            self._rech_web_champ.blockSignals(False)
+        elif self._rech_web_champ.text().strip():
+            return
+        self._rech_web_lbl.setText("")
+        if getattr(self, '_rech_source', "") == "web":
+            try:
+                self.webview.page().findText("")
+            except Exception:
+                pass
+
+    def _rech_pj_doc_resultat(self, resultat):
+        """Compteur « 2 / 7 » de la recherche Word/Excel."""
+        if getattr(self, '_rech_source', "pj") != "pj":
+            return
+        if not getattr(self, '_mode_doc', False) or not hasattr(self, '_rech_pj_lbl'):
+            return
+        if not self._rech_pj_champ.text().strip():
+            self._rech_pj_lbl.setText("")
+            return
+        try:
+            n, k = resultat.numberOfMatches(), resultat.activeMatch()
+        except Exception:
+            return
+        self._rech_pj_lbl.setText(f"{k} / {n}" if n else "Introuvable")
+
+    def _pdf_rechercher(self, texte):
+        """Cherche le texte (sans tenir compte des majuscules) dans toutes
+        les pages ; résultats en fractions de la page affichée."""
+        import fitz
+        self._pdf_rech = []
+        doc = getattr(self, '_pdf_doc', None)
+        if not doc:
+            return
+        for i, page in enumerate(doc):
+            try:
+                rects = page.search_for(texte)
+            except Exception:
+                continue
+            pw, ph = page.rect.width, page.rect.height
+            for r in rects:
+                r = fitz.Rect(r * page.rotation_matrix).normalize()
+                self._pdf_rech.append((i, r.x0 / pw, r.y0 / ph, r.width / pw, r.height / ph))
+
+    def _pdf_surligner(self, defiler=False):
+        import json as _json
+        if not self._pdf_rech:
+            self._rech_pj_lbl.setText("Introuvable" if self._rech_pj_texte else "")
+        else:
+            self._rech_pj_lbl.setText(f"{self._pdf_rech_idx + 1} / {len(self._pdf_rech)}")
+        js = self._JS_SURLIGNER_PDF.format(
+            js_liste=_json.dumps(self._pdf_rech), idx=self._pdf_rech_idx,
+            defiler='true' if defiler else 'false')
+        try:
+            self.webview.page().runJavaScript(js)
+        except Exception:
+            pass
 
     def _afficher_page_pdf(self, aller_a_page=True):
         """Rend TOUTES les pages du PDF et les empile verticalement dans un
@@ -43696,6 +44938,10 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             self.webview.page().runJavaScript(js)
         except Exception:
             pass
+
+        # Rendu refait (zoom, plein écran) : remettre les surlignages
+        if getattr(self, '_pdf_rech', None):
+            self._pdf_surligner(defiler=False)
 
         # Mettre à jour le label
         if hasattr(self, '_pdf_lbl'):
@@ -44476,6 +45722,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         self._pdf_lbl.hide()
         self._mode_doc = True
         self._mode_image = False
+        self._rech_pj_reinitialiser()
+        self._rech_pj_afficher(True)
         self._pdf_nav.show()
         # Focus clavier (07/08/2026, bug remonté par l'utilisateur : les
         # flèches Haut/Bas faisaient changer de mail au lieu de défiler le
@@ -47883,6 +49131,20 @@ __JS_TRADUCTION__
         lbl_titre.setWordWrap(True)
         layout.addWidget(lbl_titre)
 
+        # Tri (15/11/2026, demandé) : par date de mise en spam (la plus récente en haut) ou par ordre
+        # alphabétique ; le choix en cours en or, comme les boutons de la fenêtre MODE
+        ligne_tri = QHBoxLayout()
+        lbl_tri = QLabel("Trier :")
+        ligne_tri.addWidget(lbl_tri)
+        btn_tri_date = QPushButton(" Par date de suppression ")
+        btn_tri_alpha = QPushButton(" A → Z ")
+        ligne_tri.addWidget(btn_tri_date)
+        ligne_tri.addWidget(btn_tri_alpha)
+        ligne_tri.addStretch(1)
+        layout.addLayout(ligne_tri)
+        if not hasattr(self, "_tri_spam"):
+            self._tri_spam = "date"
+
         liste_widget = QListWidget()
         liste_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         layout.addWidget(liste_widget)
@@ -47893,10 +49155,29 @@ __JS_TRADUCTION__
         layout.addWidget(lbl_nb)
 
         def _recharger():
+            import datetime as _dt_spam
             liste_widget.clear()
-            for entree in sorted(charger_expediteurs_spam()):
-                liste_widget.addItem(QListWidgetItem(entree))
+            dates = charger_dates_spam()
+            adresses = sorted(charger_expediteurs_spam())
+            if self._tri_spam == "date":
+                # les plus récentes en haut ; celles d'avant le 15/11/2026 (sans date) à la fin, par ordre alphabétique
+                adresses.sort(key=lambda a: -dates.get(a, 0))
+            for entree in adresses:
+                t = dates.get(entree)
+                quand = (_dt_spam.datetime.fromtimestamp(t / 1000).strftime("%d/%m/%Y à %H.%M") if t
+                         else "date inconnue")
+                item = QListWidgetItem(f"{entree}     —  {quand}")
+                item.setData(Qt.ItemDataRole.UserRole, entree)   # l'adresse seule, pour NON SPAM
+                liste_widget.addItem(item)
             lbl_nb.setText(f"{liste_widget.count()} expéditeur(s) bloqué(s)")
+            for cle, b in (("date", btn_tri_date), ("alpha", btn_tri_alpha)):
+                b.setStyleSheet(STYLE_BOUTON + ("QPushButton { background-color: #DAA520; color: black; "
+                                "border-bottom-color: #8a6510; border-right-color: #8a6510; }" if cle == self._tri_spam else ""))
+        def _trier(mode):
+            self._tri_spam = mode
+            _recharger()
+        btn_tri_date.clicked.connect(lambda: _trier("date"))
+        btn_tri_alpha.clicked.connect(lambda: _trier("alpha"))
         _recharger()
 
         ligne_ajout = QHBoxLayout()
@@ -47917,10 +49198,12 @@ __JS_TRADUCTION__
         layout.addLayout(ligne_ajout)
 
         layout_btn = QHBoxLayout()
-        btn_retirer = QPushButton(" Retirer la sélection ")
+        # 15/11/2026 : « Retirer la sélection » faisait déjà un vrai non-spam (débloque + rapatrie) : nommé comme tel
+        btn_retirer = QPushButton(" NON SPAM ")
+        btn_retirer.setToolTip("Débloque les expéditeurs sélectionnés et remet leurs emails déjà en spam dans la boîte de réception")
         btn_retirer.setStyleSheet(STYLE_BOUTON)
         def _retirer():
-            selection = {it.text() for it in liste_widget.selectedItems()}
+            selection = {it.data(Qt.ItemDataRole.UserRole) or it.text() for it in liste_widget.selectedItems()}
             if not selection:
                 return
             retirer_expediteurs_spam(selection)
