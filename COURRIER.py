@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-16 02h48"
+VERSION_BUILD = "2026-11-18 15h25"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -3615,6 +3615,79 @@ def prochaine_occurrence(dt, periodicite):
             return dt.replace(year=dt.year + 1, day=28)
     return dt  # "aucune" ou valeur inconnue : ne devrait jamais être appelé
 
+# TODO du téléphone (16/11/2026) : synchro des rappels dans les deux sens avec COURRIER ADRIEN
+# Android. Chaque rappel porte « modifie » (millisecondes) posé à chaque changement voulu par
+# l'utilisateur (ajout, modification, report) ; un rappel supprimé laisse sa trace ici, pour
+# être supprimé de l'autre côté aussi. Le déclenchement et le réarmement des rappels récurrents
+# ne posent pas de date : ils donnent le même résultat des deux côtés.
+FICHIER_AGENDA_SUPPRIMES = os.path.join(DOSSIER_APP, "agenda_supprimes.json")
+
+def maintenant_ms():
+    return int(time.time() * 1000)
+
+def charger_rappels_supprimes():
+    try:
+        with open(FICHIER_AGENDA_SUPPRIMES, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return {str(k): int(v) for k, v in d.items()} if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+def sauvegarder_rappels_supprimes(sup):
+    # traces de plus de 400 jours oubliées
+    limite = maintenant_ms() - 400 * 86400 * 1000
+    try:
+        with open(FICHIER_AGENDA_SUPPRIMES, "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in sup.items() if v >= limite}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Erreur sauvegarde agenda_supprimes : {e}")
+
+def noter_rappel_supprime(id_rappel):
+    if id_rappel:
+        sup = charger_rappels_supprimes()
+        sup[id_rappel] = maintenant_ms()
+        sauvegarder_rappels_supprimes(sup)
+
+def _cle_rappel(r):
+    """Ce qui compte pour dire si deux versions d'un rappel diffèrent."""
+    if r is None:
+        return None
+    return (r.get("date_heure", ""), r.get("texte", ""), bool(r.get("declenche")), bool(r.get("vu")),
+            r.get("periodicite") or "aucune")
+
+def fusionner_agendas(pc, sup_pc, tel, sup_tel):
+    """Fusion des rappels du PC et du téléphone. Le plus récemment modifié l'emporte ; à
+    égalité (aucun des deux modifié depuis), la version la plus avancée (rappel récurrent
+    réarmé plus loin, déjà signalé, déjà vu). Un rappel supprimé d'un côté après sa dernière
+    modification l'est des deux côtés. Rend (rappels, suppressions, venus_du_tel, partis_au_tel)."""
+    sup = dict(sup_pc)
+    for i, t in sup_tel.items():
+        sup[i] = max(sup.get(i, 0), int(t or 0))
+    par_pc = {r["id"]: r for r in pc if isinstance(r, dict) and r.get("id")}
+    par_tel = {r["id"]: r for r in tel if isinstance(r, dict) and r.get("id")}
+    resultat = []
+    for i in list(par_pc) + [i for i in par_tel if i not in par_pc]:
+        a, b = par_pc.get(i), par_tel.get(i)
+        ma, mb = int((a or {}).get("modifie") or 0), int((b or {}).get("modifie") or 0)
+        if i in sup and sup[i] >= max(ma, mb):
+            continue
+        sup.pop(i, None)
+        if a is None or b is None:
+            choisi = a or b
+        elif ma != mb:
+            choisi = a if ma > mb else b
+        elif a.get("date_heure", "") != b.get("date_heure", ""):
+            choisi = a if a.get("date_heure", "") > b.get("date_heure", "") else b
+        else:
+            choisi = dict(a)
+            choisi["declenche"] = bool(a.get("declenche") or b.get("declenche"))
+            choisi["vu"] = bool(a.get("vu") or b.get("vu"))
+        resultat.append(dict(choisi))
+    final = {r["id"]: r for r in resultat}
+    venus = sum(1 for i in set(par_pc) | set(final) if _cle_rappel(par_pc.get(i)) != _cle_rappel(final.get(i)))
+    partis = sum(1 for i in set(par_tel) | set(final) if _cle_rappel(par_tel.get(i)) != _cle_rappel(final.get(i)))
+    return resultat, sup, venus, partis
+
 def parser_mailto(uri):
     """Découpe un lien mailto: (RFC 6068) en ses composantes utiles
     (15/08/2026, demandé par l'utilisateur — COURRIER enregistré comme
@@ -5297,6 +5370,8 @@ def _traiter_synchro_spam(ligne, secret):
     _ecrire_synchro_telephone(confirme=True)
     _synchro_spam_bilan.update(ajouts=nb_ajouts, retraits=nb_retraits)
     _synchro_spam_faite.set()
+    _signaler_synchro("spam", f"spams : {len(liste)} expéditeurs bloqués (du téléphone : {nb_ajouts} bloqué(s), "
+                              f"{nb_retraits} débloqué(s))")
     return json.dumps({"spam": liste, "spam_dates": {a: dates_connues[a] for a in liste if a in dates_connues},
                        "sceau": _sceau_synchro(secret, nonce, "reponse", ",".join(liste))}, ensure_ascii=False)
 
@@ -5324,6 +5399,12 @@ def _repondre_synchro(client):
                     reponse = _traiter_synchro_carnet(json.loads(ligne), secret)
                 elif sorte == "courrier-adrien-synchro-modeles-1":
                     reponse = _traiter_synchro_modeles(json.loads(ligne), secret)
+                elif sorte == "courrier-adrien-synchro-todo-1":
+                    reponse = _traiter_synchro_todo(json.loads(ligne), secret)
+                elif sorte == "courrier-adrien-synchro-macros-1":   # 18/11/2026
+                    reponse = _traiter_synchro_macros(json.loads(ligne), secret)
+                elif sorte == "courrier-adrien-synchro-rss-1":
+                    reponse = _traiter_synchro_rss(json.loads(ligne), secret)
                 else:
                     reponse = _traiter_synchro_spam(ligne, secret)
             client.sendall(((reponse or "REFUS") + "\n").encode("utf-8"))
@@ -5399,7 +5480,53 @@ def _synchro_carnet_telephone(serie):
         _ligne("nouveaux contacts", "venues_tel"),
         _ligne("contacts modifiés", "modifiees_tel"),
         _ligne("supprimés sur Android, donc aussi sur Windows", "supprimees_pc"),
+        *(["", _ligne("dossiers supprimés d'un côté, donc des deux", "dossiers_supprimes")]
+          if noms.get("dossiers_supprimes") else []),
     ])
+
+# Boutons « Synchro COURRIER ANDROID » (18/11/2026, demandé) : MACROS, MODÈLES, SONS, RSS to EMAIL,
+# TODO et COMPTES ne copient plus, ils synchronisent. Le téléphone, prévenu par adb, fait les
+# synchros demandées ; chaque traitement ci-dessus signale la sienne, on les attend toutes.
+_synchro_signaux = {}        # clé → [Event, bilan à afficher]
+_synchro_demandee = set()    # synchros lancées d'ici (MACROS : la fenêtre ouverte vient d'enregistrer)
+NOMS_SYNCHRO = {"spam": "spams", "sons": "sons", "macros": "macros", "rss": "RSS to Email",
+                "modeles": "modèles", "todo": "TODO", "adresses": "carnet"}
+
+def _signaler_synchro(cle, bilan):
+    s = _synchro_signaux.get(cle)
+    if s:
+        s[1] = bilan
+        s[0].set()
+
+def _synchro_telephone(serie, quoi):
+    """Fait faire au téléphone les synchros [quoi] (clés de NOMS_SYNCHRO) et attend leurs bilans."""
+    import time as _t
+    _preparer_synchro_telephone(serie)
+    for k in quoi:
+        _synchro_signaux[k] = [_threading.Event(), ""]
+    _synchro_demandee.update(quoi)
+    try:
+        _adb_bloquant("-s", serie, "shell", "am", "broadcast", "-n", "fr.courrieradrien.android/.SynchroRecepteur",
+                      "--es", "quoi", ",".join(quoi))
+        fin = _t.monotonic() + 90
+        faites, absentes = [], []
+        for k in quoi:
+            s = _synchro_signaux[k]
+            if s[0].wait(max(0.1, fin - _t.monotonic())):
+                faites.append(s[1])
+            else:
+                absentes.append(NOMS_SYNCHRO.get(k, k))
+    finally:
+        _synchro_demandee.difference_update(quoi)
+        for k in quoi:
+            _synchro_signaux.pop(k, None)
+    if not faites:
+        return ("Le téléphone n'a pas répondu. Vérifiez que COURRIER ADRIEN ANDROID est à jour "
+                "et que le téléphone est déverrouillé, puis recommencez.")
+    texte = "Synchro faite :\n\n" + "\n".join("   • " + f for f in faites)
+    if absentes:
+        texte += "\n\nPas de réponse du téléphone pour : " + ", ".join(absentes) + "."
+    return texte
 
 def _synchro_spam_telephone(serie):
     """Bouton de la fenêtre SPAM : demande au téléphone d'appeler, attend qu'il l'ait fait. Rend le bilan à afficher."""
@@ -5556,12 +5683,25 @@ def fusionner_carnets(pc, tel, base):
                 resultat.append(r)
                 bilan["venues_tel"] += 1
                 noms["venues_tel"].append(_nom(r))
-    dossiers = list(pc.get("dossiers", []))
-    connus = {d.lower() for d in dossiers}
-    for d in list(tel.get("dossiers", [])) + [c.get("dossier", "") for c in resultat]:
-        if d and d.lower() not in connus:
-            dossiers.append(d)
-            connus.add(d.lower())
+    # Dossiers (18/11/2026, signalé) : avant, simple addition des deux listes, donc un dossier
+    # supprimé (ou renommé) d'un côté revenait, vide, de l'autre. Comparés à la base comme les
+    # fiches : connu de la base et absent d'un côté = supprimé là, donc des deux côtés,
+    # sauf si un contact y est encore rangé.
+    base_d = {d.lower() for d in base.get("dossiers", []) if d}
+    pc_d = {d.lower() for d in pc.get("dossiers", []) if d}
+    tel_d = {d.lower() for d in tel.get("dossiers", []) if d}
+    utilises = {(c.get("dossier") or "").lower() for c in resultat if c.get("dossier")}
+    dossiers, connus = [], set()
+    noms["dossiers_supprimes"] = []
+    for d in list(pc.get("dossiers", [])) + list(tel.get("dossiers", [])) + [c.get("dossier", "") for c in resultat]:
+        if not d or d.lower() in connus:
+            continue
+        k = d.lower()
+        connus.add(k)
+        if k not in utilises and k in base_d and (k not in pc_d or k not in tel_d):
+            noms["dossiers_supprimes"].append(d)
+            continue
+        dossiers.append(d)
     fusion = dict(pc)
     fusion["contacts"], fusion["dossiers"] = resultat, dossiers
     bilan["noms"] = {k: sorted(v, key=lambda n: n.lower()) for k, v in noms.items()}
@@ -5599,9 +5739,311 @@ def _traiter_synchro_modeles(d, secret):
                     "date_nouveau": dates.get(a, {}).get("nouveau", 0),
                     "date_reponse": dates.get(a, {}).get("reponse", 0)} for a, v in pc.items()}
     print(f"[SYNCHRO MODÈLES] {len(resultat)} compte(s), {venus} modèle(s) venu(s) du téléphone")
+    _signaler_synchro("modeles", f"modèles : {len(resultat)} compte(s) avec modèles, {venus} modèle(s) venu(s) du téléphone")
     contenu = json.dumps({"modeles": resultat, "venus": venus}, ensure_ascii=False)
     return json.dumps({"contenu": contenu, "sceau": _sceau_synchro(secret, nonce, "reponse",
                        hashlib.sha256(contenu.encode("utf-8")).hexdigest())}, ensure_ascii=False)
+
+def _traiter_synchro_todo(d, secret):
+    """TODO (16/11/2026) : le téléphone envoie ses rappels (et ceux qu'il a supprimés) ; on fusionne
+    avec les nôtres (fusionner_agendas), on enregistre, et le téléphone reçoit le résultat (identique)."""
+    import hmac, hashlib
+    try:
+        nonce, texte = d["nonce"], d["agenda"]
+        if not hmac.compare_digest(_sceau_synchro(secret, nonce, hashlib.sha256(texte.encode("utf-8")).hexdigest()), d["sceau"]):
+            return None
+        tel = json.loads(texte)
+        rappels_tel = tel.get("rappels") if isinstance(tel.get("rappels"), list) else []
+        sup_tel = tel.get("supprimes") if isinstance(tel.get("supprimes"), dict) else {}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    rappels, sup, venus, partis = fusionner_agendas(charger_rappels(), charger_rappels_supprimes(), rappels_tel, sup_tel)
+    if venus:
+        sauvegarder_rappels(rappels)
+    sauvegarder_rappels_supprimes(sup)
+    print(f"[SYNCHRO TODO] {len(rappels)} rappel(s), {venus} changement(s) venu(s) du téléphone, {partis} parti(s)")
+    _signaler_synchro("todo", f"TODO : {len(rappels)} rappel(s) ; du téléphone : {venus} changement(s), "
+                              f"vers le téléphone : {partis}")
+    contenu = json.dumps({"agenda": {"rappels": rappels, "supprimes": sup}, "venus": venus, "partis": partis}, ensure_ascii=False)
+    return json.dumps({"contenu": contenu, "sceau": _sceau_synchro(secret, nonce, "reponse",
+                       hashlib.sha256(contenu.encode("utf-8")).hexdigest())}, ensure_ascii=False)
+
+# Synchro des macros et des flux RSS dans les deux sens (18/11/2026, demandé) : avant, simple
+# copie du PC vers le téléphone (une macro modifiée sur le téléphone était écrasée, une créée
+# là ne remontait jamais). Même méthode que le carnet : une « base », état commun des deux
+# côtés à la dernière synchro, dit qui a changé quoi. Sans base (première fois) : réunion des
+# deux listes, rien n'est supprimé.
+FICHIER_BASE_MACROS = os.path.join(DOSSIER_APP, "macros_synchro_base.json")
+FICHIER_BASE_RSS = os.path.join(DOSSIER_APP, "rss_synchro_base.json")
+_gestionnaire_macros_ouvert = [0]   # fenêtre MACROS ouverte : elle réécrirait macros.json à la sauvegarde
+_relais_macros = [None]             # rafraîchit les boutons de macros (fil de l'interface)
+
+class _RelaisMacros(QObject):
+    """Créé dans le fil de l'interface : la synchro (fil d'écoute) y signale des macros changées.
+    enregistrer_fenetre (18/11/2026) : relié en BlockingQueuedConnection, la fenêtre MACROS ouverte
+    enregistre ce qu'elle affiche AVANT la fusion (avant, la synchro était refusée fenêtre ouverte)."""
+    changees = Signal()
+    enregistrer_fenetre = Signal()
+
+def _lire_base(chemin):
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+def _ecrire_base(chemin, donnees):
+    try:
+        with open(chemin, "w", encoding="utf-8") as f:
+            json.dump(donnees, f, ensure_ascii=False)
+    except OSError as e:
+        print(f"[SYNCHRO] base non enregistrée ({os.path.basename(chemin)}) : {e}")
+
+def _signature_macro(m):
+    """Ce que les deux côtés savent garder d'une macro : le téléphone ne garde pas la mise en
+    forme ni les valeurs des étapes autres que texte. Sert à comparer, jamais à enregistrer."""
+    if not m:
+        return None
+    return [m.get("nom") or "", m.get("declencheur") or "",
+            [[e.get("type") or "", (e.get("valeur") or "") if e.get("type") == "texte" else ""]
+             for e in m.get("etapes", []) if isinstance(e, dict)]]
+
+def _macro_depuis_tel(t, ancienne=None):
+    """Version du téléphone, en gardant la mise en forme des étapes de texte restées identiques."""
+    r = dict(ancienne or {})
+    r.update({"id": t.get("id"), "nom": t.get("nom", ""), "declencheur": t.get("declencheur", "repondre")})
+    vieilles = (ancienne or {}).get("etapes", [])
+    etapes = []
+    for i, e in enumerate(t.get("etapes", [])):
+        e = {k: v for k, v in e.items() if k in ("type", "valeur")}
+        v = vieilles[i] if i < len(vieilles) and isinstance(vieilles[i], dict) else {}
+        if e.get("type") == v.get("type") and (e.get("valeur") or "") == (v.get("valeur") or "") and v.get("forme"):
+            e["forme"] = v["forme"]
+        etapes.append(e)
+    r["etapes"] = etapes
+    return r
+
+def fusionner_macros(pc, tel, base):
+    """pc, tel : listes de macros ; base : liste (ou None). Rend (macros fusionnées, bilan avec les noms).
+    Modifiée d'un seul côté : prise. Des deux côtés : celle du PC gardée ET celle du téléphone
+    ajoutée sous le nom « … (Android) » (rien n'est perdu). Supprimée d'un côté et inchangée
+    de l'autre : supprimée ; modifiée de l'autre entre-temps : gardée."""
+    import uuid as _uuid
+    P = {m.get("id"): m for m in pc if isinstance(m, dict) and m.get("id")}
+    T = {m.get("id"): m for m in tel if isinstance(m, dict) and m.get("id")}
+    B = {m.get("id"): m for m in (base or []) if isinstance(m, dict) and m.get("id")}
+    if base is None:   # première fois : même nom = même macro (la copie gardait le nom)
+        par_nom = {(m.get("nom") or "").lower(): i for i, m in P.items()}
+        for i in [i for i in T if i not in P]:
+            j = par_nom.get((T[i].get("nom") or "").lower())
+            if j and j not in T:
+                T[j] = dict(T.pop(i), id=j)
+    noms = {k: [] for k in ("venues_tel", "modifiees_tel", "supprimees_pc",
+                            "venues_pc", "modifiees_pc", "supprimees_tel", "conflits")}
+    resultat = []
+    for i in list(P) + [i for i in T if i not in P]:
+        p, t, b = P.get(i), T.get(i), B.get(i)
+        sp, st, sb = _signature_macro(p), _signature_macro(t), _signature_macro(b)
+        if p and t:
+            if sp == st:
+                resultat.append(p)
+            elif b is not None and sp == sb:
+                resultat.append(_macro_depuis_tel(t, p))
+                noms["modifiees_tel"].append(t.get("nom", ""))
+            elif b is not None and st == sb:
+                resultat.append(p)
+                noms["modifiees_pc"].append(p.get("nom", ""))
+            elif base is None:   # première synchro : comme l'ancienne copie, le PC l'emporte
+                resultat.append(p)
+                noms["modifiees_pc"].append(p.get("nom", ""))
+            else:
+                resultat.append(p)
+                copie = _macro_depuis_tel(t)
+                copie["id"] = f"macro_{_uuid.uuid4().hex[:8]}"
+                copie["nom"] = (t.get("nom") or "") + " (Android)"
+                resultat.append(copie)
+                noms["conflits"].append(p.get("nom", ""))
+        elif p:
+            if b is not None and sp == sb:
+                noms["supprimees_pc"].append(p.get("nom", ""))
+            else:
+                resultat.append(p)
+                noms["venues_pc"].append(p.get("nom", ""))
+        else:
+            if b is not None and st == sb:
+                noms["supprimees_tel"].append(t.get("nom", ""))
+            else:
+                resultat.append(_macro_depuis_tel(t))
+                noms["venues_tel"].append(t.get("nom", ""))
+    return resultat, {k: sorted(v, key=str.lower) for k, v in noms.items()}
+
+CHAMPS_FLUX_SYNCHRO = ("nom", "compte", "type", "motif")
+
+def _flux_web(f):
+    return isinstance(f, dict) and str(f.get("url", "")).lower().startswith(("http://", "https://"))
+
+def fusionner_flux_rss(pc, tel, base):
+    """Flux RSS (adresse web = identité ; les flux locaux file:// restent sur le PC, hors synchro).
+    pc : tous les flux du PC ; tel, base : listes (base None la première fois). Réglages (nom,
+    compte, type, motif) : changés d'un seul côté, pris ; des deux, le PC l'emporte. Articles
+    « déjà vus » : réunis, pour qu'aucun article ne soit déposé deux fois. Rend (flux du PC
+    fusionnés, flux à rendre au téléphone, bilan avec les noms)."""
+    P = {f["url"]: f for f in pc if _flux_web(f)}
+    T = {f["url"]: f for f in tel if _flux_web(f)}
+    B = {f["url"]: f for f in (base or []) if _flux_web(f)}
+
+    def _sig(f):
+        return None if f is None else [json.dumps(f.get(k), sort_keys=True, ensure_ascii=False) for k in CHAMPS_FLUX_SYNCHRO]
+
+    def _vus(*listes):
+        if all(l is None for l in listes):
+            return None
+        vus = []
+        deja = set()
+        for l in listes:
+            for v in l or []:
+                if v not in deja:
+                    deja.add(v)
+                    vus.append(v)
+        return vus
+
+    noms = {k: [] for k in ("venus_tel", "modifies_tel", "supprimes_pc",
+                            "venus_pc", "modifies_pc", "supprimes_tel")}
+    garde = {}
+    for u in list(P) + [u for u in T if u not in P]:
+        p, t, b = P.get(u), T.get(u), B.get(u)
+        nom = (p or t).get("nom") or u
+        if p and t:
+            r = dict(p)
+            if _sig(p) != _sig(t):
+                if b is not None and _sig(p) == _sig(b):
+                    for k in CHAMPS_FLUX_SYNCHRO:
+                        if k in t:
+                            r[k] = t[k]
+                        else:
+                            r.pop(k, None)
+                    noms["modifies_tel"].append(t.get("nom") or u)
+                else:
+                    noms["modifies_pc"].append(nom)
+            vus = _vus(p.get("items_vus"), t.get("items_vus"))
+            if vus is not None:
+                r["items_vus"] = vus
+            for k in ("site_lien", "site_description"):
+                if not r.get(k) and t.get(k):
+                    r[k] = t[k]
+            garde[u] = r
+        elif p:
+            if b is not None and _sig(p) == _sig(b):
+                noms["supprimes_pc"].append(nom)
+            else:
+                garde[u] = p
+                noms["venus_pc"].append(nom)
+        else:
+            if b is not None and _sig(t) == _sig(b):
+                noms["supprimes_tel"].append(nom)
+            else:
+                garde[u] = {k: t[k] for k in ("id", "url", "nom", "compte", "type", "motif", "items_vus", "etag",
+                                              "last_modified", "site_lien", "site_description") if k in t}
+                noms["venus_tel"].append(nom)
+    flux_pc = []
+    for f in pc:   # ordre du PC, flux locaux à leur place
+        if not _flux_web(f):
+            flux_pc.append(f)
+        elif f["url"] in garde:
+            flux_pc.append(garde.pop(f["url"]))
+    flux_pc.extend(garde.values())   # venus du téléphone, à la fin
+    pour_tel = [{k: f[k] for k in ("id", "url", "nom", "compte", "type", "motif", "items_vus", "etag",
+                                   "last_modified", "site_lien", "site_description") if k in f}
+                for f in flux_pc if _flux_web(f)]
+    return flux_pc, pour_tel, {k: sorted(v, key=str.lower) for k, v in noms.items()}
+
+def _bilan_synchro_court(titre, total, bilan, du_tel, vers_tel):
+    """« macros : 7 ; du téléphone : 1 (Bonjour) ; vers le téléphone : aucun »."""
+    def _partie(cles):
+        noms = [n for k in cles for n in bilan.get(k, [])]
+        if not noms:
+            return "aucun"
+        montres = ", ".join(noms[:8]) + (f"… (+{len(noms) - 8})" if len(noms) > 8 else "")
+        return f"{len(noms)} ({montres})"
+    return f"{titre} : {total} ; du téléphone : {_partie(du_tel)} ; vers le téléphone : {_partie(vers_tel)}"
+
+def _verifier_demande(d, secret, cle):
+    """Demande du téléphone scellée par le secret partagé : rend (nonce, objet JSON), ou None."""
+    import hmac, hashlib
+    try:
+        nonce, texte = d["nonce"], d[cle]
+        if not hmac.compare_digest(_sceau_synchro(secret, nonce, hashlib.sha256(texte.encode("utf-8")).hexdigest()), d["sceau"]):
+            return None
+        return nonce, json.loads(texte)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+def _reponse_scellee(secret, nonce, reponse):
+    import hashlib
+    contenu = json.dumps(reponse, ensure_ascii=False)
+    return json.dumps({"contenu": contenu, "sceau": _sceau_synchro(secret, nonce, "reponse",
+                       hashlib.sha256(contenu.encode("utf-8")).hexdigest())}, ensure_ascii=False)
+
+def _traiter_synchro_macros(d, secret):
+    lu = _verifier_demande(d, secret, "macros")
+    if lu is None:
+        return None
+    nonce, tel = lu
+    # fenêtre MACROS ouverte (18/11/2026) : elle enregistre d'abord ce qu'elle affiche, puis relira
+    # le résultat (changees). Avant, la synchro était refusée et le téléphone ne recevait rien.
+    if _gestionnaire_macros_ouvert[0] > 0 and _relais_macros[0] is not None:
+        try:
+            _relais_macros[0].enregistrer_fenetre.emit()
+        except RuntimeError:
+            pass
+    donnees = charger_macros()
+    macros, bilan = fusionner_macros(donnees.get("macros", []),
+                                     tel.get("macros", []) if isinstance(tel, dict) else [],
+                                     _lire_base(FICHIER_BASE_MACROS))
+    if macros != donnees.get("macros", []):
+        donnees["macros"] = macros
+        sauvegarder_macros(donnees)
+        if _relais_macros[0] is not None:
+            try:
+                _relais_macros[0].changees.emit()
+            except RuntimeError:
+                pass
+    _ecrire_base(FICHIER_BASE_MACROS, macros)
+    print(f"[SYNCHRO MACROS] {len(macros)} macro(s), {bilan}")
+    _signaler_synchro("macros", _bilan_synchro_court(
+        "macros", len(macros), bilan, ("venues_tel", "modifiees_tel", "supprimees_pc"),
+        ("venues_pc", "modifiees_pc", "supprimees_tel"))
+        + (f" ; modifiée(s) des deux côtés, version Android gardée en « (Android) » : {', '.join(bilan['conflits'])}"
+           if bilan.get("conflits") else ""))
+    return _reponse_scellee(secret, nonce, {"macros": macros, "bilan": bilan})
+
+def _traiter_synchro_rss(d, secret):
+    lu = _verifier_demande(d, secret, "rss")
+    if lu is None:
+        return None
+    nonce, tel = lu
+    # pas pendant une vérification du PC : elle réécrirait le fichier par-dessus (voir _verrou_rss_global)
+    if _verrou_rss_global["en_cours"]:
+        print("[SYNCHRO RSS] reportée : vérification RSS en cours sur le PC")
+        _signaler_synchro("rss", "RSS to Email : reportée, une vérification RSS est en cours sur le PC")
+        return _reponse_scellee(secret, nonce, {"erreur": "verification_en_cours"})
+    _verrou_rss_global["en_cours"] = True
+    try:
+        donnees = charger_abonnements_rss()
+        flux_pc, pour_tel, bilan = fusionner_flux_rss(donnees.get("flux", []),
+                                                      tel.get("flux", []) if isinstance(tel, dict) else [],
+                                                      _lire_base(FICHIER_BASE_RSS))
+        if flux_pc != donnees.get("flux", []):
+            donnees["flux"] = flux_pc
+            sauvegarder_abonnements_rss(donnees)
+        _ecrire_base(FICHIER_BASE_RSS, [{k: f.get(k) for k in ("url", *CHAMPS_FLUX_SYNCHRO) if k in f} for f in pour_tel])
+    finally:
+        _verrou_rss_global["en_cours"] = False
+    print(f"[SYNCHRO RSS] {len(pour_tel)} flux, {bilan}")
+    _signaler_synchro("rss", _bilan_synchro_court("RSS to Email", len(pour_tel), bilan,
+                                                  ("venus_tel", "modifies_tel", "supprimes_pc"),
+                                                  ("venus_pc", "modifies_pc", "supprimes_tel")))
+    return _reponse_scellee(secret, nonce, {"flux": pour_tel, "bilan": bilan})
 
 def _traiter_synchro_carnet(d, secret):
     """Le téléphone envoie son carnet ; on le fusionne avec le nôtre, on enregistre, on lui rend le
@@ -5655,6 +6097,8 @@ def _traiter_synchro_auto(ligne, secret):
     empreinte = hashlib.sha256(contenu.encode("utf-8")).hexdigest()
     _ecrire_synchro_telephone(confirme=True)
     print(f"[SYNCHRO AUTO] envoyé au téléphone : {', '.join(quoi) or 'rien'}")
+    if "sons" in quoi:
+        _signaler_synchro("sons", "sons : envoyés au téléphone (ils se règlent sur le PC)")
     return json.dumps({"contenu": contenu, "sceau": _sceau_synchro(secret, nonce, "reponse", empreinte)}, ensure_ascii=False)
 
 
@@ -20468,7 +20912,7 @@ class DialogueAgenda(QDialog):
             Qt.WindowType.WindowMinimizeButtonHint |
             Qt.WindowType.WindowMaximizeButtonHint
         )
-        self.setMinimumSize(480, 520)
+        self.setMinimumSize(660, 520)   # 18/11/2026 : 480 → 660, place pour Synchro COURRIER ANDROID
         self.setStyleSheet("""
             QDialog { background-color: #2a2a2a; }
             QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
@@ -20623,6 +21067,11 @@ class DialogueAgenda(QDialog):
         btn_fermer = QPushButton("  Fermer  ")
         btn_fermer.setStyleSheet(STYLE_BOUTON)
         btn_fermer.clicked.connect(self._fermer_avec_sauvegarde_son)
+        # 18/11/2026 (demandé) : comme MACROS, MODÈLES, SONS, SPAM et RSS to EMAIL
+        btn_synchro_tel = QPushButton("  Synchro COURRIER ANDROID  ")
+        btn_synchro_tel.setStyleSheet(STYLE_BOUTON)
+        btn_synchro_tel.clicked.connect(self._synchro_android_todo)
+        ligne_btns.addWidget(btn_synchro_tel)   # 18/11/2026 (demandé) : Synchro tout à gauche
         ligne_btns.addWidget(self.btn_valider)
         ligne_btns.addWidget(btn_annuler_edit)
         ligne_btns.addStretch(1)
@@ -20633,6 +21082,17 @@ class DialogueAgenda(QDialog):
         layout.addWidget(self.lbl_statut)
 
         self._charger_liste()
+
+    def _synchro_android_todo(self):
+        client = self._parent_courrier
+
+        def _relire():
+            try:
+                self._charger_liste()
+            except RuntimeError:
+                pass
+        if hasattr(client, "_synchro_android"):
+            client._synchro_android(self, ["todo"], apres=_relire)
 
     def _fermer_avec_sauvegarde_son(self):
         sauvegarder_son_agenda({
@@ -20757,6 +21217,7 @@ class DialogueAgenda(QDialog):
                     r["periodicite"] = periodicite
                     r["declenche"] = False  # rearmer le rappel si la date a changé
                     r["vu"] = False  # idem pour le marquage "vu" (14/08/2026)
+                    r["modifie"] = maintenant_ms()  # synchro avec le téléphone (16/11/2026)
                     break
             self.lbl_statut.setStyleSheet("color: #80c080;")
             self.lbl_statut.setText("Rappel modifié.")
@@ -20768,6 +21229,7 @@ class DialogueAgenda(QDialog):
                 "texte": texte,
                 "declenche": False,
                 "periodicite": periodicite,
+                "modifie": maintenant_ms(),
             })
             self.lbl_statut.setStyleSheet("color: #80c080;")
             self.lbl_statut.setText("Rappel ajouté.")
@@ -20783,6 +21245,7 @@ class DialogueAgenda(QDialog):
         id_a_supprimer = item.data(Qt.ItemDataRole.UserRole)
         rappels = [r for r in charger_rappels() if r.get("id") != id_a_supprimer]
         sauvegarder_rappels(rappels)
+        noter_rappel_supprime(id_a_supprimer)  # supprimé du téléphone aussi à la synchro
         self._annuler_edition()
         self._charger_liste()
 
@@ -21130,12 +21593,11 @@ class DialogueAbonnementsRSS(QDialog):
         btn_copier_url.clicked.connect(self._copier_url_flux)
         ligne_url_selection.addWidget(self.champ_url_selection, 1)
         ligne_url_selection.addWidget(btn_copier_url)
-        # 04/11/2026 : comme MACROS, SONS, MODÈLES et SPAM
-        btn_copier_tel = QPushButton("  Copier sur le téléphone  ")
+        # 04/11/2026 : comme MACROS, SONS, MODÈLES et SPAM (synchro depuis le 18/11/2026)
+        btn_copier_tel = QPushButton("  Synchro COURRIER ANDROID  ")
         btn_copier_tel.setStyleSheet(STYLE_BOUTON)
         btn_copier_tel.clicked.connect(self._copier_flux_telephone)
-        ligne_url_selection.addWidget(btn_copier_tel)
-        layout.addLayout(ligne_url_selection)
+        layout.addLayout(ligne_url_selection)   # 18/11/2026 : la synchro est passée en bas à gauche
 
         self.lbl_statut = QLabel("")
         self.lbl_statut.setStyleSheet("font-family: Verdana; font-size: 11px;")
@@ -21168,9 +21630,11 @@ class DialogueAbonnementsRSS(QDialog):
         btn_fermer = QPushButton("  Fermer  ")
         btn_fermer.setStyleSheet(STYLE_BOUTON)
         btn_fermer.clicked.connect(self.accept)
-        ligne_btns.addWidget(btn_supprimer)
+        # 18/11/2026 (demandé) : Synchro en tête de la ligne du bas, Supprimer après Récupérer
+        ligne_btns.addWidget(btn_copier_tel)
         ligne_btns.addWidget(btn_verifier)
         ligne_btns.addWidget(btn_recuperer)
+        ligne_btns.addWidget(btn_supprimer)
         ligne_btns.addStretch(1)
         ligne_btns.addWidget(btn_fermer)
         layout.addLayout(ligne_btns)
@@ -21328,8 +21792,16 @@ class DialogueAbonnementsRSS(QDialog):
 
     def _copier_flux_telephone(self):
         client = self._parent_courrier
-        if hasattr(client, "_exporter_comptes_android"):
-            client._exporter_comptes_android(self, seulement="rss")
+        compte = self._compte_selectionne()
+
+        def _relire():
+            try:
+                self._charger_comptes(selectionner_compte=compte)
+                self._rafraichir_flux_compte()
+            except RuntimeError:
+                pass
+        if hasattr(client, "_synchro_android"):
+            client._synchro_android(self, ["rss"], apres=_relire)
 
     def _rechercher_flux(self):
         adresse = self.champ_recherche_flux.text().strip()
@@ -23047,7 +23519,7 @@ class DialogueCarnetAdresses(QDialog):
         if not _lire_synchro_telephone().get("confirme"):
             self.lbl_statut.setStyleSheet("color: #e08080;")
             self.lbl_statut.setText("Le téléphone n'est pas encore lié à COURRIER : fenêtre SPAM, "
-                                    "« Synchro avec le téléphone » une première fois.")
+                                    "« Synchro COURRIER ANDROID » une première fois.")
             return
         principal = self._parent_courrier
         if principal is None or not hasattr(principal, "_lancer_fil_export_android"):
@@ -29603,6 +30075,8 @@ class GestionnaireMacros(QDialog):
         btn_ajouter_etape = QPushButton(" Ajouter ")
         btn_ajouter_etape.clicked.connect(self._ajouter_etape)
         ligne_ajout.addWidget(btn_ajouter_etape)
+        self.btn_ajouter_etape = btn_ajouter_etape
+        self._etape_en_modification = -1   # 18/11/2026 : rang de l'étape en cours de modification
         colonne_droite.addLayout(ligne_ajout)
 
         # Boutons de gestion des étapes
@@ -29613,24 +30087,30 @@ class GestionnaireMacros(QDialog):
         btn_descendre.clicked.connect(lambda: self._deplacer_etape(1))
         btn_supprimer_etape = QPushButton(" Supprimer l'étape ")
         btn_supprimer_etape.clicked.connect(self._supprimer_etape)
+        # 18/11/2026 (demandé) : l'étape sélectionnée revient dans la ligne du dessus, Valider la remplace
+        btn_modifier_etape = QPushButton(" Modifier l'étape ")
+        btn_modifier_etape.clicked.connect(self._modifier_etape)
+        self.liste_etapes.itemDoubleClicked.connect(lambda _i: self._modifier_etape())
         ligne_btns_etape.addWidget(btn_monter)
         ligne_btns_etape.addWidget(btn_descendre)
+        ligne_btns_etape.addWidget(btn_modifier_etape)
         ligne_btns_etape.addWidget(btn_supprimer_etape)
         ligne_btns_etape.addStretch(1)
         colonne_droite.addLayout(ligne_btns_etape)
 
         # Boutons globaux
         ligne_bas = QHBoxLayout()
-        ligne_bas.addStretch(1)
         btn_sauvegarder = QPushButton(" Sauvegarder ")
         btn_sauvegarder.clicked.connect(self._sauvegarder_tout)
         btn_fermer = QPushButton(" Fermer ")
         btn_fermer.clicked.connect(self.accept)
-        # Copie des macros vers COURRIER ADRIEN sur le téléphone (02/11/2026), après sauvegarde
-        btn_telephone = QPushButton(" Copier vers le téléphone ")
+        # Synchro des macros avec COURRIER ADRIEN ANDROID (18/11/2026 ; avant, copie du 02/11/2026)
+        btn_telephone = QPushButton(" Synchro COURRIER ANDROID ")
         btn_telephone.clicked.connect(self._copier_vers_telephone)
+        # 18/11/2026 (demandé) : Synchro et Sauvegarder à gauche, Fermer seul à droite
         ligne_bas.addWidget(btn_telephone)
         ligne_bas.addWidget(btn_sauvegarder)
+        ligne_bas.addStretch(1)
         ligne_bas.addWidget(btn_fermer)
         colonne_droite.addLayout(ligne_bas)
 
@@ -29655,6 +30135,8 @@ class GestionnaireMacros(QDialog):
         return None
 
     def _changer_macro(self, index):
+        if hasattr(self, "btn_ajouter_etape"):
+            self._fin_modification_etape()
         self.macro_courante_index = index
         macro = self._macro_courante()
         self.champ_nom.blockSignals(True)
@@ -29822,6 +30304,9 @@ class GestionnaireMacros(QDialog):
         """Une étape texte sélectionnée : la barre de mise en forme affiche
         la sienne. Une autre étape : la barre garde ses réglages (ils
         serviront pour la prochaine étape texte ajoutée)."""
+        if getattr(self, "_etape_en_modification", -1) >= 0 and index != self._etape_en_modification:
+            self._fin_modification_etape()   # autre étape choisie : modification abandonnée
+            self.champ_valeur_etape.clear()
         etape, _ligne = self._etape_texte_selectionnee()
         if etape is None:
             return
@@ -29861,16 +30346,43 @@ class GestionnaireMacros(QDialog):
                 etape["forme"] = forme
         else:
             etape = {"type": type_etape}
-        macro.setdefault("etapes", []).append(etape)
+        etapes = macro.setdefault("etapes", [])
+        rang = self._etape_en_modification
+        self._fin_modification_etape()
+        if 0 <= rang < len(etapes):   # Valider : l'étape modifiée remplace l'ancienne, à sa place
+            etapes[rang] = etape
+        else:
+            etapes.append(etape)
+            rang = len(etapes) - 1
         self.champ_valeur_etape.clear()
         self._charger_liste_etapes()
-        self.liste_etapes.setCurrentRow(self.liste_etapes.count() - 1)
+        self.liste_etapes.setCurrentRow(rang)
+
+    def _modifier_etape(self):
+        """Modifier l'étape (18/11/2026) : son type et son texte reviennent dans la ligne d'ajout,
+        le bouton Ajouter devient Valider. Sa mise en forme est déjà dans la barre (sélection)."""
+        macro = self._macro_courante()
+        ligne = self.liste_etapes.currentRow()
+        if macro is None or not (0 <= ligne < len(macro.get("etapes", []))):
+            return
+        etape = macro["etapes"][ligne]
+        i = self.combo_type_etape.findData(etape.get("type", "texte"))
+        self.combo_type_etape.setCurrentIndex(max(i, 0))
+        self.champ_valeur_etape.setText(etape.get("valeur", "") if etape.get("type") == "texte" else "")
+        self._etape_en_modification = ligne
+        self.btn_ajouter_etape.setText(" Valider ")
+        self.champ_valeur_etape.setFocus()
+
+    def _fin_modification_etape(self):
+        self._etape_en_modification = -1
+        self.btn_ajouter_etape.setText(" Ajouter ")
 
     def _supprimer_etape(self):
         macro = self._macro_courante()
         ligne = self.liste_etapes.currentRow()
         if macro is None or ligne < 0:
             return
+        self._fin_modification_etape()
         macro["etapes"].pop(ligne)
         self._charger_liste_etapes()
 
@@ -29892,11 +30404,32 @@ class GestionnaireMacros(QDialog):
         QMessageBox.information(self, "Macros", "Macros sauvegardées.")
 
     def _copier_vers_telephone(self):
-        """Même fenêtre que COMPTES > Copier vers le téléphone, seulement les macros (02/11/2026)."""
-        sauvegarder_macros(self.donnees)   # on copie ce qui est à l'écran
-        client = self.parent()
-        if hasattr(client, "_exporter_comptes_android"):
-            client._exporter_comptes_android(self, seulement="macros")
+        """Synchro COURRIER ANDROID (18/11/2026, avant : copie) : ce qui est à l'écran est enregistré,
+        synchronisé avec le téléphone, puis la fenêtre relit le résultat."""
+        sauvegarder_macros(self.donnees)
+        # fenêtre sans parent Qt : self.parent() est None (le bouton ne faisait rien, 18/11/2026)
+        client = self._parent_courrier
+        if hasattr(client, "_synchro_android"):
+            client._synchro_android(self, ["macros"], apres=self.relire_apres_synchro)
+
+    def enregistrer_pour_synchro(self):
+        """Juste avant une synchro des macros (fil de l'interface, l'écoute attend) : ce qui est à l'écran."""
+        try:
+            sauvegarder_macros(self.donnees)
+        except RuntimeError:
+            pass
+
+    def relire_apres_synchro(self):
+        try:
+            self.donnees = charger_macros()
+            n = len(self.donnees.get("macros", []))
+            self.macro_courante_index = min(max(self.macro_courante_index, 0), n - 1)
+            self._charger_liste_macros()
+            if self.macro_courante_index >= 0:
+                self.liste_macros.setCurrentRow(self.macro_courante_index)
+            self._changer_macro(self.macro_courante_index)
+        except RuntimeError:
+            pass   # fenêtre fermée entre-temps
 
 
 class GestionnaireModeles(QDialog):
@@ -30102,12 +30635,13 @@ class GestionnaireModeles(QDialog):
         # Sauvegarder déplacé ici, juste à gauche de Fermer (13/10/2026,
         # demandé par l'utilisateur — il était à droite de la ligne du haut).
         ligne_bas = QHBoxLayout()
-        ligne_bas.addStretch(1)
-        # Copie des modèles vers COURRIER ADRIEN sur le téléphone (02/11/2026)
-        btn_telephone = QPushButton(" Copier vers le téléphone ")
+        # Synchro des modèles avec COURRIER ADRIEN ANDROID (18/11/2026 ; avant, copie du 02/11/2026)
+        # 18/11/2026 (demandé) : Synchro seule à gauche, Sauvegarder et Fermer à droite
+        btn_telephone = QPushButton(" Synchro COURRIER ANDROID ")
         btn_telephone.setStyleSheet(STYLE_BOUTON)
         btn_telephone.clicked.connect(self._copier_vers_telephone)
         ligne_bas.addWidget(btn_telephone)
+        ligne_bas.addStretch(1)
         self.btn_sauvegarder = QPushButton(" Sauvegarder ")
         self.btn_sauvegarder.setStyleSheet(STYLE_BOUTON)
         self.btn_sauvegarder.clicked.connect(self._sauvegarder_tout)
@@ -30642,12 +31176,19 @@ class GestionnaireModeles(QDialog):
         self.lbl_statut.setText("Modèles sauvegardés.")
 
     def _copier_vers_telephone(self):
-        """Même fenêtre que COMPTES > Copier vers le téléphone, seulement les modèles (02/11/2026),
-        après la sauvegarde de ce qui est dans l'éditeur."""
+        """Synchro COURRIER ANDROID (18/11/2026, avant : copie) des modèles, après la sauvegarde de ce
+        qui est dans l'éditeur ; la fenêtre relit ensuite le résultat."""
+        def _relire():
+            try:
+                self.donnees = charger_modeles()
+                self._charger_emplacement_actuel()
+            except RuntimeError:
+                pass
+
         def _apres():
             self._ecrire_sur_disque()
-            if hasattr(self.client_mail, "_exporter_comptes_android"):
-                self.client_mail._exporter_comptes_android(self, seulement="modeles")
+            if hasattr(self.client_mail, "_synchro_android"):
+                self.client_mail._synchro_android(self, ["modeles"], apres=_relire)
         self._capturer_puis(_apres)
 
     def closeEvent(self, event):
@@ -31681,7 +32222,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 16/11/2026 02h48")
+        self.setWindowTitle("COURRIER ADRIEN — 18/11/2026 15h25")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -32669,6 +33210,18 @@ class ClientMail(QMainWindow):
             layout_haut.addWidget(btn)
             layout_haut.addSpacing(3)
             self._boutons_redaction[cle] = btn
+            # Clic droit sur RÉPONDRE / RÉP. À TOUS : répondre en gardant
+            # les pièces jointes du mail d'origine (18/11/2026, demandé)
+            if cle in ("repondre", "repondre_tous"):
+                btn.setToolTip("Clic droit : répondre en gardant les pièces jointes")
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                def _menu_avec_pj(pos, b=btn, s=slot):
+                    from PySide6.QtWidgets import QMenu
+                    menu = QMenu(b)
+                    action = menu.addAction("Répondre avec les pièces jointes")
+                    action.triggered.connect(lambda: s(True))
+                    menu.exec(b.mapToGlobal(pos))
+                btn.customContextMenuRequested.connect(_menu_avec_pj)
 
         # SUPPRIMER tout à droite, après RENVOYER (20/10/2026, demandé)
         btn_supprimer_barre = QPushButton("SUPPRIMER")
@@ -34537,6 +35090,10 @@ if (typeof module === 'object') {
         self._cadre_macros = cadre_macros
         layout_zone_mail.addWidget(cadre_macros, 0, 0, Qt.AlignmentFlag.AlignCenter)
         self._regenerer_boutons_macros(STYLE_BTN_BAS)
+        # 18/11/2026 : macros changées par la synchro avec le téléphone → boutons refaits
+        self._relais_macros = _RelaisMacros(self)
+        self._relais_macros.changees.connect(lambda: self._regenerer_boutons_macros())
+        _relais_macros[0] = self._relais_macros
 
         btn_delai = QPushButton("DÉLAI")
         # Orange (25/10/2026, demandé) comme BADGE et NAVIGATEUR 2 cochés dans
@@ -36673,6 +37230,24 @@ if (typeof module === 'object') {
             # boutons de macros une fois la boîte fermée — on se raccroche
             # au signal finished, émis à la fermeture même en mode non modal.
             dlg.finished.connect(lambda _r: self._regenerer_boutons_macros())
+            # 18/11/2026 : fenêtre ouverte pendant une synchro des macros : elle enregistre ce qu'elle
+            # affiche juste avant la fusion, puis relit le résultat (sinon sa sauvegarde suivante
+            # écraserait ce qui est venu du téléphone)
+            _gestionnaire_macros_ouvert[0] += 1
+            relais = self._relais_macros
+            relais.enregistrer_fenetre.connect(dlg.enregistrer_pour_synchro,
+                                               Qt.ConnectionType.BlockingQueuedConnection)
+            relais.changees.connect(dlg.relire_apres_synchro)
+
+            def _fermee(_r, d=dlg):
+                _gestionnaire_macros_ouvert[0] = max(0, _gestionnaire_macros_ouvert[0] - 1)
+                for sig, slot in ((relais.enregistrer_fenetre, d.enregistrer_pour_synchro),
+                                  (relais.changees, d.relire_apres_synchro)):
+                    try:
+                        sig.disconnect(slot)
+                    except (RuntimeError, TypeError):
+                        pass
+            dlg.finished.connect(_fermee)
             dlg.show()
             self._conserver_fenetre_secondaire(dlg)
         except Exception:
@@ -37144,7 +37719,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 16/11/2026 à 02h48")
+        lbl_version = QLabel("Version du 18/11/2026 à 15h25")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -37526,6 +38101,7 @@ if (typeof module === 'object') {
                     r["date_heure"] = nouvelle_dt.isoformat(timespec="minutes")
                     r["declenche"] = False
                     r["vu"] = False
+                    r["modifie"] = maintenant_ms()
                 elif r.get("id") in ids_a_marquer_vu:
                     r["vu"] = True
             sauvegarder_rappels(tous)
@@ -40947,14 +41523,18 @@ if (typeof module === 'object') {
         QTimer.singleShot(500, _verifier)
         return True
 
-    def repondre(self):
+    def repondre(self, avec_pj=False):
+        # avec_pj : True seulement depuis le clic droit (menu « avec les
+        # pièces jointes ») ; clicked() de Qt passe un booléen « checked »
+        # toujours False, sans effet ici
+        avec_pj = avec_pj is True
         item = self.liste_messages.currentItem()
         if not item:
             return
         msg_info = next((m for m in self.messages if m["uid"] == item.data(Qt.ItemDataRole.UserRole)), None)
         if not msg_info:
             return
-        if self._attendre_contenu_puis(msg_info, self.repondre):
+        if self._attendre_contenu_puis(msg_info, lambda: self.repondre(avec_pj)):
             return
         # Extraire adresse email de l'expéditeur
         de = msg_info["de"]
@@ -40965,16 +41545,18 @@ if (typeof module === 'object') {
         if not sujet.lower().startswith("re:"):
             sujet = f"Re: {sujet}"
         self._ouvrir_redaction(destinataire=destinataire, sujet=sujet,
-                               msg_info=msg_info, type_modele="repondre")
+                               msg_info=msg_info, type_modele="repondre",
+                               avec_pj=avec_pj)
 
-    def repondre_a_tous(self):
+    def repondre_a_tous(self, avec_pj=False):
+        avec_pj = avec_pj is True  # voir repondre
         item = self.liste_messages.currentItem()
         if not item:
             return
         msg_info = next((m for m in self.messages if m["uid"] == item.data(Qt.ItemDataRole.UserRole)), None)
         if not msg_info:
             return
-        if self._attendre_contenu_puis(msg_info, self.repondre_a_tous):
+        if self._attendre_contenu_puis(msg_info, lambda: self.repondre_a_tous(avec_pj)):
             return
         de = msg_info["de"]
         match = re.search(r'<(.+?)>', de)
@@ -41034,7 +41616,8 @@ if (typeof module === 'object') {
             sujet = f"Re: {sujet}"
         fenetre = self._ouvrir_redaction(destinataire=", ".join(destinataires), sujet=sujet,
                                msg_info=msg_info, type_modele="repondre",
-                               retourner_fenetre=True, action_barre="repondre_tous")
+                               retourner_fenetre=True, action_barre="repondre_tous",
+                               avec_pj=avec_pj)
         if fenetre and cc_liste:
             fenetre.champ_cc.setText(", ".join(cc_liste))
 
@@ -41253,7 +41836,8 @@ if (typeof module === 'object') {
 
     def _ouvrir_redaction(self, destinataire="", sujet="", msg_info=None,
                            type_modele="nouveau", retourner_fenetre=False,
-                           corps_supplementaire="", cc="", cci="", action_barre=None):
+                           corps_supplementaire="", cc="", cci="", action_barre=None,
+                           avec_pj=False):
         """Ouvre la fenêtre de rédaction avec le modèle HTML approprié pour
         le compte actif. Deux emplacements seulement : "nouveau", et
         "reponse" qui couvre à la fois répondre / répondre à tous /
@@ -41327,7 +41911,10 @@ if (typeof module === 'object') {
             uid_original=msg_info.get("uid") if msg_info and type_modele in ("repondre",) else None,
             dossier_imap_original=self._nom_imap(self.dossier_actif) if msg_info and type_modele in ("repondre",) else None
         )
-        if type_modele == "transferer" and msg_info is not None:
+        # PJ d'origine : toujours pour un transfert ; pour une réponse,
+        # seulement si demandé (clic droit sur RÉPONDRE / RÉP. À TOUS,
+        # 18/11/2026)
+        if msg_info is not None and (type_modele == "transferer" or avec_pj):
             chemins_pj_originales = self._extraire_pieces_jointes_originales(msg_info)
             if chemins_pj_originales:
                 fenetre._ajouter_pieces_jointes(chemins_pj_originales)
@@ -49051,8 +49638,8 @@ __JS_TRADUCTION__
         layout.addLayout(ligne_dl)
 
         layout_btn = QHBoxLayout()
-        # Copie des sons vers COURRIER ADRIEN sur le téléphone (02/11/2026)
-        btn_telephone = QPushButton(" Copier vers le téléphone ")
+        # Sons vers COURRIER ADRIEN ANDROID (02/11/2026 ; libellé harmonisé le 18/11/2026)
+        btn_telephone = QPushButton(" Synchro COURRIER ANDROID ")
         btn_telephone.setStyleSheet(STYLE_BOUTON)
         btn_enregistrer = QPushButton(" Enregistrer ")
         btn_enregistrer.setStyleSheet(STYLE_BOUTON)
@@ -49081,8 +49668,8 @@ __JS_TRADUCTION__
             dlg.accept()
 
         def copier_telephone():
-            _sauver()   # on copie ce qui est à l'écran
-            self._exporter_comptes_android(dlg, seulement="sons")
+            _sauver()   # on envoie ce qui est à l'écran
+            self._synchro_android(dlg, ["sons"])
 
         btn_telephone.clicked.connect(copier_telephone)
         btn_enregistrer.clicked.connect(enregistrer)
@@ -49239,7 +49826,7 @@ __JS_TRADUCTION__
             restaurateur.termine.connect(_sur_fin_restauration)
             restaurateur.start()
         btn_retirer.clicked.connect(_retirer)
-        btn_telephone_spam = QPushButton(" Synchro avec le téléphone ")
+        btn_telephone_spam = QPushButton(" Synchro COURRIER ANDROID ")
         btn_telephone_spam.setStyleSheet(STYLE_BOUTON)
         def _copier_spam_telephone():
             # La première fois : la copie, validée sur le téléphone, qui lui donne le secret
@@ -49248,7 +49835,7 @@ __JS_TRADUCTION__
                 _recharger()   # le téléphone a pu renvoyer ses changements
                 return
             btn_telephone_spam.setEnabled(False)
-            lbl_nb.setText("Synchro avec le téléphone...")
+            lbl_nb.setText("Synchro avec COURRIER ADRIEN ANDROID...")
 
             def _fin(bilan):
                 try:
@@ -49266,8 +49853,8 @@ __JS_TRADUCTION__
         btn_fermer_spam = QPushButton(" Fermer ")
         btn_fermer_spam.setStyleSheet(STYLE_BOUTON)
         btn_fermer_spam.clicked.connect(dlg.reject)
+        layout_btn.addWidget(btn_telephone_spam)   # 18/11/2026 (demandé) : Synchro tout à gauche
         layout_btn.addWidget(btn_retirer)
-        layout_btn.addWidget(btn_telephone_spam)
         layout_btn.addWidget(btn_fermer_spam)
         layout.addLayout(layout_btn)
 
@@ -49784,7 +50371,7 @@ __JS_TRADUCTION__
         # Export vers COURRIER ADRIEN ANDROID (29/10/2026, demandé) : bouton
         # long, sur toute la largeur, au titre explicite, collé à la ligne
         # Ajouter/Valider/Supprimer (au-dessus de la ligne de statut)
-        btn_export_android = QPushButton("Copier vers COURRIER ADRIEN sur le téléphone (comptes, macros, sons, modèles, spam)")
+        btn_export_android = QPushButton("Synchro vers COURRIER ADRIEN ANDROID (comptes, spams, sons, macros, RSS to Email, modèles, TODO)")
         btn_export_android.setStyleSheet(STYLE_BOUTON)
         btn_export_android.clicked.connect(lambda: self._exporter_comptes_android(dlg))
         layout.addWidget(btn_export_android)
@@ -50219,8 +50806,11 @@ __JS_TRADUCTION__
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
                                        QRadioButton, QLineEdit, QScrollArea, QWidget)
         comptes = [c for c in COMPTES if not est_compte_factice(c)]
+        # 18/11/2026 (demandé) : synchro de tout, sauf les comptes (et leurs mots de passe), copiés.
+        # Avant la toute première copie, le téléphone n'a pas le secret de la synchro : tout est copié.
+        confirme = bool(_lire_synchro_telephone().get("confirme"))
         dlg = QDialog(parent)
-        dlg.setWindowTitle("Copier vers COURRIER ADRIEN sur le téléphone")
+        dlg.setWindowTitle("Synchro vers COURRIER ADRIEN ANDROID")
         dlg.setMinimumWidth(560)
         dlg.setStyleSheet("""
             QDialog, QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
@@ -50240,26 +50830,34 @@ __JS_TRADUCTION__
         # 04/11/2026 (texte de l'utilisateur) : seuls les mots de passe vont de coffre à coffre,
         # donc la phrase n'en parle que si des comptes peuvent être copiés
         explication = QLabel(
-            "Ce que vous cochez est copié sur le téléphone par la liaison Wi-Fi ou câble."
-            + ("" if seulement else " Les mots de passe des comptes sont directement copiés de coffre à coffre."))
+            ("Ce que vous cochez est synchronisé avec le téléphone (dans les deux sens, sauf les sons), "
+             "par la liaison Wi-Fi ou câble." if confirme else
+             "Première fois : ce que vous cochez est copié sur le téléphone, par la liaison Wi-Fi ou câble. "
+             "Ensuite, ce sera une synchro dans les deux sens.")
+            + ("" if seulement else " Les comptes sont copiés, leurs mots de passe directement de coffre à coffre."))
         explication.setWordWrap(True)
         explication.setStyleSheet("color: #e0c080;")
         layout.addWidget(explication)
 
         # À copier (02/11/2026) : tout par défaut, ou la seule partie demandée
         ligne_quoi = QHBoxLayout()
-        lbl_quoi = QLabel("À copier :")
+        lbl_quoi = QLabel("À synchroniser :" if confirme else "À copier :")
         lbl_quoi.setStyleSheet("font-weight: bold;")
         ligne_quoi.addWidget(lbl_quoi)
         case_comptes = QCheckBox("Comptes")
         case_macros = QCheckBox("Macros")
         case_sons = QCheckBox("Sons")
         case_modeles = QCheckBox("Modèles")
-        case_spam = QCheckBox("Liste de spam")
-        case_rss = QCheckBox("Flux RSS")
-        for cle, case in (("comptes", case_comptes), ("macros", case_macros), ("sons", case_sons), ("modeles", case_modeles), ("spam", case_spam), ("rss", case_rss)):
-            case.setChecked(seulement is None or seulement == cle)
+        case_spam = QCheckBox("Spams")
+        case_rss = QCheckBox("RSS to Email")
+        case_todo = QCheckBox("TODO")   # 18/11/2026 : synchro seulement (pas dans la copie)
+        # ordre demandé le 18/11/2026 : comptes, spams, sons, macros, RSS to Email, modèles, TODO
+        for cle, case in (("comptes", case_comptes), ("spam", case_spam), ("sons", case_sons), ("macros", case_macros),
+                          ("rss", case_rss), ("modeles", case_modeles), ("todo", case_todo)):
+            # première fois : la liste de spam est copiée avec, c'est elle qui donne le secret de la synchro
+            case.setChecked(seulement is None or seulement == cle or (cle == "spam" and not confirme))
             ligne_quoi.addWidget(case)
+        case_todo.setVisible(confirme)
         # Depuis MACROS, SONS, MODÈLES, SPAM ou RSS to EMAIL : pas de case Comptes (04/11/2026, demandé)
         case_comptes.setVisible(seulement is None)
         ligne_quoi.addStretch(1)
@@ -50317,7 +50915,7 @@ __JS_TRADUCTION__
 
         ligne_bas = QHBoxLayout()
         ligne_bas.addStretch(1)
-        btn_envoyer = QPushButton("Envoyer au téléphone")
+        btn_envoyer = QPushButton("Synchroniser" if confirme else "Envoyer au téléphone")
         btn_annuler = QPushButton("Annuler")
         for b in (btn_envoyer, btn_annuler):
             b.setStyleSheet(STYLE_BOUTON)
@@ -50334,18 +50932,24 @@ __JS_TRADUCTION__
             avec_macros, avec_sons, avec_modeles = case_macros.isChecked(), case_sons.isChecked(), case_modeles.isChecked()
             avec_spam = case_spam.isChecked()
             avec_rss = case_rss.isChecked()
+            avec_todo = confirme and case_todo.isChecked()
             if case_comptes.isChecked() and not choisis:
                 _etat("Cochez au moins un compte, ou décochez Comptes.", "#e08080")
                 return
-            if not (choisis or avec_macros or avec_sons or avec_modeles or avec_spam or avec_rss):
-                _etat("Cochez au moins une chose à copier.", "#e08080")
+            if not (choisis or avec_macros or avec_sons or avec_modeles or avec_spam or avec_rss or avec_todo):
+                _etat("Cochez au moins une chose à synchroniser.", "#e08080")
                 return
             avec = bool(choisis) and choix_avec.isChecked()   # mots de passe : seulement avec des comptes
-            if not verifier_code_telephone(dlg):
+            if choisis and not verifier_code_telephone(dlg):   # le code protège les comptes
                 return
+            # 18/11/2026 : déjà relié une fois → synchro de tout sauf les comptes, puis copie des comptes
+            a_synchroniser = [k for k, oui in (("spam", avec_spam), ("sons", avec_sons), ("macros", avec_macros),
+                                               ("rss", avec_rss), ("modeles", avec_modeles), ("todo", avec_todo)) if oui] if confirme else []
+            if confirme:
+                avec_macros = avec_sons = avec_modeles = avec_spam = avec_rss = False
             btn_envoyer.setEnabled(False)
             _etat("Connexion au téléphone...")
-            bilan_spam, fin_copie = {}, {}
+            bilan_spam, fin_copie, bilan_synchro = {}, {}, {}
             relais_etape = _RelaisTelephone(dlg)
 
             def _attendre_copier(_rien=None):
@@ -50357,7 +50961,7 @@ __JS_TRADUCTION__
                 btn_envoyer.setEnabled(True)
                 _etat("Téléphone introuvable : rien n'a été envoyé.", "#e08080")
 
-            def _connecte(serie):
+            def _copier_comptes(serie):
                 _etat("Envoi à l'application du téléphone...")
                 attente_telephone(dlg, "Envoi à l'application du téléphone…")
                 self._lancer_fil_export_android(
@@ -50366,10 +50970,31 @@ __JS_TRADUCTION__
                                                      etape=lambda: relais_etape.fini.emit(None),
                                                      fin_copie=fin_copie, rss=avec_rss), _fini)
 
+            def _connecte(serie):
+                if not a_synchroniser:
+                    _copier_comptes(serie)
+                    return
+                _etat("Synchro avec COURRIER ADRIEN ANDROID...")
+                attente_telephone(dlg, "Synchro avec COURRIER ADRIEN ANDROID…")
+
+                def _synchro_faite(bilan):
+                    bilan_synchro["texte"] = bilan
+                    if choisis:
+                        _copier_comptes(serie)
+                        return
+                    from PySide6.QtWidgets import QMessageBox
+                    attente_telephone_fermer()
+                    btn_envoyer.setEnabled(True)
+                    _boite_telephone(dlg, bilan, QMessageBox.Information)
+                    dlg.accept()
+                self._lancer_fil_export_android(lambda: _synchro_telephone(serie, a_synchroniser), _synchro_faite)
+
             def _fini(resultat):
                 from PySide6.QtWidgets import QMessageBox
                 attente_telephone_fermer()
                 btn_envoyer.setEnabled(True)
+                if bilan_synchro.get("texte"):   # 18/11/2026 : la synchro faite avant la copie des comptes
+                    _etat(bilan_synchro["texte"].replace("\n\n", "\n"), "#80c080")
                 if resultat is not True:
                     _etat(f"Envoi impossible : {resultat}", "#e08080")
                     return
@@ -50379,7 +51004,8 @@ __JS_TRADUCTION__
                                     f"expéditeur(s) bloqué(s), {bilan_spam.get('retraits', 0)} débloqué(s).")
                 mot = fin_copie.get("mot")
                 if mot == "COPIE_OK":   # copie réussie : tout se referme après le OK
-                    _boite_telephone(dlg, "Copie réussie.\n\n" + fin_copie.get("texte", "") + du_telephone,
+                    avant = (bilan_synchro["texte"] + "\n\nComptes : copie réussie.\n\n") if bilan_synchro.get("texte") else "Copie réussie.\n\n"
+                    _boite_telephone(dlg, avant + fin_copie.get("texte", "") + du_telephone,
                                      QMessageBox.Information)
                     dlg.accept()
                     return
@@ -50409,10 +51035,37 @@ __JS_TRADUCTION__
         btn_envoyer.clicked.connect(_envoyer)
         dlg.exec()
 
+    def _synchro_android(self, parent, quoi, apres=None):
+        """Boutons « Synchro COURRIER ANDROID » (18/11/2026) : synchro de [quoi] avec le téléphone, bilan
+        dans une boîte, puis apres() (la fenêtre relit ses données). La toute première fois, le
+        téléphone n'a pas encore le secret partagé : passage par la copie, qui le lui donne."""
+        from PySide6.QtWidgets import QMessageBox
+        if not _lire_synchro_telephone().get("confirme"):
+            self._exporter_comptes_android(parent, seulement=quoi[0])
+            if apres:
+                apres()
+            return
+        def _fin(bilan):
+            attente_telephone_fermer()
+            if apres:
+                apres()
+            try:
+                _boite_telephone(parent, bilan, QMessageBox.Information)
+            except RuntimeError:
+                pass   # fenêtre fermée entre-temps
+
+        def _connecte(serie):
+            attente_telephone(parent, "Synchro avec COURRIER ADRIEN ANDROID…")
+            self._lancer_fil_export_android(lambda: _synchro_telephone(serie, quoi), _fin)
+
+        connecter_telephone(parent, _connecte, si_echec=lambda: _fin("Téléphone introuvable : rien n'a changé."))
+
     def _lancer_fil_export_android(self, travail, suite):
         """travail() dans un fil de fond, puis suite(résultat ou message d'erreur) dans l'interface."""
         relais = _RelaisTelephone(self)
-        self._relais_export_android = relais
+        # 18/11/2026 : les précédents restent vivants (une suite peut en lancer une autre pendant
+        # que le relais qui l'appelle émet encore : synchro puis copie des comptes)
+        self._relais_export_android = getattr(self, "_relais_export_android", [])[-3:] + [relais]
         relais.fini.connect(suite)
 
         def _fil():
