@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-18 15h25"
+VERSION_BUILD = "2026-11-18 23h35"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -2691,7 +2691,7 @@ def envoyer_via_graph(compte, msg, liste_cci=None):
     if liste_cci:
         import email
         msg = email.message_from_bytes(msg.as_bytes())
-        msg["Bcc"] = ", ".join(liste_cci)
+        msg["Bcc"] = formater_entete_adresses(liste_cci)
     id_brouillon = _creer_brouillon_graph_mime(compte, msg.as_bytes())
     _appel_graph(compte, "POST", f"/me/messages/{id_brouillon}/send")
     return id_brouillon
@@ -11984,6 +11984,34 @@ def decoder_entete(valeur):
         if isinstance(valeur, bytes):
             return valeur.decode("latin-1", errors="replace")
         return str(valeur)
+
+
+def formater_entete_adresses(liste):
+    """Prépare la valeur d'un en-tête À / Cc / Cci à partir d'une liste
+    d'entrées « Nom <adresse> » ou « adresse » (18/11/2026).
+
+    Avant, la chaîne brute était passée telle quelle à msg["To"] : dès que
+    le nom contenait un accent (« PICART Jean François <...> »), Python
+    codait TOUT le bloc — nom ET adresse — en un seul mot =?utf-8?q?...?=,
+    ce que la norme interdit (l'adresse doit rester en clair). Les serveurs
+    livraient quand même (l'enveloppe SMTP est séparée), mais certains
+    logiciels n'y voyaient plus d'adresse du tout. Ici seul le nom est
+    codé, via formataddr, et l'adresse reste lisible."""
+    from email.utils import parseaddr, formataddr
+    morceaux = []
+    for entree in liste:
+        entree = (entree or "").strip()
+        if not entree:
+            continue
+        nom, adresse = parseaddr(entree)
+        if adresse and "@" in adresse:
+            try:
+                morceaux.append(formataddr((nom.strip().strip('"'), adresse), charset="utf-8"))
+                continue
+            except Exception:
+                pass
+        morceaux.append(entree)
+    return ", ".join(morceaux)
 
 _NOMS_RESERVES_WINDOWS = {"CON", "PRN", "AUX", "NUL",
                           *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -29489,9 +29517,9 @@ class FenetreRedaction(QDialog):
         try:
             msg = MIMEMultipart("mixed")
             msg["From"] = self.compte["adresse"]
-            msg["To"] = ", ".join(liste_a)
+            msg["To"] = formater_entete_adresses(liste_a)
             if liste_cc:
-                msg["Cc"] = ", ".join(liste_cc)
+                msg["Cc"] = formater_entete_adresses(liste_cc)
             msg["Subject"] = sujet
             from email.utils import formatdate
             msg["Date"] = formatdate(localtime=True)
@@ -32222,7 +32250,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 18/11/2026 15h25")
+        self.setWindowTitle("COURRIER ADRIEN — 18/11/2026 23h35")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -37719,7 +37747,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 18/11/2026 à 15h25")
+        lbl_version = QLabel("Version du 18/11/2026 à 23h35")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -40528,8 +40556,8 @@ if (typeof module === 'object') {
                     corps_texte = ""
                 msg = MIMEMultipart("mixed")
                 msg["From"]    = compte["adresse"]
-                msg["To"]      = ", ".join(liste_a)
-                if liste_cc: msg["Cc"] = ", ".join(liste_cc)
+                msg["To"]      = formater_entete_adresses(liste_a)
+                if liste_cc: msg["Cc"] = formater_entete_adresses(liste_cc)
                 msg["Subject"] = entree.get("sujet", "")
                 from email.utils import formatdate
                 msg["Date"] = formatdate(localtime=True)
@@ -41869,8 +41897,34 @@ if (typeof module === 'object') {
         elif msg_info is not None:
             de = msg_info.get("de", "")
             date = msg_info.get("date", "")
-            pour = self.compte_actif.get("adresse", "")
+            # Pour/Cc de la citation (18/11/2026, bug remonté par
+            # l'utilisateur : un mail ENVOYÉ à un correspondant puis
+            # transféré affichait « Pour: <adresse du compte> », faisant
+            # croire à un envoi à soi-même). On reprend désormais les vrais
+            # destinataires À/Cc du message d'origine, lus dans le .eml en
+            # cache (même méthode que « Répondre à tous »), avec repli sur
+            # msg_info puis, en dernier recours, sur l'adresse du compte.
+            pour = ""
             cc_var = ""
+            try:
+                if self.compte_actif and self.dossier_actif and msg_info.get("uid") is not None:
+                    raw = lire_cache_eml(self.compte_actif,
+                                         self._nom_imap(self.dossier_actif),
+                                         msg_info["uid"])
+                    if raw:
+                        msg_hdr = email.message_from_bytes(raw)
+                        pour = decoder_entete(msg_hdr.get("To", ""))
+                        cc_var = decoder_entete(msg_hdr.get("Cc", ""))
+            except Exception:
+                pass
+            pour = pour or msg_info.get("a", "") or self.compte_actif.get("adresse", "")
+            cc_var = cc_var or msg_info.get("cc", "")
+            # Texte inséré dans du HTML : « Nom <adresse> » doit être échappé,
+            # sinon <adresse> passe pour une balise et disparaît à l'affichage.
+            import html as _html_citation
+            de = _html_citation.escape(de, quote=False)
+            pour = _html_citation.escape(pour, quote=False)
+            cc_var = _html_citation.escape(cc_var, quote=False)
             sujet_original = msg_info.get("sujet", "")
             corps = self._extraire_corps_html_original(msg_info)
             corps_html = appliquer_variables_modele(
