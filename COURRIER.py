@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-20 16h24"
+VERSION_BUILD = "2026-11-20 18h59"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -9419,7 +9419,7 @@ class DialogueSMS(QDialog):
         # mode d'emploi à côté (20/11/2026, demandé)
         h_installer = QHBoxLayout()
         h_installer.addWidget(self.btn_installer_appli)
-        lbl_aide_installer = QLabel("Le tél doit être relié à l'ordinateur.")
+        lbl_aide_installer = QLabel("Connectez le téléphone à COURRIER ADRIEN WINDOWS en cliquant sur TÉL.")
         lbl_aide_installer.setStyleSheet("color: #aaaaaa; font-style: italic;")
         h_installer.addWidget(lbl_aide_installer)
         h_installer.addStretch(1)
@@ -32649,7 +32649,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 20/11/2026 16h24")
+        self.setWindowTitle("COURRIER ADRIEN — 20/11/2026 18h59")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -38146,7 +38146,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 20/11/2026 à 16h24")
+        lbl_version = QLabel("Version du 20/11/2026 à 18h59")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
