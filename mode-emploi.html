@@ -688,11 +688,26 @@
   <ul>
     <li>Choisissez les destinataires : dans le carnet (dossier entier ou contacts sélectionnés), ou depuis un fichier CSV ou Excel. Vous pouvez joindre des photos.</li>
     <li>Réglez l'intervalle entre deux SMS (20 secondes minimum). Les opérateurs bloquent une ligne qui envoie en rafale, c'est pourquoi Courrier Adrien est réglé par défaut sur <b>30 secondes</b> (45 secondes quand des photos sont jointes, car les MMS sont plus lents).</li>
-    <li><span class="btn">LANCER L'ENVOI</span>, puis <span class="btn">PAUSE</span>, <span class="btn">ARRÊTER</span> si besoin.</li>
-    <li>Laissez le téléphone <b>allumé et déverrouillé</b> pendant l'envoi. S'il se verrouille ou si un envoi échoue, l'envoi se met en pause sans sauter de destinataire. Déverrouillez, puis cliquez sur <span class="btn">REPRENDRE</span>. Après une fermeture de la fenêtre, REPRENDRE repart au bon endroit, avec la même liste et le même message. <span class="btn">ABANDONNER</span> oublie l'envoi interrompu.</li>
+    <li>Lancez l'envoi avec l'un des deux boutons de « Envoyer avec le tél : » : <span class="btn">ARRIÈRE-PLAN</span> (le téléphone reste libre, voir plus bas) ou <span class="btn">AVANT-PLAN</span> (Courrier Adrien affiche l'écran du téléphone et envoie chaque SMS à votre place). Ensuite <span class="btn">PAUSE</span>, <span class="btn">ARRÊTER</span> si besoin.</li>
+    <li>En avant-plan, laissez le téléphone <b>allumé et déverrouillé</b> pendant l'envoi. S'il se verrouille ou si un envoi échoue, l'envoi se met en pause sans sauter de destinataire. Déverrouillez, puis cliquez sur <span class="btn">REPRENDRE</span>. Après une fermeture de la fenêtre, REPRENDRE repart au bon endroit, avec la même liste et le même message. <span class="btn">ABANDONNER</span> oublie l'envoi interrompu.</li>
     <li>Au-delà d'environ 30 SMS en 30 minutes, Android demande normalement une confirmation. Courrier Adrien relève ce seuil pendant l'envoi, puis le remet comme avant.</li>
   </ul>
   <p>L'envoi automatique a été testé avec l'application Messages de Samsung. Avec une autre application SMS ou un téléphone double SIM, il peut ne pas trouver le bouton Envoyer : rien n'est alors envoyé et l'envoi se met en pause.</p>
+
+  <h3>Envoi en arrière-plan avec l'application COURRIER ADRIEN SMS</h3>
+  <p><span class="btn">AVANT-PLAN</span> marche sans rien installer : Courrier Adrien ouvre l'application Messages du téléphone, tape le message et appuie sur Envoyer à votre place. Vous voyez chaque SMS partir, mais le téléphone est occupé pendant tout l'envoi.</p>
+  <p><span class="btn">ARRIÈRE-PLAN</span> passe par la petite application <b>COURRIER ADRIEN SMS</b>, livrée avec Courrier Adrien et installée sur le téléphone. Les SMS partent alors <b>en arrière-plan</b> :</p>
+  <ul>
+    <li>rien ne s'affiche, l'écran du téléphone ne s'ouvre pas sur le PC ;</li>
+    <li>vous pouvez continuer à vous servir du téléphone pendant l'envoi, et il peut même rester verrouillé ;</li>
+    <li>chaque SMS n'est noté comme parti que lorsque le réseau l'a confirmé. Sinon, la raison s'affiche (pas de réseau, mode avion…) et l'envoi se met en pause ;</li>
+    <li>les SMS envoyés apparaissent comme d'habitude dans l'application Messages ;</li>
+    <li>l'intervalle entre deux SMS, <span class="btn">PAUSE</span>, <span class="btn">ARRÊTER</span> et <span class="btn">REPRENDRE</span> fonctionnent comme avant.</li>
+  </ul>
+  <p><b>Installation : rien à télécharger.</b> L'application est fournie avec Courrier Adrien. Le téléphone étant relié, cliquez sur <span class="btn">INSTALLER L'APPLI SMS ARRIÈRE-PLAN</span> : Courrier Adrien l'installe en quelques secondes et lui donne l'autorisation d'envoyer des SMS, sans que vous ayez à toucher le téléphone. Tant qu'elle n'est pas installée, le bouton <span class="btn">ARRIÈRE-PLAN</span> reste grisé. Le bouton d'installation la met aussi à jour quand une nouvelle version de Courrier Adrien en apporte une (la mise à jour est aussi faite d'office au moment d'un envoi). COURRIER ADRIEN SMS n'est pas sur le Play Store ; si Play Protect affiche un avertissement sur le téléphone, acceptez-le une fois.</p>
+  <p>Ouverte sur le téléphone, l'application montre seulement si l'envoi de SMS est autorisé (bouton <span class="btn">Autoriser l'envoi de SMS</span> au besoin) et les 50 derniers envois.</p>
+  <p><b>Les SMS avec photos (MMS)</b> ne peuvent partir que par l'écran du téléphone : avec des photos jointes, <span class="btn">ARRIÈRE-PLAN</span> est grisé.</p>
+  <div class="note"><b>Sécurité :</b> COURRIER ADRIEN SMS n'obéit qu'à Courrier Adrien, par la liaison avec le PC. Aucune autre application du téléphone ne peut lui faire envoyer un SMS. Elle n'envoie rien d'elle-même et ne lit pas vos messages.</div>
 </section>
 
 

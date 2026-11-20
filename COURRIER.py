@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-18 23h35"
+VERSION_BUILD = "2026-11-20 16h24"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -5065,16 +5065,32 @@ def _lire_nom_mdns(donnees, i):
 def chercher_telephone_wifi(delai=3.0):
     """Adresse "ip:port" annoncée en mDNS (_adb-tls-connect._tcp) par un
     téléphone dont le débogage sans fil est actif, ou None. Bloquant
-    jusqu'à `delai` secondes : à appeler hors du fil de l'interface."""
-    trouve = chercher_service_mdns("_adb-tls-connect._tcp.local", delai)
-    return trouve[0] if trouve else None
+    jusqu'à `delai` secondes : à appeler hors du fil de l'interface.
+    20/11/2026 : le téléphone peut annoncer DEUX adresses, une périmée
+    (« adb-…-unlkI4 », port mort qui refuse la connexion) et la bonne
+    (« adb-…-unlkI4 (2) ») ; COURRIER prenait la première et ne trouvait
+    plus le téléphone (il fallait décocher puis recocher le Débogage sans
+    fil). On garde maintenant la première adresse qui accepte la connexion."""
+    import socket
+    trouves = chercher_service_mdns("_adb-tls-connect._tcp.local", delai, tous=True)
+    for adresse, instance in trouves:
+        ip, _, port = adresse.rpartition(":")
+        try:
+            socket.create_connection((ip, int(port)), timeout=1.5).close()
+            return adresse
+        except (OSError, ValueError):
+            print(f"[TELEPHONE] annonce Wi-Fi périmée ignorée : {instance} ({adresse})")
+    return trouves[0][0] if trouves else None
 
 
-def chercher_service_mdns(service, delai=3.0, garder=None):
+def chercher_service_mdns(service, delai=3.0, garder=None, tous=False):
     """(adresse "ip:port", nom d'instance) du premier appareil qui annonce
     `service` en mDNS (et dont le nom d'instance satisfait garder(nom),
-    si donné), ou None. Bloquant jusqu'à `delai` secondes."""
+    si donné), ou None. Bloquant jusqu'à `delai` secondes.
+    tous=True : liste de toutes les annonces reçues (sans doublon), en
+    écoutant encore 0,6 s après la première (liste vide si aucune)."""
     import socket, struct, time
+    trouves = []
     question = (struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + _requete_mdns(service)
                 + struct.pack(">HH", 12, 0x8001))
     prise = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -5106,7 +5122,11 @@ def chercher_service_mdns(service, delai=3.0, garder=None):
                         instance = nom.split("." + service.split(".")[0])[0]
                         if garder is None or garder(instance):
                             port = struct.unpack(">HHH", donnees[i:i + 6])[2]
-                            return f"{ip_source}:{port}", instance
+                            if not tous:
+                                return f"{ip_source}:{port}", instance
+                            if (f"{ip_source}:{port}", instance) not in trouves:
+                                trouves.append((f"{ip_source}:{port}", instance))
+                                fin = min(fin, time.monotonic() + 0.6)
                     i += longueur
             except (IndexError, struct.error):
                 continue  # paquet d'un autre appareil, mal formé : ignoré
@@ -5114,7 +5134,7 @@ def chercher_service_mdns(service, delai=3.0, garder=None):
         print(f"[TELEPHONE] recherche Wi-Fi impossible : {exc}")
     finally:
         prise.close()
-    return None
+    return trouves if tous else None
 
 
 class _RelaisTelephone(QObject):
@@ -8609,6 +8629,158 @@ def _guillemets_shell(texte):
     return "'" + texte.replace("'", "'\\''") + "'"
 
 
+# --- SMS en arrière-plan par l'appli COURRIER ADRIEN SMS (20/11/2026) ---
+# Petite appli Android à part (projet C:\COURRIER SMS, distribuée par le
+# Drive, jamais par le Play Store : l'autorisation SMS y ferait refuser
+# COURRIER ADRIEN ANDROID). COURRIER lui passe chaque SMS par
+# « am broadcast » ; elle l'envoie par le système, sans rien afficher (le
+# téléphone reste libre, même verrouillé), et répond quand le réseau a
+# confirmé le départ : result=1 data="OK", ou result=0 data="ECHEC|raison".
+# Les SMS ainsi envoyés apparaissent dans l'appli Messages. Récepteur
+# protégé par android.permission.DUMP : seul adb peut lui donner un ordre.
+# Sans l'appli, ou pour les MMS (photos), ancienne méthode par l'écran.
+PAQUET_APPLI_SMS = "fr.courrieradrien.sms"
+RECEPTEUR_APPLI_SMS = f"{PAQUET_APPLI_SMS}/.RecepteurEnvoi"
+
+
+def _adb_shell(serie, commande, delai=20):
+    import subprocess
+    try:
+        r = subprocess.run([chemin_adb(), "-s", serie, "shell", commande],
+                           capture_output=True, timeout=delai,
+                           stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        return r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
+    except Exception as e:
+        return f"ERREUR adb : {e}"
+
+
+def _reponse_appli_sms(sortie):
+    """(code, données) lus dans la sortie de « am broadcast », ou (None, sortie)."""
+    m = re.search(r'Broadcast completed: result=(-?\d+)(?:, data="(.*)")?', sortie, re.S)
+    if not m:
+        return None, sortie.strip()
+    return int(m.group(1)), (m.group(2) or "")
+
+
+# L'APK est livré avec COURRIER (20/11/2026, demandé) : ressources\android
+# de la build, recopié dans DOSSIER_APP\android ; le bouton « INSTALLER
+# L'APPLI SMS » de la fenêtre SMS l'installe par adb (rien à télécharger, pas
+# de Drive). Le .txt à côté donne sa version, pour proposer la mise à jour.
+# Les deux sont déposés là par C:\COURRIER SMS\build_diffusion.bat.
+CHEMIN_APK_APPLI_SMS = os.path.join(DOSSIER_APP, "android", "COURRIER ADRIEN SMS.apk")
+CHEMIN_VERSION_APPLI_SMS = os.path.join(DOSSIER_APP, "android", "COURRIER ADRIEN SMS.txt")
+
+
+def version_appli_sms_livree():
+    """Version de l'APK livré avec COURRIER, ou "" s'il manque."""
+    if not os.path.isfile(CHEMIN_APK_APPLI_SMS):
+        return ""
+    try:
+        with open(CHEMIN_VERSION_APPLI_SMS, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
+def etat_appli_sms(serie):
+    """("absente" | "prete" | "sans_autorisation", version) pour
+    COURRIER ADRIEN SMS sur le téléphone `serie`. L'autorisation d'envoyer des SMS
+    est donnée par adb au besoin : plus rien à toucher sur le téléphone.
+    Pas de « pm list packages » : il échoue sur un Samsung qui a un Dossier
+    sécurisé (« Shell does not have permission to access user 150 ») ;
+    appli absente = réponse sans données. Le résultat est noté (voir
+    appli_sms_notee), sauf si le téléphone n'a pas répondu."""
+    etat = lambda: _reponse_appli_sms(_adb_shell(
+        serie, f"am broadcast --include-stopped-packages -n {RECEPTEUR_APPLI_SMS} "
+               f"-a {PAQUET_APPLI_SMS}.ETAT"))
+    code, reponse = etat()
+    if reponse.startswith("SANS_AUTORISATION"):
+        _adb_shell(serie, f"pm grant {PAQUET_APPLI_SMS} android.permission.SEND_SMS")
+        code, reponse = etat()
+    if code is None:  # téléphone injoignable : on ne sait pas
+        print(f"[SMS] appli COURRIER ADRIEN SMS : pas de réponse ({reponse[:80]})")
+        return "absente", ""
+    print(f"[SMS] appli COURRIER ADRIEN SMS : {reponse or 'absente'}")
+    version = reponse.partition("|")[2]
+    if reponse.startswith("PRET"):
+        noter_appli_sms(True)
+        return "prete", version
+    if reponse.startswith("SANS_AUTORISATION"):
+        noter_appli_sms(True)
+        return "sans_autorisation", version
+    noter_appli_sms(False)
+    return "absente", ""
+
+
+# Le bouton ARRIÈRE-PLAN reste grisé tant que l'appli n'est pas sur le
+# téléphone (20/11/2026, demandé) : dernier état constaté, gardé ici, puis
+# revérifié à l'ouverture de la fenêtre SMS si le téléphone est déjà relié.
+FICHIER_APPLI_SMS = os.path.join(DOSSIER_APP, "sms_appli.json")
+
+
+def appli_sms_notee():
+    try:
+        with open(FICHIER_APPLI_SMS, encoding="utf-8") as f:
+            return bool(json.load(f).get("installee"))
+    except Exception:
+        return False
+
+
+def noter_appli_sms(installee):
+    if appli_sms_notee() == installee and os.path.exists(FICHIER_APPLI_SMS):
+        return
+    try:
+        with open(FICHIER_APPLI_SMS, "w", encoding="utf-8") as f:
+            json.dump({"installee": installee}, f)
+    except OSError:
+        pass
+
+
+def telephone_deja_relie():
+    """Numéro de série du téléphone déjà relié par adb, ou "" (sans rien
+    démarrer ni connecter : seulement si le serveur adb tourne déjà)."""
+    import subprocess
+    if not serveur_adb_actif() or not chemin_adb():
+        return ""
+    try:
+        r = subprocess.run([chemin_adb(), "devices"], capture_output=True, timeout=5,
+                           stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        return ""
+    for ligne in r.stdout.decode("utf-8", "replace").splitlines()[1:]:
+        serie, _, etat = ligne.rpartition("\t")
+        if etat.strip() == "device" and serie:
+            return serie.strip()
+    return ""
+
+
+def installer_appli_sms(serie):
+    """Installe (ou met à jour) COURRIER ADRIEN SMS sur le téléphone avec
+    l'APK livré, puis lui donne l'autorisation d'envoyer des SMS. Rien à
+    toucher sur le téléphone. True, ou un message d'erreur. Bloquant
+    (quelques secondes) : à appeler hors du fil de l'interface."""
+    import subprocess
+    if not os.path.isfile(CHEMIN_APK_APPLI_SMS):
+        return f"fichier de l'appli introuvable : {CHEMIN_APK_APPLI_SMS}"
+    try:
+        r = subprocess.run([chemin_adb(), "-s", serie, "install", "-r", CHEMIN_APK_APPLI_SMS],
+                           capture_output=True, timeout=180,
+                           stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        sortie = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
+    except Exception as e:
+        return f"installation impossible : {e}"
+    if "Success" not in sortie:
+        print(f"[SMS] installation de l'appli : {sortie}")
+        derniere = sortie.splitlines()[-1] if sortie else "pas de réponse du téléphone"
+        return f"le téléphone a refusé l'installation ({derniere[:160]})"
+    etat, _version = etat_appli_sms(serie)
+    if etat != "prete":
+        return ("appli installée, mais l'autorisation « Envoyer des SMS » n'a pas pu être "
+                "donnée : ouvrez COURRIER ADRIEN SMS sur le téléphone et touchez "
+                "« Autoriser l'envoi de SMS »")
+    return True
+
+
 TAILLE_MAX_IMAGE_MMS = 300 * 1024  # accepté par tous les opérateurs
 NB_MAX_PHOTOS_SMS = 10             # une photo par MMS (08/10/2026)
 DELAI_ENTRE_PHOTOS = 20            # secondes entre deux MMS d'une même personne
@@ -8670,10 +8842,12 @@ class ThreadEnvoiSMS(QThread):
     instances = __import__("weakref").WeakSet()
 
     def __init__(self, serie, destinataires, message, intervalle, index_debut=0,
-                 images_sources=(), images_pretes=(), photo_debut=0):
+                 images_sources=(), images_pretes=(), photo_debut=0, arriere_plan=False):
         super().__init__()
         ThreadEnvoiSMS.instances.add(self)
         self.serie = serie
+        # 20/11/2026 : SMS sans photo confiés à COURRIER ADRIEN SMS (rien à l'écran)
+        self.arriere_plan = arriere_plan and not images_pretes
         self.destinataires = destinataires
         self.message = message
         self.intervalle = max(INTERVALLE_MIN_SMS, intervalle)
@@ -8821,9 +8995,24 @@ class ThreadEnvoiSMS(QThread):
                           if n.get("class") == "android.widget.EditText"), None)
         return champ
 
+    def _envoyer_par_appli(self, numero, texte):
+        """SMS confié à COURRIER ADRIEN SMS : True si le réseau a confirmé
+        le départ, sinon message d'erreur."""
+        sortie = self._adb(f"am broadcast --include-stopped-packages -n {RECEPTEUR_APPLI_SMS} "
+                           f"-a {PAQUET_APPLI_SMS}.ENVOYER --es numero {numero} "
+                           f"--es texte {_guillemets_shell(texte)}", delai=70)
+        code, reponse = _reponse_appli_sms(sortie)
+        if code == 1 and reponse == "OK":
+            return True
+        if code is None:
+            return f"pas de réponse de COURRIER ADRIEN SMS ({reponse[:120] or 'téléphone injoignable ?'})"
+        return reponse.removeprefix("ECHEC|") or f"refusé (code {code})"
+
     def _envoyer_un(self, numero, texte, uri_image=""):
         """True si envoyé, sinon message d'erreur. uri_image : photo jointe
         (MMS), sinon simple SMS."""
+        if self.arriere_plan and not uri_image:
+            return self._envoyer_par_appli(numero, texte)
         # Nouvelle tâche à chaque SMS (NEW_TASK | CLEAR_TASK) : l'appli
         # s'ouvre forcément sur la conversation de CE numéro.
         if uri_image:
@@ -8948,7 +9137,8 @@ class ThreadEnvoiSMS(QThread):
                     self._sauvegarder_progression(i, j)
                     self.signal_fini.emit(f"Arrêté à {i}/{total}. Reprise possible.")
                     return
-                if not self._telephone_pret():
+                # En arrière-plan, le téléphone peut rester verrouillé
+                if not self.arriere_plan and not self._telephone_pret():
                     self._pause_forcee("Téléphone verrouillé : déverrouillez-le puis cliquez REPRENDRE.", i, j)
                     continue
                 nom, numero = self.destinataires[i]
@@ -8965,11 +9155,14 @@ class ThreadEnvoiSMS(QThread):
                 if self._stop and resultat is not True:
                     continue
                 if resultat is not True:
-                    self._vider_champ()
+                    if not self.arriere_plan:
+                        self._vider_champ()
                     self.signal_log.emit(f"✗ {libelle} — {resultat}")
                     self._pause_forcee(f"Échec pour {libelle} : {resultat}.\n"
-                                       "Regardez l'écran du téléphone, puis REPRENDRE "
-                                       "(le même message sera retenté).", i, j)
+                                       + ("Vérifiez le réseau du téléphone, puis REPRENDRE "
+                                          if self.arriere_plan else
+                                          "Regardez l'écran du téléphone, puis REPRENDRE ")
+                                       + "(le même message sera retenté).", i, j)
                     continue
                 nb_envoyes += 1
                 self.signal_log.emit(f"✓ {libelle}")
@@ -9164,12 +9357,21 @@ class DialogueSMS(QDialog):
         h_interval.addWidget(self.spin_intervalle)
         h_interval.addStretch(1)
         layout.addLayout(h_interval)
+        # 20/11/2026 : l'appli COURRIER ADRIEN SMS, livrée avec COURRIER,
+        # s'installe sur le téléphone par la liaison adb (bouton à la suite
+        # des boutons d'envoi, libellé court : l'ancien était tronqué)
+        self.btn_installer_appli = QPushButton("INSTALLER L'APPLI SMS ARRIÈRE-PLAN")
+        self.btn_installer_appli.setToolTip(
+            "Installe ou met à jour COURRIER ADRIEN SMS sur le téléphone relié : "
+            "elle permet d'envoyer les SMS en arrière-plan, sans occuper le téléphone")
+        self.btn_installer_appli.clicked.connect(self._installer_appli)
 
         self.progress = QProgressBar()
         self.progress.setFixedHeight(22)
         self.progress.setFormat("%v / %m (%p%)")
         layout.addWidget(self.progress)
-        self.lbl_statut = QLabel("Prêt. Le téléphone doit rester allumé et déverrouillé pendant l'envoi.")
+        self.lbl_statut = QLabel("Prêt. En arrière-plan, le téléphone reste libre ; en avant-plan, "
+                                 "il doit rester allumé et déverrouillé pendant l'envoi.")
         self.lbl_statut.setStyleSheet("color: #aaaaaa; font-style: italic;")
         self.lbl_statut.setWordWrap(True)
         layout.addWidget(self.lbl_statut)
@@ -9179,9 +9381,22 @@ class DialogueSMS(QDialog):
         self.lbl_countdown.setFixedHeight(30)
         layout.addWidget(self.lbl_countdown)
 
+        # Deux boutons d'envoi (20/11/2026, demandé) : « Envoyer avec le tél : »
+        # ARRIÈRE-PLAN (appli COURRIER ADRIEN SMS) / AVANT-PLAN (par l'écran du
+        # téléphone, ancienne méthode, seule possible pour les photos). Sur
+        # deux lignes : en une seule, la droite était coupée (20/11/2026).
+        h_envoi = QHBoxLayout()
+        lbl_envoyer = QLabel("Envoyer avec le tél :")
+        h_envoi.addWidget(lbl_envoyer)
         h_actions = QHBoxLayout()
-        self.btn_lancer = QPushButton("LANCER L'ENVOI")
-        self.btn_lancer.clicked.connect(self._lancer)
+        self.btn_lancer = QPushButton("ARRIÈRE-PLAN")
+        self.btn_lancer.setToolTip("Par l'appli COURRIER ADRIEN SMS : rien ne s'affiche, "
+                                   "le téléphone reste libre (proposée à l'installation si besoin)")
+        self.btn_lancer.clicked.connect(lambda: self._lancer("fond"))
+        self.btn_lancer_ecran = QPushButton("AVANT-PLAN")
+        self.btn_lancer_ecran.setToolTip("Courrier Adrien ouvre l'écran du téléphone et envoie "
+                                         "chaque SMS à votre place ; le téléphone est occupé")
+        self.btn_lancer_ecran.clicked.connect(lambda: self._lancer("ecran"))
         self.btn_pause = QPushButton("PAUSE")
         self.btn_pause.setEnabled(False)
         self.btn_pause.clicked.connect(self._pause)
@@ -9196,8 +9411,25 @@ class DialogueSMS(QDialog):
         self.btn_abandonner.setEnabled(False)
         self.btn_abandonner.setToolTip("Oublier l'envoi interrompu (il ne pourra plus être repris)")
         self.btn_abandonner.clicked.connect(self._abandonner_progression)
-        for b in (self.btn_lancer, self.btn_pause, self.btn_stop):
-            h_actions.addWidget(b)
+        h_envoi.addWidget(self.btn_lancer)
+        h_envoi.addWidget(self.btn_lancer_ecran)
+        h_envoi.addStretch(1)
+        layout.addLayout(h_envoi)
+        # Bouton d'installation sous « Envoyer avec le tél », avec son mini
+        # mode d'emploi à côté (20/11/2026, demandé)
+        h_installer = QHBoxLayout()
+        h_installer.addWidget(self.btn_installer_appli)
+        lbl_aide_installer = QLabel("Le tél doit être relié à l'ordinateur.")
+        lbl_aide_installer.setStyleSheet("color: #aaaaaa; font-style: italic;")
+        h_installer.addWidget(lbl_aide_installer)
+        h_installer.addStretch(1)
+        layout.addLayout(h_installer)
+        self._mode_envoi = "fond"
+        # ARRIÈRE-PLAN grisé tant que l'appli n'est pas sur le téléphone
+        self._activer_lancement(True)
+        QTimer.singleShot(0, self._verifier_appli_a_l_ouverture)
+        h_actions.addWidget(self.btn_pause)
+        h_actions.addWidget(self.btn_stop)
         h_actions.addSpacing(20)
         h_actions.addWidget(self.btn_reprendre)
         h_actions.addWidget(self.btn_abandonner)
@@ -9219,7 +9451,7 @@ class DialogueSMS(QDialog):
         h_bas = QHBoxLayout()
         h_bas.setContentsMargins(20, 8, 20, 3)
         lbl_aide_envoi = QLabel(
-            "Téléphone verrouillé : l'envoi se met en pause, déverrouillez puis cliquez REPRENDRE.\n"
+            "En avant-plan : téléphone verrouillé = pause, déverrouillez puis cliquez REPRENDRE.\n"
             "Interruption : si vous fermez la fenêtre ou si l'envoi s'arrête, REPRENDRE repart\n"
             "au bon endroit avec la même liste et le même message.")
         lbl_aide_envoi.setStyleSheet("color: #aaaaaa; font-style: italic;")
@@ -9541,6 +9773,35 @@ class DialogueSMS(QDialog):
         if self.photos and self.spin_intervalle.value() < 45:
             self.spin_intervalle.setValue(45)
         self._maj_compteurs()
+        if hasattr(self, "btn_lancer_ecran"):
+            self._activer_lancement(self.btn_lancer_ecran.isEnabled())
+
+    def _activer_lancement(self, actif):
+        """Les deux boutons d'envoi ; ARRIÈRE-PLAN reste grisé avec des
+        photos (l'appli n'envoie pas de MMS) et tant que l'appli
+        COURRIER ADRIEN SMS n'est pas installée sur le téléphone."""
+        installee = appli_sms_notee()
+        self.btn_lancer_ecran.setEnabled(actif)
+        self.btn_lancer.setEnabled(actif and not self.photos and installee)
+        self.btn_lancer.setToolTip(
+            "Avec des photos (MMS), seul l'envoi en avant-plan est possible" if self.photos else
+            "Par l'appli COURRIER ADRIEN SMS : rien ne s'affiche, le téléphone reste libre" if installee else
+            "Installez d'abord l'appli avec INSTALLER L'APPLI SMS ARRIÈRE-PLAN")
+
+    def _verifier_appli_a_l_ouverture(self):
+        """Téléphone déjà relié à l'ouverture de la fenêtre : on regarde si
+        l'appli y est, pour griser ou non ARRIÈRE-PLAN (rien n'est connecté
+        ni démarré pour ça)."""
+        def _travail():
+            serie = telephone_deja_relie()
+            return etat_appli_sms(serie)[0] if serie else None
+
+        def _fini(etat):
+            envoi = getattr(self, "thread_envoi", None)
+            if etat is not None and not (envoi and envoi.isRunning()):
+                self._activer_lancement(self.btn_lancer_ecran.isEnabled())
+
+        self._en_fond(_travail, _fini)
 
     # Glisser-déposer : sur toute la fenêtre, et dans la zone du message
     def dragEnterEvent(self, event):
@@ -9573,8 +9834,12 @@ class DialogueSMS(QDialog):
                 return True
         return super().eventFilter(obj, event)
 
-    def _lancer(self):
+    def _lancer(self, mode="fond"):
+        """mode "fond" : par l'appli COURRIER ADRIEN SMS ; "ecran" : par
+        l'écran du téléphone (seul possible avec des photos)."""
         from PySide6.QtWidgets import QMessageBox
+        if self.photos:
+            mode = "ecran"
         destinataires = completer_noms_depuis_carnet(
             analyser_destinataires_sms(self.champ_destinataires.text())[0])
         message = self.champ_message.toPlainText().strip()
@@ -9601,14 +9866,95 @@ class DialogueSMS(QDialog):
         if QMessageBox.question(
                 self, "SMS",
                 f"Envoyer {genre} à {len(destinataires)} destinataire(s) depuis le téléphone ?\n\n"
-                "Le téléphone doit rester allumé et déverrouillé pendant l'envoi."
+                + ("Envoi en arrière-plan par l'appli COURRIER ADRIEN SMS : "
+                   "le téléphone reste libre." if mode == "fond" else
+                   "Envoi par l'écran du téléphone : il doit rester allumé et "
+                   "déverrouillé pendant l'envoi.")
                 + ("\nLes données mobiles du téléphone doivent être activées (MMS)." if nb_photos else "")
                 + alerte
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._demarrer(destinataires, message, 0, self.photos)
+        self._demarrer(destinataires, message, 0, self.photos, mode=mode)
 
-    def _demarrer(self, destinataires, message, index_debut, photos=(), photo_debut=0):
+    def _avec_telephone(self, apres, si_echec=None):
+        """Code de protection puis liaison avec le téléphone, sans ouvrir
+        son écran ; apres(serie)."""
+        if not verifier_code_telephone(self):
+            if si_echec:
+                si_echec()
+            return
+        connecter_telephone(self, apres, si_echec=si_echec)
+
+    def _en_fond(self, travail, suite):
+        """travail() hors du fil de l'interface (adb), puis suite(résultat)."""
+        relais = _RelaisTelephone(self)
+
+        def _fini(resultat):
+            relais.deleteLater()
+            suite(resultat)
+
+        relais.fini.connect(_fini)
+        _threading.Thread(target=lambda: relais.fini.emit(travail()), daemon=True).start()
+
+    def _installer_appli(self):
+        """Bouton INSTALLER L'APPLI SMS ARRIÈRE-PLAN (installe ou met à jour)."""
+        from PySide6.QtWidgets import QMessageBox
+        livree = version_appli_sms_livree()
+        if not livree:
+            QMessageBox.warning(self, "SMS", "Le fichier de l'appli COURRIER ADRIEN SMS est introuvable :\n"
+                                + CHEMIN_APK_APPLI_SMS)
+            return
+        self.btn_installer_appli.setEnabled(False)
+
+        def _rendre():
+            self.btn_installer_appli.setEnabled(True)
+            # ARRIÈRE-PLAN dégrisé dès que l'appli est installée
+            self._activer_lancement(self.btn_lancer_ecran.isEnabled())
+
+        def _connecte(serie):
+            self.lbl_statut.setText("Vérification de l'appli sur le téléphone…")
+            self.lbl_statut.setStyleSheet("color: #e0a050;")
+            self._en_fond(lambda: etat_appli_sms(serie), lambda r: _etat(serie, *r))
+
+        def _etat(serie, etat, version):
+            if etat == "prete" and version == livree:
+                _rendre()
+                self.lbl_statut.setText("Prêt.")
+                self.lbl_statut.setStyleSheet("color: #aaaaaa; font-style: italic;")
+                QMessageBox.information(self, "SMS", f"COURRIER ADRIEN SMS est déjà installée sur le "
+                                                     f"téléphone et à jour (version {version}).")
+                return
+            quoi = (f"Mise à jour de COURRIER ADRIEN SMS ({version} → {livree})"
+                    if etat != "absente" else f"Installation de COURRIER ADRIEN SMS {livree}")
+            self._installer_puis(serie, quoi, lambda ok: _rendre())
+
+        self._avec_telephone(_connecte, si_echec=_rendre)
+
+    def _installer_puis(self, serie, quoi, suite):
+        """Installe l'appli (quelques secondes), note le résultat, puis suite(True/False)."""
+        from PySide6.QtWidgets import QMessageBox
+        self.journal.append(f"{quoi} sur le téléphone…")
+        self.lbl_statut.setText(f"{quoi}… (quelques secondes, rien à toucher sur le téléphone)")
+        self.lbl_statut.setStyleSheet("color: #e0a050;")
+
+        def _fini(resultat):
+            if resultat is True:
+                self.journal.append("✓ COURRIER ADRIEN SMS est prête : les SMS peuvent partir en arrière-plan.")
+                self.lbl_statut.setText("COURRIER ADRIEN SMS installée.")
+                self.lbl_statut.setStyleSheet("color: #80c080;")
+                suite(True)
+            else:
+                self.journal.append(f"✗ Installation de COURRIER ADRIEN SMS : {resultat}")
+                self.lbl_statut.setText("Installation de l'appli impossible.")
+                self.lbl_statut.setStyleSheet("color: #e08080;")
+                QMessageBox.warning(self, "SMS", f"Installation de COURRIER ADRIEN SMS impossible :\n{resultat}")
+                suite(False)
+
+        self._en_fond(lambda: installer_appli_sms(serie), _fini)
+
+    def _demarrer(self, destinataires, message, index_debut, photos=(), photo_debut=0, mode=None):
+        mode = "ecran" if photos else (mode or self._mode_envoi)
+        self._mode_envoi = mode  # REPRENDRE repart de la même façon
         # Photos réduites pour les MMS (≈ 300 Ko au plus chacune, accepté par
         # tous les opérateurs)
         photos = list(photos)
@@ -9623,28 +9969,75 @@ class DialogueSMS(QDialog):
                 return
             pretes.append(prete)
         par_destinataire = max(1, len(photos))
-        self.btn_lancer.setEnabled(False)
+        self._activer_lancement(False)
+        self.btn_installer_appli.setEnabled(False)
         self.btn_reprendre.setEnabled(False)
         self.btn_abandonner.setEnabled(False)
         self.lbl_statut.setText("Connexion au téléphone…")
         self.lbl_statut.setStyleSheet("color: #e0a050;")
 
-        def _echec():
-            self.btn_lancer.setEnabled(True)
-            self.lbl_statut.setText("Téléphone introuvable.")
+        def _echec(texte="Téléphone introuvable."):
+            self._activer_lancement(True)
+            self.btn_installer_appli.setEnabled(True)
+            self.lbl_statut.setText(texte)
             self.lbl_statut.setStyleSheet("color: #e08080;")
             if index_debut or photo_debut:  # reprise ratée : REPRENDRE / ABANDONNER restent possibles
                 self.btn_reprendre.setEnabled(True)
                 self.btn_abandonner.setEnabled(True)
 
         def _connecte(serie):
-            # Écran du téléphone affiché : on voit chaque SMS partir.
-            afficher_ecran_telephone(serie, self)
+            if mode == "ecran":
+                _lancer_envoi(serie, False)
+                return
+            # En arrière-plan (20/11/2026) : l'appli doit être là et à jour ;
+            # sinon on propose de l'installer (APK livré avec COURRIER).
+            self.lbl_statut.setText("Vérification de l'appli sur le téléphone…")
+            self._en_fond(lambda: etat_appli_sms(serie), lambda r: _verifie(serie, *r))
+
+        def _verifie(serie, etat, version):
+            from PySide6.QtWidgets import QMessageBox
+            livree = version_appli_sms_livree()
+            if etat == "prete" and (version == livree or livree in ("", "?")):
+                _lancer_envoi(serie, True)
+                return
+            if etat == "absente":
+                if not livree:
+                    QMessageBox.warning(self, "SMS", "L'appli COURRIER ADRIEN SMS n'est pas sur le téléphone "
+                                                     "et son fichier est introuvable :\n" + CHEMIN_APK_APPLI_SMS
+                                        + "\n\nUtilisez AVANT-PLAN.")
+                    _echec("Envoi annulé.")
+                    return
+                if QMessageBox.question(
+                        self, "SMS",
+                        "L'appli COURRIER ADRIEN SMS n'est pas encore sur le téléphone.\n\n"
+                        "L'installer maintenant ? Cela prend quelques secondes, il n'y a rien à "
+                        "toucher sur le téléphone. Ensuite l'envoi démarre en arrière-plan."
+                ) != QMessageBox.StandardButton.Yes:
+                    _echec("Envoi annulé. AVANT-PLAN marche sans l'appli.")
+                    return
+                quoi = f"Installation de COURRIER ADRIEN SMS {livree}"
+            elif etat == "prete":
+                quoi = f"Mise à jour de COURRIER ADRIEN SMS ({version} → {livree})"
+            else:
+                QMessageBox.warning(self, "SMS", "COURRIER ADRIEN SMS n'a pas l'autorisation d'envoyer des SMS.\n\n"
+                                                 "Ouvrez-la sur le téléphone et touchez « Autoriser l'envoi de SMS », "
+                                                 "ou utilisez AVANT-PLAN.")
+                _echec("Envoi annulé.")
+                return
+            self._installer_puis(serie, quoi, lambda ok: _lancer_envoi(serie, True) if ok
+                                 else _echec("Envoi annulé : appli non installée."))
+
+        def _lancer_envoi(serie, arriere_plan):
+            if arriere_plan:
+                self.journal.append("Envoi en arrière-plan par COURRIER ADRIEN SMS : "
+                                    "le téléphone reste libre.")
+            else:
+                afficher_ecran_telephone(serie, self)
             self.progress.setMaximum(len(destinataires) * par_destinataire)
             self.progress.setValue(index_debut * par_destinataire + photo_debut)
             self.thread_envoi = ThreadEnvoiSMS(serie, destinataires, message,
                                                self.spin_intervalle.value(), index_debut,
-                                               photos, pretes, photo_debut)
+                                               photos, pretes, photo_debut, arriere_plan)
             self.thread_envoi.signal_log.connect(self._on_log)
             self.thread_envoi.signal_progress.connect(self._on_progress)
             self.thread_envoi.signal_fini.connect(self._on_fini)
@@ -9657,7 +10050,12 @@ class DialogueSMS(QDialog):
             self.lbl_statut.setText("Envoi en cours…")
             self.lbl_statut.setStyleSheet("color: #80c080;")
 
-        connecter_telephone(self, _connecte, si_echec=_echec, attendre_ecran=True)
+        if mode == "ecran":
+            connecter_telephone(self, _connecte, si_echec=_echec, attendre_ecran=True)
+            return
+        # En arrière-plan : pas d'écran du téléphone, mais le code de
+        # protection est quand même demandé.
+        self._avec_telephone(_connecte, si_echec=_echec)
 
     def _pause(self):
         t = self.thread_envoi
@@ -9701,7 +10099,8 @@ class DialogueSMS(QDialog):
     def _on_fini(self, msg):
         self.lbl_statut.setText(msg)
         self.lbl_statut.setStyleSheet("color: #90EE90;")
-        self.btn_lancer.setEnabled(True)
+        self._activer_lancement(True)
+        self.btn_installer_appli.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.journal.append(f"\n✅ {msg}")
@@ -32250,7 +32649,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 18/11/2026 23h35")
+        self.setWindowTitle("COURRIER ADRIEN — 20/11/2026 16h24")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -37747,7 +38146,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 18/11/2026 à 23h35")
+        lbl_version = QLabel("Version du 20/11/2026 à 16h24")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
