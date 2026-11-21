@@ -270,6 +270,17 @@
     <li>Pour un compte <b>Outlook / Hotmail</b>, utilisez <b>Se connecter avec Microsoft</b> à la place du mot de passe : la connexion se fait sur la page de Microsoft, sans donner votre mot de passe à Courrier Adrien.</li>
     <li>Certains fournisseurs demandent une étape préalable sur leur site (accès IMAP à activer, mot de passe particulier…) : voir <a href="#fournisseurs">section 5</a>.</li>
   </ul>
+  <h3>Compte IMAP ou POP3</h3>
+  <p>Le <b>Type de compte</b> est réglé sur <b>IMAP</b>, recommandé : vos mails et vos dossiers restent chez votre fournisseur, et vous les retrouvez à l'identique sur le webmail, le téléphone et tout autre ordinateur.</p>
+  <p>Choisissez <b>POP3</b> seulement si vous y tenez (ancien compte, habitude de tout garder sur l'ordinateur). Le champ « Serveur IMAP » devient alors « Serveur POP3 », prérempli pour la plupart des fournisseurs (port 995, SSL).</p>
+  <ul>
+    <li>Les mails sont <b>téléchargés sur cet ordinateur</b>. Vos dossiers (Envoyés, Brouillons, Corbeille, Spam, vos classements) n'existent qu'ici : ils ne se voient ni sur le webmail ni sur le téléphone.</li>
+    <li><b>Après réception, garder une copie sur le serveur</b> : <i>Indéfiniment</i>, ou <i>Nombre de jours</i> avec le nombre de votre choix (0 = effacé du serveur dès la réception). Passé ce délai, le mail est effacé chez votre fournisseur, ce qui évite que la boîte se remplisse. Il reste bien sûr dans Courrier Adrien.</li>
+    <li>Pendant ce délai, la copie sur le serveur sert de secours : vous pouvez encore relever le mail depuis un autre appareil ou le webmail.</li>
+    <li>Outlook / Hotmail et iCloud ne proposent pas le POP3 : ces comptes sont toujours en IMAP.</li>
+    <li>Le type d'un compte ne se change pas après coup : pour passer de l'un à l'autre, supprimez le compte puis ajoutez-le à nouveau.</li>
+    <li>Les comptes POP3 ne sont pas envoyés à Courrier Adrien Android, qui fonctionne en IMAP.</li>
+  </ul>
   <h3>Importer vos comptes de Thunderbird, Foxmail ou Outlook</h3>
   <p>Si vos comptes sont déjà dans l'un de ces logiciels sur cet ordinateur, cliquez sur son nom à côté de <b>Importer les comptes de :</b> (<b>Thunderbird</b>, <b>Foxmail</b> ou <b>Outlook</b>). Cochez ceux à ajouter, puis cliquez sur <b>Importer</b> : les serveurs, les ports et, le plus souvent, les mots de passe sont repris automatiquement. Le logiciel d'origine n'est pas modifié.</p>
   <ul>
@@ -277,7 +288,8 @@
     <li>Si Courrier Adrien vous demande de fermer Foxmail, fermez-le, puis recommencez.</li>
     <li>Si le mot de passe d'un compte n'est pas disponible, Courrier Adrien vous le demande. Pour Gmail, il s'agit d'un mot de passe d'application : voir <a href="#fournisseurs">section 5</a>.</li>
     <li>Pour un compte <b>Outlook / Hotmail</b>, il faut vous reconnecter une fois sur la page de Microsoft.</li>
-    <li>Les comptes <b>POP</b> et <b>Exchange</b> ne peuvent pas être importés, car Courrier Adrien fonctionne en IMAP.</li>
+    <li>Les comptes <b>POP3</b> sont importés en POP3, avec le délai de copie sur le serveur de Thunderbird ou d'Outlook, au jour près (pour Foxmail : <i>Indéfiniment</i>, à régler ensuite dans la fenêtre COMPTES).</li>
+    <li>Les comptes <b>Exchange</b> ne peuvent pas être importés.</li>
     <li>Le <b>nouvel Outlook</b> du Microsoft Store n'est pas pris en charge : seul Outlook classique l'est.</li>
   </ul>
   <h3>Modifier, supprimer, classer</h3>

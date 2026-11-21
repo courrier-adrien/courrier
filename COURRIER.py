@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-20 18h59"
+VERSION_BUILD = "2026-11-21 22h42"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -1722,9 +1722,17 @@ def _comptes_profil_thunderbird(dossier, logins):
         entrees.append(entree)
 
         if type_serveur == "pop3":
-            entree.update(importable=False,
-                          note="compte POP : COURRIER ADRIEN ne lit que l'IMAP")
-            continue
+            # Compte POP3 (21/11/2026) : même délai de copie sur le serveur
+            # que dans Thunderbird (arrondi au choix supérieur de COURRIER)
+            if not prefs.get(s + "leave_on_server", False):
+                garder = 0
+            elif prefs.get(s + "delete_by_age_from_server", False):
+                garder = jours_copie_serveur_pop3(prefs.get(s + "num_days_to_leave_on_server", 7))
+            else:
+                garder = -1
+            compte.update(imap_host="", protocole="pop3", pop3_host=hote,
+                          pop3_port=(prefs.get(s + "port") or 995) if prefs.get(s + "socketType") in (2, 3) else 995,
+                          pop3_garder_jours=garder)
 
         if _regler_compte_microsoft(compte):
             entree["note"] = "connexion Microsoft à faire"
@@ -1734,7 +1742,7 @@ def _comptes_profil_thunderbird(dossier, logins):
                           note="compte Microsoft professionnel, non pris en charge")
             continue
 
-        if prefs.get(s + "socketType") == 3:
+        if prefs.get(s + "socketType") == 3 and type_serveur == "imap":
             compte["imap_port"] = prefs.get(s + "port") or 993
 
         # Serveur d'envoi : celui de l'identité, sinon le serveur par défaut
@@ -1757,9 +1765,16 @@ def _comptes_profil_thunderbird(dossier, logins):
                       smtp_starttls=securite in (1, 2))
 
         if not est_oauth:
-            compte["mdp"] = logins.get(("imap", hote.lower(), utilisateur.lower())) \
+            # POP3 : Thunderbird range le mot de passe sous « mailbox:// »
+            compte["mdp"] = logins.get(("imap" if type_serveur == "imap" else "mailbox",
+                                        hote.lower(), utilisateur.lower())) \
                 or logins.get(("smtp", hote_smtp.lower(), utilisateur_smtp.lower())) or ""
         notes = ["mot de passe récupéré" if compte["mdp"] else "mot de passe à saisir"]
+        if est_compte_pop3(compte):
+            notes.insert(0, "POP3")
+            if utilisateur and utilisateur.lower() != adresse.lower():
+                compte["pop3_user"] = utilisateur   # relève avec l'identifiant de Thunderbird
+                utilisateur = ""
         # COURRIER se connecte toujours avec l'adresse comme identifiant
         if utilisateur and utilisateur.lower() != adresse.lower():
             notes.append(f"identifiant Thunderbird différent ({utilisateur})")
@@ -1849,16 +1864,21 @@ def _compte_foxmail(champs):
         "auth_oauth2": False, "protocole": "imap",
     }
     entree = {"compte": compte, "importable": True, "note": ""}
+    est_pop3 = port in (110, 995) or hote.lower().startswith("pop")
     if not hote:
         entree.update(importable=False, note="compte Exchange, non pris en charge")
-    elif port in (110, 995) or hote.lower().startswith("pop"):
-        entree.update(importable=False, note="compte POP : COURRIER ADRIEN ne lit que l'IMAP")
     elif _regler_compte_microsoft(compte):
         entree["note"] = "connexion Microsoft à faire"
     elif not _texte("OutgoingServer"):
         entree.update(importable=False, note="aucun serveur d'envoi dans Foxmail")
     else:
-        if _nombre("InComingSSL"):
+        if est_pop3:
+            # Compte POP3 (21/11/2026) : réglage « Copie serveur » de Foxmail
+            # non retrouvé dans son fichier — Indéfiniment, à choisir ensuite
+            compte.update(imap_host="", protocole="pop3", pop3_host=hote,
+                          pop3_port=(port or 995) if _nombre("InComingSSL") else 995,
+                          pop3_garder_jours=-1)
+        elif _nombre("InComingSSL"):
             compte["imap_port"] = port or 993
         hote_smtp, port_smtp = _texte("OutgoingServer"), _nombre("OutgoingPort")
         starttls = bool(_nombre("OutgoingUseStartTls"))
@@ -1873,6 +1893,11 @@ def _compte_foxmail(champs):
             or _debrouiller_mdp_foxmail(_texte("SmtpPassword"))
         notes = ["mot de passe récupéré" if compte["mdp"] else "mot de passe à saisir"]
         utilisateur = _texte("Account")
+        if est_pop3:
+            notes.insert(0, "POP3, copie serveur : Indéfiniment")
+            if utilisateur and utilisateur.lower() != adresse.lower():
+                compte["pop3_user"] = utilisateur
+                utilisateur = ""
         if utilisateur and utilisateur.lower() != adresse.lower():
             notes.append(f"identifiant Foxmail différent ({utilisateur})")
         entree["note"] = ", ".join(notes)
@@ -1977,11 +2002,26 @@ def _compte_outlook(valeurs):
         "auth_oauth2": False, "protocole": "imap",
     }
     entree = {"compte": compte, "importable": True, "note": ""}
+    est_pop3 = bool(_texte("POP3 Server"))
+    if est_pop3 and not compte["imap_host"]:
+        # Compte POP3 (21/11/2026). « Leave on Server » d'Outlook (non vérifié
+        # sur un vrai compte) : bit 1 = laisser une copie, bit 2 = effacer
+        # après N jours (N dans les 16 bits du haut).
+        laisser = _nombre("Leave on Server")
+        if "Leave on Server" not in valeurs:
+            garder = -1
+        elif not laisser & 1:
+            garder = 0
+        elif laisser & 2:
+            garder = jours_copie_serveur_pop3(laisser >> 16)
+        else:
+            garder = -1
+        compte.update(protocole="pop3", pop3_host=_texte("POP3 Server"),
+                      pop3_port=(_nombre("POP3 Port") or 995) if _nombre("POP3 Use SSL") else 995,
+                      pop3_garder_jours=garder)
     if _regler_compte_microsoft(compte):
         entree["note"] = "connexion Microsoft à faire"
-    elif _texte("POP3 Server"):
-        entree.update(importable=False, note="compte POP : COURRIER ADRIEN ne lit que l'IMAP")
-    elif not compte["imap_host"]:
+    elif not compte["imap_host"] and not est_compte_pop3(compte):
         entree.update(importable=False, note="compte Exchange, non pris en charge")
     elif not _texte("SMTP Server"):
         entree.update(importable=False, note="aucun serveur d'envoi dans Outlook")
@@ -1997,9 +2037,16 @@ def _compte_outlook(valeurs):
             port_smtp = 465
         compte.update(smtp_host=_texte("SMTP Server"), smtp_port=port_smtp or 465, smtp_starttls=starttls)
         compte["mdp"] = _dechiffrer_mdp_outlook(valeurs.get("IMAP Password")) \
+            or _dechiffrer_mdp_outlook(valeurs.get("POP3 Password")) \
             or _dechiffrer_mdp_outlook(valeurs.get("SMTP Password"))
         notes = ["mot de passe récupéré" if compte["mdp"] else "mot de passe à saisir"]
         utilisateur = _texte("IMAP User")
+        if est_compte_pop3(compte):
+            notes.insert(0, "POP3")
+            utilisateur = _texte("POP3 User")
+            if utilisateur and utilisateur.lower() != adresse.lower():
+                compte["pop3_user"] = utilisateur
+                utilisateur = ""
         if utilisateur and utilisateur.lower() != adresse.lower():
             notes.append(f"identifiant Outlook différent ({utilisateur})")
         entree["note"] = ", ".join(notes)
@@ -2446,6 +2493,8 @@ def _authentifier_connexion_imap(conn, compte):
     échoue, on referme et rouvre une connexion neuve pour retenter,
     jusqu'à 3 fois avant d'abandonner. Tout ce bloc est désormais sérialisé
     par compte via _verrou_oauth_imap (voir ci-dessus)."""
+    if isinstance(conn, BoiteLocaleImap):
+        return conn   # compte POP3 : boîte locale, rien à authentifier
     if compte.get("protocole") == "graph":
         # Filet de sécurité central (03/09/2026, suite au bug où des
         # tentatives IMAP automatiques en arrière-plan — IDLE permanent,
@@ -3383,8 +3432,951 @@ class MinuteurPollingGraph(QObject):
             self._synchroniseur.arreter()
 
 
+# ---------------------------------------------------------------------------
+# Comptes POP3 (21/11/2026, demandé par l'auteur après une question sur le
+# forum Foxmail : beaucoup d'anciens comptes Free, Orange, Outlook Express…
+# sont encore en POP3).
+#
+# Principe : le POP3 ne connaît ni dossiers ni drapeaux, seulement « liste,
+# télécharge, efface ». Plutôt que de doubler tout COURRIER (une trentaine de
+# fils de travail parlent IMAP : dossiers, corbeille, spam, déplacements,
+# Envoyés, recherche…), un compte POP3 reçoit une BOÎTE LOCALE qui répond
+# exactement comme un serveur IMAP (BoiteLocaleImap, rangée dans
+# C:\COURRIER\BoitesPOP3\<adresse>). connexion_imap la renvoie à la place d'une
+# vraie connexion : tout le reste de COURRIER fonctionne sans le savoir, son
+# cache Storage se remplit depuis cette boîte comme depuis un vrai serveur.
+# Seule la relève parle POP3 (relever_pop3) : elle range les nouveaux
+# messages dans l'INBOX de la boîte locale, puis efface du serveur ceux dont
+# le délai « Copie sur le serveur » est dépassé (réglage pop3_garder_jours du
+# compte, comme Foxmail : -1 = indéfiniment, 0 = tout de suite, sinon jours).
+# Elle est lancée quand un fil de travail ouvre l'INBOX de la boîte locale
+# (relève programmée, rond du compte, ouverture de la boîte de réception) —
+# jamais sur le fil de l'interface, et au plus une fois toutes les 20 s.
+# ---------------------------------------------------------------------------
+DOSSIER_BOITES_POP3 = os.path.join(DOSSIER_APP, "BoitesPOP3")
+# Dossiers créés d'office : noms reconnus partout dans COURRIER (Corbeille,
+# Envoyés, Brouillons, Spam — voir NOMS_AFFICHAGE_DOSSIERS_SYSTEME).
+DOSSIERS_POP3_DE_BASE = ("INBOX", "Sent", "Drafts", "Trash", "Junk")
+# Réglage « Copie sur le serveur » (21/11/2026, simplifié à la demande de
+# l'auteur) : Indéfiniment (-1) ou un nombre de jours libre (0 = aussitôt).
+JOURS_COPIE_SERVEUR_MAX = 3650
+JOURS_COPIE_SERVEUR_DEFAUT = 30
+INTERVALLE_MIN_RELEVE_POP3_S = 20
+_VERROUS_BOITES_POP3 = {}
+_VERROUS_RELEVE_POP3 = {}
+_DERNIERE_RELEVE_POP3 = {}
+_VERROU_POP3_META = _threading.Lock()
+
+
+def est_compte_pop3(compte):
+    return (compte or {}).get("protocole") == "pop3"
+
+
+def jours_copie_serveur_pop3(jours):
+    """Délai venu d'un autre logiciel -> nombre de jours gardé tel quel."""
+    try:
+        jours = int(jours)
+    except (TypeError, ValueError):
+        return -1
+    return max(0, min(jours, JOURS_COPIE_SERVEUR_MAX))
+
+
+def preparer_cache_pour_type(compte):
+    """À l'ajout d'un compte : si le cache Storage de cette adresse vient de
+    l'autre type (IMAP <-> POP3), ses numéros de mails (UID) ne
+    correspondent plus — un vieux mail s'afficherait à la place d'un
+    nouveau. Ce cache est alors mis de côté (renommé, jamais supprimé)."""
+    import datetime as _dt
+    dossier = os.path.join(DOSSIER_STORAGE, compte["adresse"].replace("@", "_at_"))
+    marqueur = os.path.join(dossier, "_compte_pop3.txt")
+    if os.path.isdir(dossier) and os.listdir(dossier) and \
+            os.path.exists(marqueur) != est_compte_pop3(compte):
+        archive = f"{dossier}_avant_{'pop3' if est_compte_pop3(compte) else 'imap'}_" \
+                  f"{_dt.datetime.now():%Y-%m-%d_%H%M%S}"
+        try:
+            os.replace(dossier, archive)
+            print(f"[POP3] Cache de l'ancien type mis de côté : {archive}")
+        except OSError as e:
+            print(f"[POP3] Cache de l'ancien type impossible à mettre de côté ({e})")
+            return
+    if est_compte_pop3(compte):
+        os.makedirs(dossier, exist_ok=True)
+        try:
+            with open(marqueur, "w", encoding="utf-8") as f:
+                f.write("Cache d'un compte POP3 (boîte locale : BoitesPOP3)\n")
+        except OSError:
+            pass
+
+
+def _verrou_boite_pop3(adresse):
+    with _VERROU_POP3_META:
+        return _VERROUS_BOITES_POP3.setdefault(adresse.lower(), _threading.RLock())
+
+
+def _verrou_releve_pop3(adresse):
+    with _VERROU_POP3_META:
+        return _VERROUS_RELEVE_POP3.setdefault(adresse.lower(), _threading.Lock())
+
+
+def _racine_boite_pop3(compte):
+    return os.path.join(DOSSIER_BOITES_POP3, compte["adresse"].replace("@", "_at_"))
+
+
+def _lire_json_pop3(chemin, defaut):
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return defaut
+    except Exception as e:
+        print(f"[POP3] {chemin} illisible ({type(e).__name__}: {e}) — valeurs par défaut")
+        return defaut
+
+
+def _ecrire_json_pop3(chemin, donnees):
+    tmp = f"{chemin}.{os.getpid()}.{_threading.get_ident()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(donnees, f, ensure_ascii=False)
+    for essai in range(10):
+        try:
+            os.replace(tmp, chemin)
+            return
+        except PermissionError:
+            if essai == 9:
+                raise
+            time.sleep(0.05)
+
+
+_MOIS_IMAP = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _date_imap_vers_horodatage(texte):
+    """« 21-Nov-2026 16:14:06 +0100 » (Time2Internaldate) ou « 21-Nov-2026 »
+    (critère SEARCH) -> horodatage, sans dépendre de la langue de Windows."""
+    import datetime as _dt
+    texte = (texte or "").strip().strip('"')
+    m = re.match(r"(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:\s+(\d\d):(\d\d):(\d\d)\s*([+-]\d{4}))?", texte)
+    if not m:
+        return None
+    mois = [x.lower() for x in _MOIS_IMAP].index(m.group(2).lower()) + 1
+    if m.group(4):
+        dec = int(m.group(7)[1:3]) * 60 + int(m.group(7)[3:5])
+        tz = _dt.timezone(_dt.timedelta(minutes=dec if m.group(7)[0] == "+" else -dec))
+        d = _dt.datetime(int(m.group(3)), mois, int(m.group(1)), int(m.group(4)),
+                         int(m.group(5)), int(m.group(6)), tzinfo=tz)
+    else:
+        d = _dt.datetime(int(m.group(3)), mois, int(m.group(1)))
+    return d.timestamp()
+
+
+class _PriseFactice:
+    """Remplace le socket d'une vraie connexion (settimeout, close…)."""
+    def settimeout(self, *_a):
+        pass
+
+    def close(self):
+        pass
+
+
+class BoiteLocaleImap:
+    """Boîte aux lettres locale d'un compte POP3, avec la même interface
+    qu'une connexion imaplib (select, list, uid search/fetch/store/copy,
+    expunge, append, create/delete/rename…) et les mêmes formes de réponse :
+    COURRIER s'en sert exactement comme d'un serveur IMAP. Une instance par
+    « connexion », toutes les instances d'un même compte partageant un
+    verrou (plusieurs fils de travail en parallèle, comme en IMAP).
+
+    Disque : BoitesPOP3\\<adresse>\\_boite.json (dossiers, UIDVALIDITY) et
+    un répertoire par dossier : <uid>.eml + _etat.json (prochain UID,
+    drapeaux, dates d'arrivée)."""
+
+    def __init__(self, compte):
+        self.compte = compte
+        self.racine = _racine_boite_pop3(compte)
+        self._verrou = _verrou_boite_pop3(compte["adresse"])
+        self._encoding = "ascii"   # imité d'imaplib (la recherche globale le modifie)
+        self.dossier = None
+        self.lecture_seule = False
+        with self._verrou:
+            os.makedirs(self.racine, exist_ok=True)
+            boite = self._boite()
+            modifie = False
+            if not boite.get("uidvalidity"):
+                boite["uidvalidity"] = int(time.time())
+                modifie = True
+            for nom in DOSSIERS_POP3_DE_BASE:
+                if nom not in boite["dossiers"]:
+                    boite["dossiers"][nom] = self._nouveau_repertoire(boite, nom)
+                    modifie = True
+            if modifie:
+                self._ecrire_boite(boite)
+
+    # --- Fichiers -----------------------------------------------------------
+    def _boite(self):
+        boite = _lire_json_pop3(os.path.join(self.racine, "_boite.json"), {})
+        boite.setdefault("dossiers", {})
+        return boite
+
+    def _ecrire_boite(self, boite):
+        _ecrire_json_pop3(os.path.join(self.racine, "_boite.json"), boite)
+
+    def _nouveau_repertoire(self, boite, nom):
+        base = re.sub(r"[^A-Za-z0-9_.-]", "_", nom)[:40] or "dossier"
+        pris = {r.lower() for r in boite["dossiers"].values()}
+        rep, n = base, 2
+        while rep.lower() in pris or os.path.exists(os.path.join(self.racine, rep)):
+            rep, n = f"{base}_{n}", n + 1
+        os.makedirs(os.path.join(self.racine, rep), exist_ok=True)
+        return rep
+
+    def _rep(self, nom):
+        rep = self._boite()["dossiers"].get(nom)
+        return os.path.join(self.racine, rep) if rep else None
+
+    def _etat(self, rep):
+        etat = _lire_json_pop3(os.path.join(rep, "_etat.json"), {})
+        etat.setdefault("uidnext", 1)
+        etat.setdefault("flags", {})
+        etat.setdefault("dates", {})
+        return etat
+
+    def _ecrire_etat(self, rep, etat):
+        _ecrire_json_pop3(os.path.join(rep, "_etat.json"), etat)
+
+    @staticmethod
+    def _uids(rep):
+        uids = []
+        try:
+            for e in os.scandir(rep):
+                if e.name.endswith(".eml") and e.name[:-4].isdigit():
+                    uids.append(int(e.name[:-4]))
+        except FileNotFoundError:
+            pass
+        return sorted(uids)
+
+    @staticmethod
+    def _lire(rep, uid):
+        with open(os.path.join(rep, f"{uid}.eml"), "rb") as f:
+            return f.read()
+
+    @staticmethod
+    def _entetes_bruts(rep, uid):
+        with open(os.path.join(rep, f"{uid}.eml"), "rb") as f:
+            debut = f.read(256 * 1024)
+        for sep in (b"\r\n\r\n", b"\n\n"):
+            i = debut.find(sep)
+            if i >= 0:
+                return debut[:i + len(sep)]
+        return debut
+
+    @staticmethod
+    def _nom(argument):
+        if isinstance(argument, bytes):
+            argument = argument.decode("utf-8", "replace")
+        argument = (argument or "").strip()
+        if len(argument) >= 2 and argument[0] == argument[-1] == '"':
+            argument = argument[1:-1]
+        return "INBOX" if argument.upper() == "INBOX" else argument
+
+    def _ajouter(self, nom, raw, flags=(), horodatage=None):
+        """Range un message dans le dossier `nom` et retourne son UID."""
+        with self._verrou:
+            rep = self._rep(nom)
+            if rep is None:
+                raise KeyError(nom)
+            etat = self._etat(rep)
+            uid = max(int(etat["uidnext"]), (self._uids(rep) or [0])[-1] + 1)
+            chemin = os.path.join(rep, f"{uid}.eml")
+            tmp = chemin + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, chemin)
+            etat["uidnext"] = uid + 1
+            flags = [x for x in flags if x and x != "\\Recent"]
+            if flags:
+                etat["flags"][str(uid)] = sorted(set(flags))
+            etat["dates"][str(uid)] = horodatage or time.time()
+            self._ecrire_etat(rep, etat)
+            return uid
+
+    # --- Connexion ----------------------------------------------------------
+    def socket(self):
+        return _PriseFactice()
+
+    def shutdown(self):
+        pass
+
+    def login(self, *_a):
+        return "OK", [b"LOGIN completed"]
+
+    def logout(self):
+        self.dossier = None
+        return "BYE", [b"Boite locale fermee"]
+
+    def noop(self):
+        return "OK", [b"NOOP completed"]
+
+    check = noop
+
+    def capability(self):
+        return "OK", [b"IMAP4rev1 UIDPLUS MOVE"]
+
+    def namespace(self):
+        return "OK", [b'(("" ".")) NIL NIL']
+
+    # --- Dossiers -----------------------------------------------------------
+    def list(self, directory='""', pattern="*"):
+        speciaux = {"sent": "\\Sent", "drafts": "\\Drafts", "trash": "\\Trash", "junk": "\\Junk"}
+        with self._verrou:
+            noms = sorted(self._boite()["dossiers"])
+        lignes = []
+        for nom in noms:
+            enfants = any(n.startswith(nom + ".") for n in noms)
+            drapeaux = ["\\HasChildren" if enfants else "\\HasNoChildren"]
+            if nom.lower() in speciaux:
+                drapeaux.append(speciaux[nom.lower()])
+            lignes.append(f'({" ".join(drapeaux)}) "." "{nom}"'.encode("utf-8"))
+        return "OK", lignes
+
+    lsub = list
+
+    def subscribe(self, _nom):
+        return "OK", [b"SUBSCRIBE completed"]
+
+    unsubscribe = subscribe
+
+    def create(self, nom):
+        nom = self._nom(nom)
+        with self._verrou:
+            boite = self._boite()
+            if not nom or nom in boite["dossiers"]:
+                return "NO", [b"Ce dossier existe deja."]
+            boite["dossiers"][nom] = self._nouveau_repertoire(boite, nom)
+            self._ecrire_boite(boite)
+        return "OK", [b"CREATE completed"]
+
+    def delete(self, nom):
+        nom = self._nom(nom)
+        if nom == "INBOX":
+            return "NO", [b"La boite de reception ne peut pas etre supprimee."]
+        with self._verrou:
+            boite = self._boite()
+            rep = boite["dossiers"].pop(nom, None)
+            if rep is None:
+                return "NO", [b"Dossier inexistant."]
+            self._ecrire_boite(boite)
+            import shutil
+            shutil.rmtree(os.path.join(self.racine, rep), ignore_errors=True)
+            if self.dossier == nom:
+                self.dossier = None
+        return "OK", [b"DELETE completed"]
+
+    def rename(self, ancien, nouveau):
+        ancien, nouveau = self._nom(ancien), self._nom(nouveau)
+        if ancien == "INBOX":
+            return "NO", [b"La boite de reception ne peut pas etre renommee."]
+        with self._verrou:
+            boite = self._boite()
+            if ancien not in boite["dossiers"]:
+                return "NO", [b"Dossier inexistant."]
+            if not nouveau or nouveau in boite["dossiers"]:
+                return "NO", [b"Ce nom est deja pris."]
+            # Le dossier et ses sous-dossiers (séparateur « . ») : seul le nom
+            # change, les répertoires sur le disque restent les mêmes.
+            for nom in sorted(boite["dossiers"]):
+                if nom == ancien or nom.startswith(ancien + "."):
+                    boite["dossiers"][nouveau + nom[len(ancien):]] = boite["dossiers"].pop(nom)
+            self._ecrire_boite(boite)
+        return "OK", [b"RENAME completed"]
+
+    def select(self, mailbox="INBOX", readonly=False):
+        nom = self._nom(mailbox)
+        if nom == "INBOX" and _threading.current_thread() is not _threading.main_thread():
+            relever_pop3(self.compte)
+        with self._verrou:
+            rep = self._rep(nom)
+            if rep is None:
+                self.dossier = None
+                return "NO", [f"Dossier inexistant : {nom}".encode("utf-8")]
+            self.dossier = nom
+            self.lecture_seule = bool(readonly)
+            return "OK", [str(len(self._uids(rep))).encode()]
+
+    def close(self):
+        # CLOSE IMAP : efface les messages marqués \Deleted (sauf lecture seule)
+        if self.dossier is not None and not self.lecture_seule:
+            self.expunge()
+        self.dossier = None
+        return "OK", [b"CLOSE completed"]
+
+    def expunge(self):
+        if self.dossier is None:
+            return "NO", [b"Aucun dossier selectionne."]
+        with self._verrou:
+            rep = self._rep(self.dossier)
+            etat = self._etat(rep)
+            uids = self._uids(rep)
+            effaces = []
+            for rang, uid in reversed(list(enumerate(uids, 1))):
+                if "\\Deleted" in etat["flags"].get(str(uid), []):
+                    try:
+                        os.remove(os.path.join(rep, f"{uid}.eml"))
+                    except FileNotFoundError:
+                        pass
+                    etat["flags"].pop(str(uid), None)
+                    etat["dates"].pop(str(uid), None)
+                    effaces.append(str(rang).encode())
+            if effaces:
+                self._ecrire_etat(rep, etat)
+        return "OK", effaces or [None]
+
+    def append(self, mailbox, flags, date_time, message):
+        nom = self._nom(mailbox)
+        if isinstance(message, str):
+            message = message.encode("utf-8")
+        if isinstance(flags, bytes):
+            flags = flags.decode()
+        liste_flags = (flags or "").strip("()").split()
+        if isinstance(date_time, bytes):
+            date_time = date_time.decode()
+        try:
+            horodatage = _date_imap_vers_horodatage(date_time) if date_time else None
+        except Exception:
+            horodatage = None
+        try:
+            with self._verrou:
+                uid = self._ajouter(nom, message, liste_flags, horodatage)
+                validite = self._boite()["uidvalidity"]
+        except KeyError:
+            return "NO", [b"[TRYCREATE] Dossier inexistant."]
+        return "OK", [f"[APPENDUID {validite} {uid}] APPEND completed".encode()]
+
+    # --- Commandes UID -------------------------------------------------------
+    def uid(self, commande, *args):
+        commande = commande.lower()
+        if self.dossier is None:
+            return "NO", [b"Aucun dossier selectionne."]
+        with self._verrou:
+            rep = self._rep(self.dossier)
+            if rep is None:
+                return "NO", [b"Dossier inexistant."]
+            if commande == "search":
+                return self._search(rep, args)
+            if commande == "fetch":
+                return self._fetch(rep, args[0], args[1])
+            if commande == "store":
+                return self._store(rep, args[0], args[1], args[2])
+            if commande in ("copy", "move"):
+                statut, data = self._copy(rep, args[0], args[1])
+                if statut == "OK" and commande == "move":
+                    self._store(rep, args[0], "+FLAGS.SILENT", "(\\Deleted)")
+                    self.expunge()
+                return statut, data
+        return "BAD", [f"Commande non prise en charge : UID {commande}".encode()]
+
+    @staticmethod
+    def _ensemble(texte, uids):
+        """« 3,5:7,12:* » -> UID existants, dans l'ordre."""
+        if isinstance(texte, (bytes, bytearray)):
+            texte = texte.decode()
+        if isinstance(texte, (list, tuple)):
+            texte = ",".join(x.decode() if isinstance(x, bytes) else str(x) for x in texte)
+        existants = set(uids)
+        maxi = uids[-1] if uids else 0
+        voulus = set()
+        for morceau in str(texte).replace(" ", ",").split(","):
+            if not morceau:
+                continue
+            if ":" in morceau:
+                a, b = morceau.split(":", 1)
+                a = maxi if a == "*" else int(a)
+                b = maxi if b == "*" else int(b)
+                a, b = min(a, b), max(a, b)
+                voulus.update(u for u in existants if a <= u <= b)
+            else:
+                u = maxi if morceau == "*" else int(morceau)
+                if u in existants:
+                    voulus.add(u)
+        return sorted(voulus)
+
+    def _search(self, rep, args):
+        args = list(args)
+        if args and args[0] is None:
+            args = args[1:]
+        elif args and str(args[0]).upper() == "CHARSET":
+            args = args[2:]
+        texte = " ".join(a.decode("utf-8", "replace") if isinstance(a, bytes) else str(a) for a in args)
+        jetons = re.findall(r'\(|\)|"(?:[^"\\]|\\.)*"|[^\s()]+', texte)
+        etat = self._etat(rep)
+        uids = self._uids(rep)
+        try:
+            tests = []
+            while jetons:
+                tests.append(self._critere(jetons, uids))
+        except Exception as e:
+            return "BAD", [f"Recherche non comprise : {e}".encode("utf-8", "replace")]
+        trouves = []
+        for uid in uids:
+            ctx = _MessageBoitePop3(rep, uid, etat)
+            try:
+                if all(t(ctx) for t in tests):
+                    trouves.append(str(uid).encode())
+            except Exception:
+                continue
+        return "OK", [b" ".join(trouves)]
+
+    def _critere(self, jetons, uids):
+        """Lit un critère SEARCH dans `jetons` (consommés) et retourne un test."""
+        def valeur():
+            v = jetons.pop(0)
+            if len(v) >= 2 and v[0] == v[-1] == '"':
+                v = v[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            return v
+
+        def contient(chaine, morceau):
+            return morceau.casefold() in (chaine or "").casefold()
+
+        mot = jetons.pop(0)
+        cle = mot.upper()
+        if cle == "(":
+            tests = []
+            while jetons and jetons[0] != ")":
+                tests.append(self._critere(jetons, uids))
+            if jetons:
+                jetons.pop(0)
+            return lambda c, t=tests: all(x(c) for x in t)
+        drapeaux = {"SEEN": ("\\Seen", True), "UNSEEN": ("\\Seen", False),
+                    "DELETED": ("\\Deleted", True), "UNDELETED": ("\\Deleted", False),
+                    "FLAGGED": ("\\Flagged", True), "UNFLAGGED": ("\\Flagged", False),
+                    "ANSWERED": ("\\Answered", True), "UNANSWERED": ("\\Answered", False),
+                    "DRAFT": ("\\Draft", True), "UNDRAFT": ("\\Draft", False)}
+        if cle == "ALL":
+            return lambda c: True
+        if cle in drapeaux:
+            f, present = drapeaux[cle]
+            return lambda c, f=f, p=present: (f in c.flags) == p
+        if cle in ("NEW", "RECENT"):
+            return lambda c: "\\Seen" not in c.flags
+        if cle == "OLD":
+            return lambda c: True
+        if cle == "NOT":
+            t = self._critere(jetons, uids)
+            return lambda c, t=t: not t(c)
+        if cle == "OR":
+            a = self._critere(jetons, uids)
+            b = self._critere(jetons, uids)
+            return lambda c, a=a, b=b: a(c) or b(c)
+        if cle in ("FROM", "TO", "CC", "BCC", "SUBJECT"):
+            v = valeur()
+            return lambda c, k=cle, v=v: contient(c.entete(k), v)
+        if cle == "HEADER":
+            champ, v = valeur(), valeur()
+            return lambda c, k=champ, v=v: contient(c.entete(k, brut=True), v) or contient(c.entete(k), v)
+        if cle in ("BODY", "TEXT"):
+            v = valeur()
+            return lambda c, v=v: contient(c.texte(), v)
+        if cle in ("SINCE", "BEFORE", "ON", "SENTSINCE", "SENTBEFORE", "SENTON"):
+            jour = _date_imap_vers_horodatage(valeur())
+            import datetime as _dt
+            debut = _dt.datetime.fromtimestamp(jour).date()
+            envoi = cle.startswith("SENT")
+
+            def _test(c, base=cle.replace("SENT", ""), debut=debut, envoi=envoi):
+                d = c.jour_envoi() if envoi else c.jour_arrivee()
+                if d is None:
+                    return False
+                return d >= debut if base == "SINCE" else d < debut if base == "BEFORE" else d == debut
+            return _test
+        if cle in ("LARGER", "SMALLER"):
+            n = int(valeur())
+            return lambda c, n=n, k=cle: c.taille() > n if k == "LARGER" else c.taille() < n
+        if cle == "UID":
+            ensemble = set(self._ensemble(valeur(), uids))
+            return lambda c, e=ensemble: c.uid in e
+        if re.fullmatch(r"[\d,:*]+", mot):   # ensemble de numéros de séquence
+            rangs = set(self._ensemble(mot, list(range(1, len(uids) + 1))))
+            choisis = {uids[r - 1] for r in rangs}
+            return lambda c, e=choisis: c.uid in e
+        raise ValueError(f"critère inconnu {mot}")
+
+    def _fetch(self, rep, ensemble, elements):
+        if isinstance(elements, bytes):
+            elements = elements.decode()
+        elements = elements.strip()
+        if elements.startswith("(") and elements.endswith(")"):
+            elements = elements[1:-1]
+        # Éléments : FLAGS, UID, BODY.PEEK[…], RFC822.SIZE, BODYSTRUCTURE…
+        demandes = re.findall(r"BODY(?:\.PEEK)?\[[^\]]*\](?:<[\d.]+>)?|RFC822(?:\.\w+)?|\S+",
+                              elements, re.IGNORECASE)
+        etat = self._etat(rep)
+        uids = self._uids(rep)
+        rangs = {u: i for i, u in enumerate(uids, 1)}
+        reponse = []
+        etat_modifie = False
+        for uid in self._ensemble(ensemble, uids):
+            ctx = _MessageBoitePop3(rep, uid, etat)
+            simples = [f"UID {uid}"]
+            litteral = None
+            for d in demandes:
+                D = d.upper()
+                if D == "UID":
+                    continue
+                if D == "FLAGS":
+                    simples.append(f"FLAGS ({' '.join(ctx.flags)})")
+                elif D == "RFC822.SIZE":
+                    simples.append(f"RFC822.SIZE {ctx.taille()}")
+                elif D == "INTERNALDATE":
+                    simples.append(f'INTERNALDATE "{imaplib.Time2Internaldate(ctx.arrivee).strip(chr(34))}"')
+                elif D in ("BODYSTRUCTURE", "BODY"):
+                    simples.append(f"{D} {ctx.structure()}")
+                elif D.startswith("BODY") or D.startswith("RFC822"):
+                    if litteral is not None:
+                        continue
+                    section = re.search(r"\[(.*)\]", d)
+                    section = section.group(1).upper() if section else ("HEADER" if D == "RFC822.HEADER" else "")
+                    if section.startswith("HEADER.FIELDS"):
+                        noms = re.findall(r"[\w-]+", section.split("(", 1)[1]) if "(" in section else []
+                        donnees = ctx.champs_entete(noms, sauf=section.startswith("HEADER.FIELDS.NOT"))
+                    elif section == "HEADER":
+                        donnees = ctx.entetes_bruts()
+                    elif section == "TEXT":
+                        brut = ctx.brut()
+                        donnees = brut[len(ctx.entetes_bruts()):]
+                    else:
+                        donnees = ctx.brut()
+                    nom_reponse = ("RFC822" if D == "RFC822" else
+                                   "RFC822.HEADER" if D == "RFC822.HEADER" else f"BODY[{section}]")
+                    litteral = (nom_reponse, donnees)
+                    if ".PEEK" not in D and D != "RFC822.HEADER" and not self.lecture_seule \
+                            and "\\Seen" not in ctx.flags:
+                        etat["flags"][str(uid)] = sorted(set(ctx.flags) | {"\\Seen"})
+                        ctx.flags = etat["flags"][str(uid)]
+                        etat_modifie = True
+            tete = f"{rangs[uid]} ({' '.join(simples)}"
+            if litteral is None:
+                reponse.append((tete + ")").encode("utf-8"))
+            else:
+                reponse.append(((tete + f" {litteral[0]} {{{len(litteral[1])}}}").encode("utf-8"),
+                                litteral[1]))
+                reponse.append(b")")
+        if etat_modifie:
+            self._ecrire_etat(rep, etat)
+        return "OK", reponse or [None]
+
+    def _store(self, rep, ensemble, operation, drapeaux):
+        if isinstance(operation, bytes):
+            operation = operation.decode()
+        if isinstance(drapeaux, bytes):
+            drapeaux = drapeaux.decode()
+        operation = operation.upper()
+        liste = [f for f in str(drapeaux).strip("()").split() if f]
+        etat = self._etat(rep)
+        uids = self._uids(rep)
+        rangs = {u: i for i, u in enumerate(uids, 1)}
+        reponse = []
+        for uid in self._ensemble(ensemble, uids):
+            actuels = set(etat["flags"].get(str(uid), []))
+            if operation.startswith("+"):
+                actuels |= set(liste)
+            elif operation.startswith("-"):
+                actuels -= set(liste)
+            else:
+                actuels = set(liste)
+            if actuels:
+                etat["flags"][str(uid)] = sorted(actuels)
+            else:
+                etat["flags"].pop(str(uid), None)
+            if ".SILENT" not in operation:
+                reponse.append(f"{rangs[uid]} (UID {uid} FLAGS ({' '.join(sorted(actuels))}))".encode())
+        self._ecrire_etat(rep, etat)
+        return "OK", reponse or [None]
+
+    def _copy(self, rep, ensemble, destination):
+        nom_dest = self._nom(destination)
+        rep_dest = self._rep(nom_dest)
+        if rep_dest is None:
+            return "NO", [b"[TRYCREATE] Dossier de destination inexistant."]
+        etat = self._etat(rep)
+        uids = self._uids(rep)
+        sources, copies = [], []
+        for uid in self._ensemble(ensemble, uids):
+            flags = [f for f in etat["flags"].get(str(uid), []) if f != "\\Deleted"]
+            nouvel = self._ajouter(nom_dest, self._lire(rep, uid), flags,
+                                   etat["dates"].get(str(uid)))
+            sources.append(str(uid))
+            copies.append(str(nouvel))
+        if not sources:
+            return "OK", [b"COPY completed (rien a copier)"]
+        validite = self._boite()["uidvalidity"]
+        return "OK", [f"[COPYUID {validite} {','.join(sources)} {','.join(copies)}] COPY completed".encode()]
+
+
+class _MessageBoitePop3:
+    """Un message de la boîte locale, lu paresseusement (recherche, fetch)."""
+
+    def __init__(self, rep, uid, etat):
+        self.rep, self.uid = rep, uid
+        self.flags = list(etat["flags"].get(str(uid), []))
+        self.arrivee = etat["dates"].get(str(uid)) or self._mtime()
+        self._brut = self._entetes = self._msg_entetes = None
+
+    def _mtime(self):
+        try:
+            return os.path.getmtime(os.path.join(self.rep, f"{self.uid}.eml"))
+        except OSError:
+            return time.time()
+
+    def brut(self):
+        if self._brut is None:
+            self._brut = BoiteLocaleImap._lire(self.rep, self.uid)
+        return self._brut
+
+    def entetes_bruts(self):
+        if self._entetes is None:
+            self._entetes = (BoiteLocaleImap._entetes_bruts(self.rep, self.uid)
+                             if self._brut is None else
+                             BoiteLocaleImap._entetes_bruts_depuis(self._brut))
+        return self._entetes
+
+    def _message_entetes(self):
+        if self._msg_entetes is None:
+            self._msg_entetes = email.message_from_bytes(self.entetes_bruts())
+        return self._msg_entetes
+
+    def entete(self, nom, brut=False):
+        valeurs = self._message_entetes().get_all(nom) or []
+        if brut:
+            return " ".join(str(v) for v in valeurs)
+        return " ".join(decoder_entete(str(v)) for v in valeurs)
+
+    def champs_entete(self, noms, sauf=False):
+        """Lignes d'en-tête demandées (avec leurs suites repliées) + ligne vide."""
+        voulus = {n.lower() for n in noms}
+        lignes, garder = [], False
+        for ligne in self.entetes_bruts().splitlines(keepends=True):
+            if not ligne.strip():
+                break
+            if ligne[:1] in (b" ", b"\t"):
+                if garder:
+                    lignes.append(ligne)
+                continue
+            nom = ligne.split(b":", 1)[0].strip().decode("latin-1").lower()
+            garder = (nom not in voulus) if sauf else (nom in voulus)
+            if garder:
+                lignes.append(ligne)
+        return b"".join(lignes) + b"\r\n"
+
+    def texte(self):
+        try:
+            msg = email.message_from_bytes(self.brut())
+            morceaux = [decoder_entete(msg.get("Subject", ""))]
+            for partie in msg.walk():
+                if partie.get_content_maintype() == "text":
+                    charge = partie.get_payload(decode=True) or b""
+                    morceaux.append(charge.decode(partie.get_content_charset() or "utf-8", "replace"))
+            return "\n".join(morceaux)
+        except Exception:
+            return self.brut().decode("utf-8", "replace")
+
+    def taille(self):
+        try:
+            return os.path.getsize(os.path.join(self.rep, f"{self.uid}.eml"))
+        except OSError:
+            return 0
+
+    def jour_arrivee(self):
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(self.arrivee).date()
+
+    def jour_envoi(self):
+        try:
+            import email.utils as _eu
+            return _eu.parsedate_to_datetime(self.entete("Date", brut=True)).date()
+        except Exception:
+            return None
+
+    def structure(self):
+        """BODYSTRUCTURE simplifié : type de chaque partie, et les pièces
+        jointes marquées "attachment" avec leur nom (seul usage dans
+        COURRIER : _detecter_pj_bodystructure)."""
+        def _q(t):
+            return '"' + str(t or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+        try:
+            msg = email.message_from_bytes(self.brut())
+        except Exception:
+            return '("text" "plain" NIL NIL NIL "7bit" 0 0)'
+
+        def _partie(p):
+            if p.is_multipart():
+                return "(" + "".join(_partie(s) for s in p.get_payload()) + f" {_q(p.get_content_subtype())})"
+            nom = p.get_filename()
+            dispo = (p.get("Content-Disposition") or "").split(";")[0].strip().lower()
+            if nom or dispo == "attachment":
+                fin = f' ("attachment" ("filename" {_q(decoder_entete(nom or ""))}))'
+            else:
+                fin = " NIL"
+            return (f"({_q(p.get_content_maintype())} {_q(p.get_content_subtype())} NIL NIL NIL "
+                    f"{_q(p.get('Content-Transfer-Encoding', '7bit'))} 0 NIL{fin} NIL)")
+        return _partie(msg)
+
+
+def _entetes_bruts_depuis(brut):
+    for sep in (b"\r\n\r\n", b"\n\n"):
+        i = brut.find(sep)
+        if i >= 0:
+            return brut[:i + len(sep)]
+    return brut
+
+
+BoiteLocaleImap._entetes_bruts_depuis = staticmethod(_entetes_bruts_depuis)
+
+
+def _connexion_pop3(compte, timeout=30):
+    """Connexion POP3 authentifiée. Port 995 : SSL direct ; autre port :
+    STARTTLS obligatoire (jamais de mot de passe en clair sur le réseau)."""
+    import poplib
+    # Lignes de plus de 2 048 octets refusées par défaut (« line too long ») :
+    # certains serveurs en envoient (en-têtes DKIM, HTML non replié).
+    poplib._MAXLINE = max(getattr(poplib, "_MAXLINE", 2048), 1_000_000)
+    hote = compte.get("pop3_host", "").strip()
+    port = int(compte.get("pop3_port") or 995)
+    if not hote:
+        raise RuntimeError("aucun serveur POP3 indiqué pour ce compte")
+    if port == 995 or compte.get("pop3_ssl", port != 110 and port != 0):
+        srv = poplib.POP3_SSL(hote, port, timeout=timeout, context=CONTEXTE_SSL)
+    else:
+        srv = poplib.POP3(hote, port, timeout=timeout)
+        try:
+            srv.stls(context=CONTEXTE_SSL)
+        except Exception as e:
+            try:
+                srv.quit()
+            except Exception:
+                pass
+            raise RuntimeError(f"le serveur {hote}:{port} refuse le chiffrement (STARTTLS) : "
+                               f"utilisez le port 995 ({e})")
+    identifiants = [compte.get("pop3_user") or compte["adresse"]]
+    if "@" in identifiants[0] and not compte.get("pop3_user"):
+        identifiants.append(identifiants[0].split("@", 1)[0])   # ex. ancien identifiant Free
+    derniere = None
+    for i, identifiant in enumerate(identifiants):
+        try:
+            srv.user(identifiant)
+            srv.pass_(compte.get("mdp", ""))
+            return srv
+        except poplib.error_proto as e:
+            derniere = e
+            if i + 1 < len(identifiants):
+                # Une session POP3 refusée n'accepte pas toujours un 2e essai
+                try:
+                    srv.quit()
+                except Exception:
+                    pass
+                return _connexion_pop3(dict(compte, pop3_user=identifiants[i + 1]), timeout)
+    try:
+        srv.quit()
+    except Exception:
+        pass
+    raise RuntimeError(f"identifiant ou mot de passe refusé par {hote} ({derniere})")
+
+
+def relever_pop3(compte, forcer=False):
+    """Relève POP3 : nouveaux messages du serveur -> INBOX de la boîte locale,
+    puis effacement sur le serveur selon « Copie sur le serveur ». Retourne
+    le nombre de messages téléchargés (0 si une autre relève de ce compte
+    tourne déjà, ou si la dernière date de moins de 20 s)."""
+    import poplib, hashlib
+    adresse = compte["adresse"]
+    verrou = _verrou_releve_pop3(adresse)
+    if not verrou.acquire(blocking=False):
+        return 0
+    srv = None
+    nb_nouveaux = 0
+    chemin_vus, vus = None, {}
+    try:
+        maintenant = time.time()
+        if not forcer and maintenant - _DERNIERE_RELEVE_POP3.get(adresse.lower(), 0) < INTERVALLE_MIN_RELEVE_POP3_S:
+            return 0
+        _DERNIERE_RELEVE_POP3[adresse.lower()] = maintenant
+        boite = BoiteLocaleImap(compte)
+        chemin_vus = os.path.join(boite.racine, "_pop3_uidl.json")
+        vus = _lire_json_pop3(chemin_vus, {})   # identifiant serveur -> date de téléchargement
+        moteur_activite(adresse, "pop3", "Relève POP3 : connexion au serveur…")
+        srv = _connexion_pop3(compte)
+        # Identifiants uniques des messages (UIDL) ; repli, pour les rares
+        # serveurs sans UIDL : empreinte des en-têtes (TOP n 0).
+        serveur = []   # [(numéro, identifiant)]
+        try:
+            for ligne in srv.uidl()[1]:
+                num, _sep, ident = ligne.decode("latin-1").partition(" ")
+                if ident.strip():
+                    serveur.append((int(num), ident.strip()))
+        except poplib.error_proto:
+            nb = srv.stat()[0]
+            for num in range(1, nb + 1):
+                entetes = b"\r\n".join(srv.top(num, 0)[1])
+                serveur.append((num, "top-" + hashlib.sha1(entetes).hexdigest()))
+        a_telecharger = [(n, i) for n, i in serveur if i not in vus]
+        print(f"[POP3] {adresse} : {len(serveur)} message(s) sur le serveur, "
+              f"{len(a_telecharger)} nouveau(x)")
+        for k, (num, ident) in enumerate(a_telecharger, 1):
+            moteur_activite(adresse, "pop3", "Relève POP3 : téléchargement des nouveaux mails",
+                            k, len(a_telecharger))
+            lignes = srv.retr(num)[1]
+            raw = b"\r\n".join(lignes) + b"\r\n"
+            boite._ajouter("INBOX", raw)
+            vus[ident] = time.time()
+            nb_nouveaux += 1
+            if k % 20 == 0:
+                _ecrire_json_pop3(chemin_vus, vus)
+        # Copie sur le serveur : effacer ce qui a été téléchargé il y a plus
+        # longtemps que le délai choisi (jamais un message pas encore rangé ici)
+        garder = int(compte.get("pop3_garder_jours", -1))
+        effaces = set()
+        if garder >= 0:
+            limite = time.time() - garder * 86400
+            for num, ident in serveur:
+                if ident in vus and vus[ident] <= limite:
+                    srv.dele(num)
+                    effaces.add(ident)
+        presents = {i for _n, i in serveur} - effaces
+        vus = {i: t for i, t in vus.items() if i in presents}
+        _ecrire_json_pop3(chemin_vus, vus)
+        srv.quit()   # QUIT valide les effacements (DELE)
+        srv = None
+        if effaces:
+            print(f"[POP3] {adresse} : {len(effaces)} message(s) effacé(s) du serveur "
+                  f"(copie serveur : {garder} jour(s))")
+            moteur_evenement(adresse, f"POP3 : {len(effaces)} mail(s) effacé(s) du serveur")
+        moteur_erreur(adresse, None)
+        return nb_nouveaux
+    except Exception as e:
+        print(f"[POP3] {adresse} : relève impossible ({type(e).__name__}: {e})")
+        moteur_erreur(adresse, f"Relève POP3 impossible : {e}")
+        if nb_nouveaux and chemin_vus:
+            try:
+                _ecrire_json_pop3(chemin_vus, vus)
+            except Exception:
+                pass
+        return nb_nouveaux
+    finally:
+        if srv is not None:
+            # Coupure sans QUIT : le serveur annule les DELE en cours (rien
+            # n'est effacé sans une relève menée jusqu'au bout)
+            try:
+                srv.close()
+            except Exception:
+                pass
+        moteur_fin(adresse, "pop3")
+        verrou.release()
+
+
 def connexion_imap(compte, nb_essais=3, delai=2.0, timeout=15):
     """Ouvre et retourne une connexion IMAP selon le type du compte.
+    Compte POP3 : retourne sa boîte locale (BoiteLocaleImap), même interface.
     Utilise un sémaphore global pour ne pas dépasser la limite o2switch (20/IP).
     Réessaie automatiquement en cas d'erreur [LIMIT] avec un délai croissant.
     Un timeout (15s par défaut) évite qu'une connexion ou une commande IMAP
@@ -3395,6 +4387,8 @@ def connexion_imap(compte, nb_essais=3, delai=2.0, timeout=15):
     Python : le timeout s'applique au socket dès sa création et reste actif
     pour toutes les commandes suivantes (login, rename...) sur cette
     connexion, même après restauration du timeout par défaut global."""
+    if est_compte_pop3(compte):
+        return BoiteLocaleImap(compte)   # pas de sémaphore : rien ne sort du PC
     import time as _time
     import socket as _socket
     for essai in range(nb_essais):
@@ -3443,6 +4437,9 @@ def fermer_connexion_imap(conn):
     fermeture du socket pour éviter les connexions fantômes côté serveur
     (cause du [LIMIT] Maximum number of connections from user+IP exceeded)."""
     if conn is None:
+        return
+    if isinstance(conn, BoiteLocaleImap):
+        conn.logout()   # boîte locale POP3 : aucun slot de sémaphore pris
         return
     try:
         conn.logout()
@@ -6162,6 +7159,11 @@ def _envoyer_comptes_android(serie, comptes, avec_mdp, macros=False, sons=False,
             "smtp_starttls": bool(c.get("smtp_starttls")),
             "protocole": c.get("protocole") or "imap",
             "mdp": (c.get("mdp") or "") if avec_mdp and (c.get("protocole") or "imap") != "graph" else "",
+            # Comptes POP3 (21/11/2026) : COURRIER ADRIEN ANDROID les relève
+            # lui aussi (boîte locale du téléphone, à part de celle du PC).
+            **({"pop3_host": c.get("pop3_host", ""), "pop3_port": c.get("pop3_port", 995),
+                "pop3_garder_jours": c.get("pop3_garder_jours", -1), "pop3_user": c.get("pop3_user", "")}
+               if est_compte_pop3(c) else {}),
         } for c in comptes],
     }
     contenu.update(_contenu_pour_telephone(macros=macros, sons=sons, modeles=modeles))
@@ -32649,7 +33651,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 20/11/2026 18h59")
+        self.setWindowTitle("COURRIER ADRIEN — 21/11/2026 22h42")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -36904,7 +37906,9 @@ if (typeof module === 'object') {
         connexions") qui avait justifié la désactivation précédente."""
         if not self.compte_actif or not dossier:
             return
-        if self.compte_actif.get("protocole") == "graph":
+        # Compte POP3 (21/11/2026) : pas de push, la boîte locale est relevée
+        # par le minuteur du compte (voir _relever_compte_par_adresse).
+        if self.compte_actif.get("protocole") in ("graph", "pop3"):
             # Pas d'IMAP IDLE pour un compte Graph — le rafraîchissement
             # se fait uniquement par le polling périodique
             # (MinuteurPollingGraph, voir _demarrer_polling_graph). On
@@ -36952,8 +37956,8 @@ if (typeof module === 'object') {
         adresse = compte.get("adresse", "")
         if not adresse or adresse == self.compte_actif.get("adresse", ""):
             return  # compte actif : géré par l'IDLE plein, pas de doublon
-        if compte.get("protocole") == "graph":
-            return  # géré par MinuteurPollingGraph, pas d'IDLE pour Graph
+        if compte.get("protocole") in ("graph", "pop3"):
+            return  # Graph : MinuteurPollingGraph ; POP3 : minuteur de relève
         if adresse in self.idle_threads_arriere_plan:
             return
         t = IdleThread(compte, "INBOX")
@@ -38146,7 +39150,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 20/11/2026 à 18h59")
+        lbl_version = QLabel("Version du 21/11/2026 à 22h42")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -38643,6 +39647,9 @@ if (typeof module === 'object') {
         item.setIcon(QIcon(self._pixmap_rond("#c0392b")))
         t_debut = time.time()
         DUREE_MIN_AFFICHAGE = 1.0  # secondes
+        # Compte POP3 : un clic relève toujours, même juste après une relève
+        # automatique (sinon ignorée moins de 20 s après la précédente)
+        _DERNIERE_RELEVE_POP3.pop(compte["adresse"].lower(), None)
 
         def _revenir_gris():
             ecoule = time.time() - t_debut
@@ -50588,12 +51595,72 @@ __JS_TRADUCTION__
         ligne_smtp.addWidget(QLabel("Port :"))
         ligne_smtp.addWidget(champ_port_smtp)
 
+        # Type de compte IMAP / POP3 (21/11/2026, demandé). En POP3, le champ
+        # « Serveur IMAP » devient « Serveur POP3 » et le réglage « Copie sur
+        # le serveur » apparaît (même choix que Foxmail).
+        combo_protocole = QComboBox()
+        combo_protocole.addItems(["IMAP (recommandé)", "POP3"])
+        combo_protocole.setFixedWidth(180)
+        lbl_serveur_entrant = QLabel("Serveur IMAP :")
+        # Deux choix seulement (21/11/2026, demandé) : Indéfiniment, ou un
+        # nombre de jours au choix (0 = effacé du serveur dès la réception).
+        from PySide6.QtWidgets import QSpinBox
+        combo_copie_serveur = QComboBox()
+        combo_copie_serveur.addItem("Indéfiniment", -1)
+        combo_copie_serveur.addItem("Nombre de jours", 1)
+        combo_copie_serveur.setFixedWidth(180)
+        spin_jours_copie = QSpinBox()
+        spin_jours_copie.setRange(0, JOURS_COPIE_SERVEUR_MAX)
+        spin_jours_copie.setValue(JOURS_COPIE_SERVEUR_DEFAUT)
+        # Le chiffre seul (21/11/2026, demandé) : « Nombre de jours » suffit.
+        spin_jours_copie.setToolTip("0 = effacé du serveur dès la réception")
+        spin_jours_copie.setFixedWidth(80)
+        spin_jours_copie.setEnabled(False)
+        combo_copie_serveur.currentIndexChanged.connect(
+            lambda i: spin_jours_copie.setEnabled(i == 1))
+
+        def _regler_copie_serveur(jours):
+            try:
+                jours = int(jours)
+            except (TypeError, ValueError):
+                jours = -1
+            if jours >= 0:
+                spin_jours_copie.setValue(min(jours, JOURS_COPIE_SERVEUR_MAX))
+                combo_copie_serveur.setCurrentIndex(1)
+            else:
+                spin_jours_copie.setValue(JOURS_COPIE_SERVEUR_DEFAUT)
+                combo_copie_serveur.setCurrentIndex(0)
+            spin_jours_copie.setEnabled(jours >= 0)
+
+        def _jours_copie_serveur():
+            return spin_jours_copie.value() if combo_copie_serveur.currentIndex() == 1 else -1
+
+        widget_copie_serveur = QWidget()
+        ligne_copie_serveur = QVBoxLayout(widget_copie_serveur)
+        ligne_copie_serveur.setContentsMargins(0, 0, 0, 0)
+        ligne_choix_copie = QHBoxLayout()
+        ligne_choix_copie.addWidget(QLabel("Après réception, garder une copie sur le serveur :"))
+        ligne_choix_copie.addWidget(combo_copie_serveur)
+        ligne_choix_copie.addWidget(spin_jours_copie)
+        ligne_choix_copie.addStretch(1)
+        ligne_copie_serveur.addLayout(ligne_choix_copie)
+        lbl_note_pop3 = QLabel(
+            "POP3 : les mails sont téléchargés sur cet ordinateur. Vos dossiers (Envoyés, "
+            "Corbeille, classements…) n'existent qu'ici : ils ne se voient ni sur le webmail "
+            "ni sur le téléphone. Choisissez IMAP si le fournisseur le propose.")
+        lbl_note_pop3.setWordWrap(True)
+        lbl_note_pop3.setStyleSheet("color: #e0c080;")
+        ligne_copie_serveur.addWidget(lbl_note_pop3)
+        widget_copie_serveur.setVisible(False)
+
         form.addRow("Nom :", champ_nom)
         form.addRow("Adresse email :", champ_adresse)
         form.addRow("Mot de passe :", champ_mdp)
         form.addRow("", ligne_ms)
-        form.addRow("Serveur IMAP :", ligne_imap)
+        form.addRow("Type de compte :", combo_protocole)
+        form.addRow(lbl_serveur_entrant, ligne_imap)
         form.addRow("Serveur SMTP :", ligne_smtp)
+        form.addRow(widget_copie_serveur)
         layout.addWidget(form_widget)
 
         # Paramètres prédéfinis par fournisseur
@@ -50675,21 +51742,75 @@ __JS_TRADUCTION__
             },
         }
 
+        # Serveurs POP3 (21/11/2026), SSL direct 995 partout. Pas de POP3
+        # chez Outlook / Hotmail (connexion Microsoft obligatoire, gérée en
+        # Graph) ni chez iCloud (Apple ne propose que l'IMAP).
+        PRESETS_POP3 = {
+            "o2switch": "", "Free": "pop.free.fr", "Orange": "pop.orange.fr",
+            "Gmail": "pop.gmail.com", "Yahoo": "pop.mail.yahoo.com", "SFR": "pop.sfr.fr",
+            "Laposte.net": "pop.laposte.net", "GMX": "pop.gmx.com", "Caramail": "pop.gmx.com",
+            "Infomaniak (ik.me)": "mail.infomaniak.com",
+        }
+        SANS_POP3 = ("Outlook / Hotmail", "iCloud")
+
+        def _est_pop3():
+            return combo_protocole.currentText() == "POP3"
+
+        def _remplir_serveur_entrant(fournisseur, garder_saisie=False):
+            """Serveur de réception selon le type de compte (IMAP ou POP3).
+            garder_saisie : changement de type seulement — un nom de serveur
+            sans préréglage (o2switch, Autre) déjà saisi n'est pas effacé."""
+            p = PRESETS.get(fournisseur)
+            if _est_pop3():
+                if fournisseur in PRESETS_POP3:
+                    if PRESETS_POP3[fournisseur] or not garder_saisie:
+                        champ_imap.setText(PRESETS_POP3[fournisseur])
+                    champ_port_imap.setText("995")
+                elif fournisseur == "Autre (manuel)" and champ_port_imap.text().strip() in ("", "993"):
+                    champ_port_imap.setText("995")
+            elif p:
+                imap_h = p["imap_host"] if p["imap_host"] != "127.0.0.1" else ""
+                if imap_h or not garder_saisie:
+                    champ_imap.setText(imap_h)
+                champ_port_imap.setText(str(p["imap_port"]))
+            elif champ_port_imap.text().strip() == "995":
+                champ_port_imap.setText("993")
+
+        def _maj_type_compte(*_a):
+            fournisseur = combo_fournisseur.currentText()
+            sans_pop3 = fournisseur in SANS_POP3
+            if sans_pop3 and _est_pop3():
+                combo_protocole.blockSignals(True)
+                combo_protocole.setCurrentIndex(0)
+                combo_protocole.blockSignals(False)
+            combo_protocole.setEnabled(not sans_pop3)
+            combo_protocole.setToolTip(f"{fournisseur} ne propose pas le POP3." if sans_pop3 else "")
+            lbl_serveur_entrant.setText("Serveur POP3 :" if _est_pop3() else "Serveur IMAP :")
+            champ_port_imap.setPlaceholderText("995" if _est_pop3() else "993")
+            widget_copie_serveur.setVisible(_est_pop3())
+
         def appliquer_preset(fournisseur):
+            _maj_type_compte()
             p = PRESETS.get(fournisseur)
             if p:
-                imap_h = p["imap_host"] if p["imap_host"] != "127.0.0.1" else ""
-                champ_imap.setText(imap_h)
-                champ_port_imap.setText(str(p["imap_port"]))
+                _remplir_serveur_entrant(fournisseur)
                 smtp_h = p["smtp_host"] if p["smtp_host"] != "127.0.0.1" else ""
                 champ_smtp.setText(smtp_h)
                 champ_port_smtp.setText(str(p["smtp_port"]))
             else:
                 champ_imap.clear(); champ_port_imap.clear()
                 champ_smtp.clear(); champ_port_smtp.clear()
+                _remplir_serveur_entrant(fournisseur)
+
+        def _changer_type_compte(_index):
+            _maj_type_compte()
+            # o2switch / Autre : le nom du serveur saisi reste (même serveur
+            # pour l'IMAP et le POP3 chez o2switch), seul le port change
+            _remplir_serveur_entrant(combo_fournisseur.currentText(), garder_saisie=True)
 
         combo_fournisseur.currentTextChanged.connect(appliquer_preset)
         combo_fournisseur.currentTextChanged.connect(lambda _t: _maj_visibilite_oauth())
+        combo_protocole.currentIndexChanged.connect(_changer_type_compte)
         appliquer_preset(combo_fournisseur.currentText())
         _maj_visibilite_oauth()
 
@@ -50703,11 +51824,16 @@ __JS_TRADUCTION__
                 # remplir (ex. maken.o2switch.net -> « Autre (manuel) » ->
                 # champs vides -> compte enregistré sans serveur par Modifier)
                 combo_fournisseur.blockSignals(True)
+                combo_protocole.blockSignals(True)
+                est_pop3 = est_compte_pop3(c)
+                combo_protocole.setCurrentIndex(1 if est_pop3 else 0)
+                combo_protocole.blockSignals(False)
+                _regler_copie_serveur(c.get("pop3_garder_jours", -1))
                 ssl = c.get("ssl_direct", False)
                 if not ssl:
                     combo_fournisseur.setCurrentText("Autre (manuel)")  # ancien stunnel (Windows 7)
                 else:
-                    imap_h = c.get("imap_host", "")
+                    imap_h = c.get("pop3_host" if est_pop3 else "imap_host", "")
                     if "o2switch" in imap_h:
                         combo_fournisseur.setCurrentText("o2switch")
                     elif "free" in imap_h:
@@ -50739,8 +51865,13 @@ __JS_TRADUCTION__
                 champ_adresse.setText(c.get("adresse", ""))
                 champ_mdp.setText(c.get("mdp", ""))
                 masquer_mot_de_passe(champ_mdp)  # autre compte : remasqué
-                champ_imap.setText(c.get("imap_host", ""))
-                champ_port_imap.setText(str(c.get("imap_port", 993)))
+                if est_pop3:
+                    champ_imap.setText(c.get("pop3_host", ""))
+                    champ_port_imap.setText(str(c.get("pop3_port", 995)))
+                else:
+                    champ_imap.setText(c.get("imap_host", ""))
+                    champ_port_imap.setText(str(c.get("imap_port", 993)))
+                _maj_type_compte()
                 champ_smtp.setText(c.get("smtp_host", ""))
                 champ_port_smtp.setText(str(c.get("smtp_port", 465)))
                 _maj_conseil_fournisseur(combo_fournisseur.currentText())
@@ -50769,6 +51900,8 @@ __JS_TRADUCTION__
             champ_port_imap.clear()
             champ_smtp.clear()
             champ_port_smtp.clear()
+            combo_protocole.setCurrentIndex(0)
+            _regler_copie_serveur(-1)
             combo_fournisseur.setCurrentIndex(0)  # réapplique le preset o2switch par défaut
             _maj_visibilite_oauth()
 
@@ -50827,7 +51960,7 @@ __JS_TRADUCTION__
         btn_export_android = QPushButton("Synchro vers COURRIER ADRIEN ANDROID (comptes, spams, sons, macros, RSS to Email, modèles, TODO)")
         btn_export_android.setStyleSheet(STYLE_BOUTON)
         btn_export_android.clicked.connect(lambda: self._exporter_comptes_android(dlg))
-        layout.addWidget(btn_export_android)
+        # (21/11/2026, demandé : ajouté plus bas, sous la ligne d'import)
         # Import depuis d'autres logiciels (02/11/2026, demandé)
         ligne_import = QHBoxLayout()
         ligne_import.setSpacing(6)
@@ -50838,6 +51971,7 @@ __JS_TRADUCTION__
             btn_import.clicked.connect(lambda _c=False, l=logiciel: self._importer_comptes(dlg, l, _ajouter_comptes_importes))
             ligne_import.addWidget(btn_import)
         layout.addLayout(ligne_import)
+        layout.addWidget(btn_export_android)
 
         # Retour visuel après Ajouter/Modifier/Supprimer (15/08/2026,
         # remonté par l'utilisateur — jusqu'ici ces 3 actions se faisaient
@@ -50891,6 +52025,23 @@ __JS_TRADUCTION__
             # « Autre (manuel) » : le port 587 exige STARTTLS (16/10/2026 :
             # jusqu'ici seul le 465 fonctionnait en saisie manuelle)
             starttls = p.get("smtp_starttls", smtp_p == 587)
+            if _est_pop3() and not est_oauth:
+                pop_h = champ_imap.text().strip() or PRESETS_POP3.get(fournisseur, "")
+                if not pop_h:
+                    return None
+                try: pop_p = int(champ_port_imap.text().strip())
+                except ValueError: pop_p = 995
+                return {
+                    "nom": nom, "adresse": adresse, "mdp": mdp,
+                    "imap_host": "", "imap_port": 993,
+                    "pop3_host": pop_h, "pop3_port": pop_p,
+                    "pop3_garder_jours": _jours_copie_serveur(),
+                    "smtp_host": smtp_h, "smtp_port": smtp_p,
+                    "ssl_direct": True,
+                    "smtp_starttls": starttls,
+                    "auth_oauth2": False,
+                    "protocole": "pop3",
+                }
             return {
                 "nom": nom, "adresse": adresse, "mdp": mdp,
                 "imap_host": imap_h, "imap_port": imap_p,
@@ -50908,7 +52059,7 @@ __JS_TRADUCTION__
                 if combo_fournisseur.currentText() == "Outlook / Hotmail":
                     lbl_statut_comptes.setText("Nom et adresse obligatoires, et connexion Microsoft Graph requise (bouton ci-dessus).")
                 else:
-                    lbl_statut_comptes.setText("Nom, adresse, mot de passe et serveurs IMAP / SMTP sont obligatoires.")
+                    lbl_statut_comptes.setText("Nom, adresse, mot de passe et serveurs de réception / SMTP sont obligatoires.")
                 return
             # Protection contre les doublons
             if any(x["adresse"].lower() == c["adresse"].lower() for x in COMPTES):
@@ -50924,6 +52075,7 @@ __JS_TRADUCTION__
                     factice_actif |= ADRESSE_COMPTE_FACTICE == self.compte_actif.get("adresse", "")
                     COMPTES.pop(i)
                     liste.takeItem(i)
+            preparer_cache_pour_type(c)
             COMPTES.append(c)
             sauvegarder_comptes(COMPTES)
             liste.addItem(QListWidgetItem(f"  {c['nom']}  —  {c['adresse']}"))
@@ -50945,6 +52097,8 @@ __JS_TRADUCTION__
                     if COMPTES[i].get("adresse") == ADRESSE_COMPTE_FACTICE:
                         factice_actif |= ADRESSE_COMPTE_FACTICE == self.compte_actif.get("adresse", "")
                         COMPTES.pop(i)
+                for nouveau in nouveaux:
+                    preparer_cache_pour_type(nouveau)
                 COMPTES.extend(nouveaux)
                 sauvegarder_comptes(COMPTES)
                 _remplir_liste()
@@ -50970,7 +52124,14 @@ __JS_TRADUCTION__
                 if combo_fournisseur.currentText() == "Outlook / Hotmail":
                     lbl_statut_comptes.setText("Nom et adresse obligatoires, et connexion Microsoft Graph requise (bouton ci-dessus).")
                 else:
-                    lbl_statut_comptes.setText("Nom, adresse, mot de passe et serveurs IMAP / SMTP sont obligatoires.")
+                    lbl_statut_comptes.setText("Nom, adresse, mot de passe et serveurs de réception / SMTP sont obligatoires.")
+                return
+            # Changement de type IMAP <-> POP3 : le cache de l'ancien type ne
+            # correspond plus (autres UID) — refusé, il faut recréer le compte.
+            if est_compte_pop3(COMPTES[row]) != est_compte_pop3(c):
+                lbl_statut_comptes.setStyleSheet("color: #e08080; font-family: Verdana; font-size: 11px;")
+                lbl_statut_comptes.setText("Le type de compte (IMAP / POP3) ne se change pas : "
+                                           "supprimez le compte puis ajoutez-le à nouveau.")
                 return
             COMPTES[row] = c
             sauvegarder_comptes(COMPTES)
@@ -51135,7 +52296,8 @@ __JS_TRADUCTION__
         # style ; fenêtre comprimée, le bas des lettres était coupé. Seule la
         # liste des comptes (avec ascenseur) absorbe désormais le manque de place.
         for champ in (combo_fournisseur, champ_nom, champ_adresse, champ_mdp,
-                      champ_imap, champ_port_imap, champ_smtp, champ_port_smtp):
+                      champ_imap, champ_port_imap, champ_smtp, champ_port_smtp,
+                      combo_protocole, combo_copie_serveur, spin_jours_copie):
             champ.ensurePolished()
             champ.setMinimumHeight(champ.sizeHint().height())
         dlg.show()
@@ -51231,7 +52393,7 @@ __JS_TRADUCTION__
                     continue
             elif not compte["mdp"]:
                 conseil = ("\nGmail demande un mot de passe d'application, voir le mode d'emploi."
-                           if "gmail" in compte["imap_host"].lower() else "")
+                           if "gmail" in (compte.get("imap_host") or compte.get("pop3_host") or "").lower() else "")
                 saisie, ok = QInputDialog.getText(
                     parent, "Mot de passe",
                     f"Mot de passe de {compte['adresse']} :{conseil}",
@@ -51258,6 +52420,7 @@ __JS_TRADUCTION__
         "macros" / "sons" / "modeles" / "spam" / "rss" depuis les boutons de ces fenêtres (le reste décoché)."""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
                                        QRadioButton, QLineEdit, QScrollArea, QWidget)
+        # Comptes POP3 copiés aussi depuis le 21/11/2026 (l'appli Android sait les relever)
         comptes = [c for c in COMPTES if not est_compte_factice(c)]
         # 18/11/2026 (demandé) : synchro de tout, sauf les comptes (et leurs mots de passe), copiés.
         # Avant la toute première copie, le téléphone n'a pas le secret de la synchro : tout est copié.
