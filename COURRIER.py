@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-21 22h42"
+VERSION_BUILD = "2026-11-22 00h54"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -11615,6 +11615,131 @@ def exporter_excel_carnet(chemin, carnet):
         feuille.auto_filter.ref = feuille.dimensions
     classeur.save(chemin)
     return len(contacts), len(onglets)
+
+
+# --- PDF : moteur pypdfium2 (22/11/2026) ---
+# Remplace PyMuPDF, sous licence AGPL v3 : incompatible avec la PolyForm
+# Noncommercial de COURRIER ADRIEN dès qu'il est embarqué dans le .exe.
+# pypdfium2 = moteur PDF de Chrome (PDFium), licences Apache 2.0 / BSD.
+# PDFium n'est pas fait pour être appelé depuis deux fils à la fois : tout
+# passe par VERROU_PDF (l'aperçu des PJ ajoutées tourne dans un QThread).
+# Résultats vérifiés contre PyMuPDF sur le mode d'emploi, pages tournées
+# (90/180/270) et page rognée comprises : mêmes tailles, mêmes rendus,
+# mêmes occurrences en recherche.
+VERROU_PDF = _threading.RLock()
+
+
+def pdf_ouvrir(chemin):
+    """Ouvre un PDF ; lève une exception s'il est illisible ou protégé."""
+    import pypdfium2 as pdfium
+    with VERROU_PDF:
+        return pdfium.PdfDocument(chemin)
+
+
+def pdf_fermer(doc):
+    if doc is None:
+        return
+    with VERROU_PDF:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+
+def pdf_taille_page(doc, i):
+    """(largeur, hauteur) en points de la page telle qu'affichée (rotation
+    et rognage compris)."""
+    with VERROU_PDF:
+        page = doc[i]
+        try:
+            return page.get_size()
+        finally:
+            page.close()
+
+
+def pdf_page_png(doc, i, zoom):
+    """Page i rendue en PNG (octets), zoom 1 = 72 dpi, fond blanc."""
+    import io
+    with VERROU_PDF:
+        page = doc[i]
+        try:
+            bitmap = page.render(scale=zoom)
+            try:
+                image = bitmap.to_pil().copy()
+            finally:
+                bitmap.close()
+        finally:
+            page.close()
+    tampon = io.BytesIO()
+    image.save(tampon, format="PNG")
+    return tampon.getvalue()
+
+
+def pdf_chercher(doc, texte):
+    """Cherche le texte (sans tenir compte des majuscules) dans toutes les
+    pages : [(page, x, y, largeur, hauteur)] en fractions de la page
+    affichée, un résultat par ligne d'occurrence."""
+    import ctypes
+    import pypdfium2.raw as pdfium_c
+    resultats = []
+    if not texte:
+        return resultats
+    ECHELLE = 10  # coordonnées écran entières : 1/10 de point de précision
+    with VERROU_PDF:
+        for i in range(len(doc)):
+            page = doc[i]
+            textpage = cherche = None
+            try:
+                pw, ph = page.get_size()
+                sx, sy = max(1, round(pw * ECHELLE)), max(1, round(ph * ECHELLE))
+                dx, dy = ctypes.c_int(), ctypes.c_int()
+
+                def ecran(x, y):
+                    # Coordonnées PDF (origine en bas) → page affichée
+                    # (origine en haut, rotation et rognage appliqués)
+                    pdfium_c.FPDF_PageToDevice(page.raw, 0, 0, sx, sy, 0, x, y,
+                                               ctypes.byref(dx), ctypes.byref(dy))
+                    return dx.value, dy.value
+
+                textpage = page.get_textpage()
+                cherche = textpage.search(texte, match_case=False, match_whole_word=False)
+                while True:
+                    occ = cherche.get_next()
+                    if not occ:
+                        break
+                    debut, nb = occ
+                    # Un cadre par morceau de texte : un mot aux lettres
+                    # espacées en donne un par lettre. Ceux d'une même ligne
+                    # sont réunis, pour un seul résultat par ligne.
+                    lignes = []
+                    for j in range(textpage.count_rects(debut, nb)):
+                        g, b, d, h = textpage.get_rect(j)
+                        x1, y1 = ecran(g, b)
+                        x2, y2 = ecran(d, h)
+                        x0, y0 = min(x1, x2), min(y1, y2)
+                        x3, y3 = max(x1, x2), max(y1, y2)
+                        if x3 <= 0 or y3 <= 0 or x0 >= sx or y0 >= sy:
+                            continue  # hors de la partie visible (page rognée)
+                        if lignes:
+                            a0, b0, a3, b3 = lignes[-1]
+                            commun = min(b3, y3) - max(b0, y0)
+                            if commun > 0.5 * min(b3 - b0, y3 - y0):
+                                lignes[-1] = (min(a0, x0), min(b0, y0), max(a3, x3), max(b3, y3))
+                                continue
+                        lignes.append((x0, y0, x3, y3))
+                    for x0, y0, x3, y3 in lignes:
+                        resultats.append((i, x0 / sx, y0 / sy, (x3 - x0) / sx, (y3 - y0) / sy))
+            except Exception:
+                import traceback as _tb_pdf
+                print(f"[PDF-RECH] page {i} : erreur\n{_tb_pdf.format_exc()}")
+            finally:
+                for objet in (cherche, textpage, page):
+                    if objet is not None:
+                        try:
+                            objet.close()
+                        except Exception:
+                            pass
+    return resultats
 
 
 def texte_cellule_excel(v):
@@ -30576,16 +30701,20 @@ class FenetreRedaction(QDialog):
             def run(self):
                 try:
                     if ext == ".pdf":
-                        import fitz, base64
+                        import base64
                         morceaux = []
-                        with fitz.open(chemin) as doc:
-                            for page in list(doc)[:pages_max]:
-                                png = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)).tobytes("png")
+                        doc = pdf_ouvrir(chemin)
+                        try:
+                            nb_pages = len(doc)
+                            for i in range(min(nb_pages, pages_max)):
+                                png = pdf_page_png(doc, i, 1.5)
                                 morceaux.append('<img class="page" src="data:image/png;base64,'
                                                 + base64.b64encode(png).decode("ascii") + '">')
-                            if doc.page_count > pages_max:
-                                morceaux.append(f"<p class='msg'>… {doc.page_count - pages_max} page(s) de plus, "
+                            if nb_pages > pages_max:
+                                morceaux.append(f"<p class='msg'>… {nb_pages - pages_max} page(s) de plus, "
                                                 "non affichées (Ouvrir avec Windows pour tout voir)</p>")
+                        finally:
+                            pdf_fermer(doc)
                         self.termine.emit("".join(morceaux), "")
                         return
                     if cm is None:
@@ -33651,7 +33780,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 21/11/2026 22h42")
+        self.setWindowTitle("COURRIER ADRIEN — 22/11/2026 00h54")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -39150,7 +39279,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 21/11/2026 à 22h42")
+        lbl_version = QLabel("Version du 22/11/2026 à 00h54")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -45872,10 +46001,7 @@ if (typeof module === 'object') {
             # comme pour le PDF/Word avant leurs correctifs respectifs).
             doc = getattr(self, '_pdf_doc', None)
             if doc:
-                try:
-                    doc.close()
-                except Exception:
-                    pass
+                pdf_fermer(doc)
                 self._pdf_doc = None
             self._mode_doc = False
             self._mode_image = True
@@ -46457,10 +46583,10 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 
     PDFXCHANGE_EXE = r"C:\Program Files\Tracker Software\PDF Viewer\PDFXCview.exe"
 
-    # --- Prévisualisation PDF via PyMuPDF ---
+    # --- Prévisualisation PDF via pypdfium2 (PyMuPDF jusqu'au 22/11/2026) ---
 
     def _liberer_pdfxchange(self):
-        """Libère la visionneuse PDF PyMuPDF et nettoie le fichier temporaire
+        """Libère la visionneuse PDF et nettoie le fichier temporaire
         associé (sinon chaque PDF prévisualisé reste sur le disque pour
         toujours)."""
         # Appelée à chaque changement de mail et par CORPS : arrête aussi
@@ -46468,10 +46594,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         self._liberer_video()
         doc = getattr(self, '_pdf_doc', None)
         if doc:
-            try:
-                doc.close()
-            except Exception:
-                pass
+            pdf_fermer(doc)
             self._pdf_doc = None
         chemin = getattr(self, '_pdf_chemin_temp', None)
         if chemin and os.path.exists(chemin):
@@ -46513,9 +46636,9 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
                 self._pdf_nav.hide()
 
     def _embarquer_pdfxchange(self, chemin_pdf):
-        """Affiche un PDF dans le panneau via PyMuPDF — rendu page par page."""
+        """Affiche un PDF dans le panneau via pypdfium2 — rendu page par page."""
         try:
-            import fitz
+            import pypdfium2  # noqa: F401
         except ImportError:
             os.startfile(chemin_pdf)
             return
@@ -46524,7 +46647,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         self._liberer_pdfxchange()
 
         try:
-            self._pdf_doc = fitz.open(chemin_pdf)
+            self._pdf_doc = pdf_ouvrir(chemin_pdf)
             self._pdf_chemin_temp = chemin_pdf
         except Exception as e:
             print(f"[PDF] Erreur ouverture : {e}")
@@ -46702,7 +46825,7 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
     # Word/Excel/ODT/PowerPoint sont convertis en HTML : la recherche du
     # moteur web (findText) suffit et surligne elle-même. Le PDF est rendu
     # en images (voir _afficher_page_pdf) : le texte est cherché avec
-    # PyMuPDF et les résultats sont surlignés par des cadres posés sur les
+    # pypdfium2 (pdf_chercher) et les résultats sont surlignés par des cadres posés sur les
     # images (positions en fractions de page, indépendantes du zoom).
 
     _JS_SURLIGNER_PDF = r'''
@@ -46848,20 +46971,12 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
     def _pdf_rechercher(self, texte):
         """Cherche le texte (sans tenir compte des majuscules) dans toutes
         les pages ; résultats en fractions de la page affichée."""
-        import fitz
         self._pdf_rech = []
         doc = getattr(self, '_pdf_doc', None)
         if not doc:
             return
-        for i, page in enumerate(doc):
-            try:
-                rects = page.search_for(texte)
-            except Exception:
-                continue
-            pw, ph = page.rect.width, page.rect.height
-            for r in rects:
-                r = fitz.Rect(r * page.rotation_matrix).normalize()
-                self._pdf_rech.append((i, r.x0 / pw, r.y0 / ph, r.width / pw, r.height / ph))
+        self._pdf_rech = pdf_chercher(doc, texte)
+        print(f"[PDF-RECH] « {texte} » : {len(self._pdf_rech)} résultat(s) sur {len(doc)} page(s)")
 
     def _pdf_surligner(self, defiler=False):
         import json as _json
@@ -46895,19 +47010,17 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         (proportionnelle à l'ancienne), sauter d'abord sur le DÉBUT de
         cette page produirait un très bref à-coup visible avant cette
         restauration si l'utilisateur a défilé librement depuis."""
-        import fitz, base64, json as _json2
+        import base64, json as _json2
         doc = getattr(self, '_pdf_doc', None)
         if not doc:
             return
         nb_pages = len(doc)
         p = getattr(self, '_pdf_page', 0)
         zoom = self._pdf_zoom
-        mat = fitz.Matrix(zoom, zoom)
 
         morceaux_html = []
         for i in range(nb_pages):
-            pix = doc[i].get_pixmap(matrix=mat, alpha=False)
-            b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+            b64 = base64.b64encode(pdf_page_png(doc, i, zoom)).decode("ascii")
             morceaux_html.append(
                 f'<img data-page="{i}" src="data:image/png;base64,{b64}" '
                 f'style="display:block; box-shadow:0 2px 8px #000; '
@@ -47362,10 +47475,10 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         # pages sont rendues au même zoom en une seule fois (voir
         # _afficher_page_pdf), donc une seule largeur de référence suffit
         # (la quasi-totalité des PDF ont des pages de taille uniforme).
-        rect = doc[0].rect
+        largeur_page, _hauteur_page = pdf_taille_page(doc, 0)
         # Zoom pour tenir en largeur uniquement — on scrolle verticalement
         # si nécessaire (un PDF ajusté en hauteur devient illisible en largeur)
-        zoom_w = w_panel / rect.width
+        zoom_w = w_panel / largeur_page
         self._pdf_appliquer_zoom(zoom_w * 0.97)  # petite marge
         QTimer.singleShot(50, self._forcer_cef_sous_barre)
 
@@ -47592,13 +47705,10 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         import tempfile, json as _json
         print(f"[PREV-DOC] début conversion {nom} uid_au_clic={self._item_selectionne}")
 
-        # Libérer le PDF PyMuPDF si actif
+        # Libérer le PDF affiché si actif
         doc = getattr(self, '_pdf_doc', None)
         if doc:
-            try:
-                doc.close()
-            except Exception:
-                pass
+            pdf_fermer(doc)
             self._pdf_doc = None
         self._doc_zoom = 1.0
 

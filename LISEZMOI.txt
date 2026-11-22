@@ -97,3 +97,5 @@ LICENCE
   Logiciels tiers : le bouton TEL utilise scrcpy et ses composants (FFmpeg,
   SDL, libusb, adb), redistribues sous leurs propres licences : voir
   _internal\ressources\scrcpy\LICENCES_TIERS.txt.
+  L'affichage des PDF utilise pypdfium2 et PDFium (licences Apache 2.0 et
+  BSD) : voir _internal\pypdfium2-*.dist-info\licenses.
