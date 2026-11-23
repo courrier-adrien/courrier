@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-22 00h54"
+VERSION_BUILD = "2026-11-23 14h51"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -5621,6 +5621,44 @@ class AnalyseurPageRSS(QThread):
             self.resultat.emit({"statut": "erreur", "url": adresse, "erreur": f"{type(e).__name__}: {e}"})
 
 
+def identifiant_article_rss(url_flux, guid):
+    """Message-ID fixe d'un article RSS (22/11/2026, demandé : le téléphone
+    vérifie aussi les flux du PC, la nuit). Même calcul exact dans
+    COURRIER ADRIEN ANDROID (MoteurRss.identifiant) : le même article a le même
+    Message-ID des deux côtés, ce qui permet de voir qu'il est déjà arrivé."""
+    import hashlib
+    h = hashlib.sha256(f"{url_flux}\n{guid}".encode("utf-8")).hexdigest()[:40]
+    return f"<rss-{h}@rss.local>"
+
+# Dossiers où chercher un article déjà déposé, par adresse de compte :
+# réception, corbeille, spam (lu puis supprimé entre-temps = déjà arrivé).
+_DOSSIERS_DOUBLONS_RSS = {}
+
+def article_rss_deja_depose(conn, adresse, message_id):
+    """True si un email portant [message_id] est déjà sur le serveur (réception,
+    corbeille ou spam). Une recherche côté serveur par dossier, faite seulement
+    pour les nouveaux articles : rien n'est téléchargé."""
+    dossiers = _DOSSIERS_DOUBLONS_RSS.get(adresse)
+    if dossiers is None:
+        dossiers = ["INBOX"]
+        for noms in (NOMS_CORBEILLE_CANDIDATS, NOMS_SPAM_CANDIDATS):
+            d = _chercher_dossier_par_noms(conn, noms)
+            if d and d not in dossiers:
+                dossiers.append(d)
+        _DOSSIERS_DOUBLONS_RSS[adresse] = dossiers
+    for d in dossiers:
+        try:
+            st, _ = conn.select(f'"{d}"', readonly=True)
+            if st != "OK":
+                continue
+            st, donnees = conn.search(None, "HEADER", "Message-ID", f'"{message_id}"')
+            if st == "OK" and donnees and donnees[0] and donnees[0].split():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 class VerificateurRSS(QThread):
     """Vérifie tous les flux RSS/Atom abonnés en une passe et dépose chaque
     nouvel article directement dans l'INBOX du compte associé, via IMAP
@@ -5630,6 +5668,8 @@ class VerificateurRSS(QThread):
     passé du flux dans la boîte de réception — seuls les articles publiés
     APRÈS l'abonnement sont livrés, comme on s'y attend d'un abonnement."""
     resultat = Signal(list)  # adresses des comptes ayant reçu du nouveau contenu
+    # Avant chaque dépôt, regarder si le téléphone a déjà déposé l'article (22/11/2026)
+    VERIFIER_DOUBLONS = True
 
     def __init__(self, forcer_programmes=False):
         super().__init__()
@@ -5814,7 +5854,9 @@ class VerificateurRSS(QThread):
         msg["From"] = f"{nom_flux} <{expediteur_safe}@rss.local>"
         msg["To"] = compte["adresse"]
         msg["Subject"] = titre
-        msg["Message-ID"] = make_msgid(domain="rss.local")
+        # Message-ID fixe (22/11/2026) : le même que celui du téléphone pour cet article
+        identifiant = identifiant_article_rss(flux.get("url", ""), article.get("guid") or lien or titre)
+        msg["Message-ID"] = identifiant
 
         date_article = _parser_date_flux(article.get("date_brute", ""))
         msg["Date"] = formatdate(
@@ -5914,6 +5956,10 @@ class VerificateurRSS(QThread):
         conn = connexion_imap(compte)
         try:
             conn = _authentifier_connexion_imap(conn, compte)
+            # déjà déposé par le téléphone (la nuit, PC éteint) : on ne le redépose pas
+            if self.VERIFIER_DOUBLONS and article_rss_deja_depose(conn, compte["adresse"], identifiant):
+                print(f"[RSS] Déjà arrivé (déposé par le téléphone) : '{titre}'")
+                return
             conn.append('"INBOX"', "", imaplib.Time2Internaldate(_time_rss.time()), msg.as_bytes())
         finally:
             fermer_connexion_imap(conn)
@@ -5933,6 +5979,8 @@ class RecuperateurAnciensArticles(VerificateurRSS):
     # Avancement (28/09/2026, demandé — aucune indication pendant une longue
     # récupération) : étape en cours, articles déposés, total (0 = indéterminé).
     progression = Signal(str, int, int)
+    # « Récupérer d'anciens articles » : demandé exprès, donc déposé même s'il est déjà là
+    VERIFIER_DOUBLONS = False
 
     def __init__(self, id_flux, nombre):
         super().__init__()
@@ -33780,7 +33828,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 22/11/2026 00h54")
+        self.setWindowTitle("COURRIER ADRIEN — 23/11/2026 14h51")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -39279,7 +39327,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 22/11/2026 à 00h54")
+        lbl_version = QLabel("Version du 23/11/2026 à 14h51")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -51297,7 +51345,14 @@ __JS_TRADUCTION__
         btn_tri_alpha = QPushButton(" A → Z ")
         ligne_tri.addWidget(btn_tri_date)
         ligne_tri.addWidget(btn_tri_alpha)
-        ligne_tri.addStretch(1)
+        # Recherche (23/11/2026, demandé) : filtre la liste au fil de la frappe (adresse ou domaine)
+        ligne_tri.addSpacing(12)
+        champ_recherche = QLineEdit()
+        champ_recherche.setPlaceholderText("Rechercher...")
+        champ_recherche.setClearButtonEnabled(True)
+        champ_recherche.setMinimumWidth(160)
+        champ_recherche.setMinimumHeight(champ_recherche.sizeHint().height())   # pas rogné sur petit écran
+        ligne_tri.addWidget(champ_recherche, 1)
         layout.addLayout(ligne_tri)
         if not hasattr(self, "_tri_spam"):
             self._tri_spam = "date"
@@ -51316,6 +51371,10 @@ __JS_TRADUCTION__
             liste_widget.clear()
             dates = charger_dates_spam()
             adresses = sorted(charger_expediteurs_spam())
+            total = len(adresses)
+            cherche = champ_recherche.text().strip().lower()
+            if cherche:
+                adresses = [a for a in adresses if cherche in a.lower()]
             if self._tri_spam == "date":
                 # les plus récentes en haut ; celles d'avant le 15/11/2026 (sans date) à la fin, par ordre alphabétique
                 adresses.sort(key=lambda a: -dates.get(a, 0))
@@ -51326,7 +51385,10 @@ __JS_TRADUCTION__
                 item = QListWidgetItem(f"{entree}     —  {quand}")
                 item.setData(Qt.ItemDataRole.UserRole, entree)   # l'adresse seule, pour NON SPAM
                 liste_widget.addItem(item)
-            lbl_nb.setText(f"{liste_widget.count()} expéditeur(s) bloqué(s)")
+            if cherche:
+                lbl_nb.setText(f"{liste_widget.count()} trouvé(s) sur {total} expéditeur(s) bloqué(s)")
+            else:
+                lbl_nb.setText(f"{liste_widget.count()} expéditeur(s) bloqué(s)")
             for cle, b in (("date", btn_tri_date), ("alpha", btn_tri_alpha)):
                 b.setStyleSheet(STYLE_BOUTON + ("QPushButton { background-color: #DAA520; color: black; "
                                 "border-bottom-color: #8a6510; border-right-color: #8a6510; }" if cle == self._tri_spam else ""))
@@ -51335,6 +51397,7 @@ __JS_TRADUCTION__
             _recharger()
         btn_tri_date.clicked.connect(lambda: _trier("date"))
         btn_tri_alpha.clicked.connect(lambda: _trier("alpha"))
+        champ_recherche.textChanged.connect(lambda _t: _recharger())
         _recharger()
 
         ligne_ajout = QHBoxLayout()
