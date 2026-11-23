@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-23 14h51"
+VERSION_BUILD = "2026-11-23 20h21"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -5039,6 +5039,13 @@ def sauvegarder_abonnements_rss(donnees):
     except Exception as e:
         print(f"Erreur sauvegarde abonnements RSS : {e}")
 
+def flux_rss_actif(flux, donnees):
+    """23/11/2026 (demandé) : un flux peut être désactivé sans être supprimé,
+    seul (flux["inactif"]) ou avec tout son compte (donnees["comptes_inactifs"]).
+    Réglage propre à CE PC : la synchro téléphone n'envoie ni l'un ni l'autre
+    (pour_tel ne garde que ses champs) et garde les champs locaux du PC."""
+    return not flux.get("inactif") and flux.get("compte") not in donnees.get("comptes_inactifs", [])
+
 def _parser_date_flux(date_brute):
     """Essaie plusieurs formats de date (RSS RFC822, Atom ISO8601) — renvoie
     un datetime naïf en local, ou None si non reconnu (l'appelant utilise
@@ -5681,7 +5688,11 @@ class VerificateurRSS(QThread):
         donnees = charger_abonnements_rss()
         comptes_touches = set()
         modifie = False
+        ignores = set()   # flux désactivés (23/11/2026) : ni lus ni touchés
         for flux in donnees.get("flux", []):
+            if not flux_rss_actif(flux, donnees):
+                ignores.add(flux.get("id"))
+                continue
             try:
                 if self._verifier_un_flux(flux):
                     comptes_touches.add(flux.get("compte", ""))
@@ -5689,6 +5700,27 @@ class VerificateurRSS(QThread):
             except Exception as e:
                 print(f"[RSS] Erreur lors de la vérification de {flux.get('url','?')} : {e}")
         if modifie:
+            # Une case cochée ou décochée pendant la vérification ne doit pas
+            # être écrasée par la copie chargée au départ : on relit le
+            # fichier et on reprend son état d'activation ; les flux ignorés
+            # ici sont repris tels quels (une réactivation y a pu effacer
+            # leurs articles vus, voir DialogueRSS._changer_activation).
+            frais = charger_abonnements_rss()
+            frais_par_id = {f.get("id"): f for f in frais.get("flux", [])}
+            if "comptes_inactifs" in frais:
+                donnees["comptes_inactifs"] = frais["comptes_inactifs"]
+            else:
+                donnees.pop("comptes_inactifs", None)
+            for i, flux in enumerate(donnees.get("flux", [])):
+                f_frais = frais_par_id.get(flux.get("id"))
+                if f_frais is None:
+                    continue
+                if flux.get("id") in ignores:
+                    donnees["flux"][i] = f_frais
+                elif f_frais.get("inactif"):
+                    flux["inactif"] = True
+                else:
+                    flux.pop("inactif", None)
             sauvegarder_abonnements_rss(donnees)
         self.resultat.emit(list(comptes_touches))
 
@@ -23045,7 +23077,7 @@ class DialogueAbonnementsRSS(QDialog):
             QListWidget::item { padding: 4px 4px; }
         """
         self.liste_comptes.setStyleSheet(STYLE_SCROLLBAR + style_liste + style_item_comptes)
-        self.liste_comptes.setMaximumWidth(260)
+        self.liste_comptes.setMaximumWidth(300)   # 260 → 300 le 23/11/2026 : case à cocher + « désactivés »
         # Ascenseur superflu retiré (18/08/2026, demandé — peu de comptes,
         # la hauteur de fenêtre agrandie ci-dessus suffit largement à tous
         # les afficher d'un coup) : plutôt que de compter sur la place
@@ -23058,7 +23090,20 @@ class DialogueAbonnementsRSS(QDialog):
         # long au lieu d'ajouter un ascenseur, largement suffisant ici.
         self.liste_comptes.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.liste_comptes.currentItemChanged.connect(lambda *_: self._rafraichir_flux_compte())
+        # Cases à cocher (23/11/2026, demandé) : décocher un compte ou un flux
+        # le met en pause sur ce PC, sans le supprimer — voir flux_rss_actif.
+        self._chargement_listes_rss = False
+        self.liste_comptes.itemChanged.connect(self._sur_case_compte)
         colonne_comptes.addWidget(self.liste_comptes)
+        # Tout cocher / Tout décocher (23/11/2026, demandé) : tous les comptes d'un coup
+        ligne_cases_comptes = QHBoxLayout()
+        for texte, actif in (("  Tout cocher  ", True), ("  Tout décocher  ", False)):
+            b = QPushButton(texte)
+            b.setStyleSheet(STYLE_BOUTON)
+            b.clicked.connect(lambda _=False, a=actif: self._cocher_tous_comptes(a))
+            ligne_cases_comptes.addWidget(b)
+        ligne_cases_comptes.addStretch(1)
+        colonne_comptes.addLayout(ligne_cases_comptes)
         colonne_comptes.addStretch(1)
         ligne_colonnes.addLayout(colonne_comptes, 1)
 
@@ -23093,11 +23138,18 @@ class DialogueAbonnementsRSS(QDialog):
         self.btn_descendre.clicked.connect(lambda: self._deplacer_flux(1))
         self.btn_renommer.clicked.connect(self._renommer_flux)
         ligne_deplacement.addStretch(1)
+        # Tout cocher / Tout décocher (23/11/2026, demandé) : flux du compte affiché
+        for texte, actif in (("  Tout cocher  ", True), ("  Tout décocher  ", False)):
+            b = QPushButton(texte)
+            b.setStyleSheet(STYLE_BOUTON)
+            b.clicked.connect(lambda _=False, a=actif: self._cocher_tous_flux(a))
+            ligne_deplacement.addWidget(b)
         colonne_flux.addLayout(ligne_deplacement)
 
         self.liste_flux = QListWidget()
         self.liste_flux.setStyleSheet(STYLE_SCROLLBAR + style_liste)
         self.liste_flux.currentItemChanged.connect(lambda *_: self._sur_selection_flux())
+        self.liste_flux.itemChanged.connect(self._sur_case_flux)
         # F2 = renommer le flux sélectionné (19/08/2026, demandé — même
         # principe que Entrée = clic sur le bouton principal, étendu au
         # raccourci F2 classique pour tout ce qui peut être renommé dans
@@ -23289,6 +23341,106 @@ class DialogueAbonnementsRSS(QDialog):
         item = self.liste_comptes.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
+    @staticmethod
+    def _repartir_de_zero(flux):
+        """Réactivation : tout ce qui est paru pendant la pause compte comme
+        déjà vu (lu ailleurs, sur l'autre PC ou le téléphone) — même règle
+        qu'un flux tout juste ajouté, voir VerificateurRSS."""
+        for cle in ("items_vus", "etag", "last_modified"):
+            flux.pop(cle, None)
+
+    def _sur_case_compte(self, item):
+        if self._chargement_listes_rss:
+            return
+        adresse = item.data(Qt.ItemDataRole.UserRole)
+        actif = item.checkState() == Qt.CheckState.Checked
+        donnees = charger_abonnements_rss()
+        inactifs = [a for a in donnees.get("comptes_inactifs", []) if a != adresse]
+        if not actif:
+            inactifs.append(adresse)
+        elif adresse in donnees.get("comptes_inactifs", []):
+            for f in donnees.get("flux", []):
+                if f.get("compte") == adresse and not f.get("inactif"):
+                    self._repartir_de_zero(f)
+        if inactifs:
+            donnees["comptes_inactifs"] = inactifs
+        else:
+            donnees.pop("comptes_inactifs", None)
+        sauvegarder_abonnements_rss(donnees)
+        nom = self._nom_compte_affiche(adresse)
+        self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
+        self.lbl_statut.setText(
+            f"{nom} : flux réactivés — ce qui est paru pendant la pause ne sera pas livré." if actif
+            else f"{nom} : flux désactivés sur ce PC (rien n'est supprimé).")
+        # Relu après coup : on ne reconstruit pas la liste pendant son propre signal
+        QTimer.singleShot(0, lambda: self._charger_comptes(selectionner_compte=self._compte_selectionne()))
+
+    def _cocher_tous_comptes(self, actif):
+        donnees = charger_abonnements_rss()
+        anciens = set(donnees.get("comptes_inactifs", []))
+        if actif:
+            for f in donnees.get("flux", []):
+                if f.get("compte") in anciens and not f.get("inactif"):
+                    self._repartir_de_zero(f)
+            donnees.pop("comptes_inactifs", None)
+        else:
+            donnees["comptes_inactifs"] = [c.get("adresse", "") for c in COMPTES
+                                           if not est_compte_factice(c) and c.get("adresse")]
+        sauvegarder_abonnements_rss(donnees)
+        self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
+        self.lbl_statut.setText(
+            "Tous les comptes réactivés — ce qui est paru pendant la pause ne sera pas livré." if actif
+            else "Tous les comptes désactivés sur ce PC (rien n'est supprimé).")
+        self._charger_comptes(selectionner_compte=self._compte_selectionne())
+
+    def _cocher_tous_flux(self, actif):
+        compte = self._compte_selectionne()
+        if not compte:
+            return
+        donnees = charger_abonnements_rss()
+        for f in donnees.get("flux", []):
+            if f.get("compte") != compte:
+                continue
+            if actif and f.get("inactif"):
+                f.pop("inactif", None)
+                self._repartir_de_zero(f)
+            elif not actif:
+                f["inactif"] = True
+        sauvegarder_abonnements_rss(donnees)
+        nom = self._nom_compte_affiche(compte)
+        self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
+        self.lbl_statut.setText(
+            f"Tous les flux de {nom} cochés." if actif
+            else f"Tous les flux de {nom} désactivés sur ce PC (rien n'est supprimé).")
+        if actif and compte in donnees.get("comptes_inactifs", []):
+            self.lbl_statut.setText(f"Tous les flux de {nom} cochés — mais le compte reste "
+                                    f"décoché à gauche, ils ne seront relevés qu'une fois le compte coché.")
+        self._charger_comptes(selectionner_compte=compte)
+
+    def _sur_case_flux(self, item):
+        if self._chargement_listes_rss:
+            return
+        id_flux = item.data(Qt.ItemDataRole.UserRole)
+        actif = item.checkState() == Qt.CheckState.Checked
+        donnees = charger_abonnements_rss()
+        flux = next((f for f in donnees.get("flux", []) if f.get("id") == id_flux), None)
+        if not flux or bool(flux.get("inactif")) != actif:
+            return   # déjà dans cet état
+        if actif:
+            flux.pop("inactif", None)
+            self._repartir_de_zero(flux)
+        else:
+            flux["inactif"] = True
+        sauvegarder_abonnements_rss(donnees)
+        nom = flux.get("nom") or flux.get("url")
+        self.lbl_statut.setStyleSheet("color: #80c080; font-size: 11px;")
+        self.lbl_statut.setText(
+            f"« {nom} » réactivé — ce qui est paru pendant la pause ne sera pas livré." if actif
+            else f"« {nom} » désactivé sur ce PC (rien n'est supprimé).")
+        compte = self._compte_selectionne()
+        QTimer.singleShot(0, lambda: (self._charger_comptes(selectionner_compte=compte),
+                                      self._rafraichir_flux_compte(selectionner_id=id_flux)))
+
     def _nom_compte_affiche(self, adresse):
         """Nom personnalisé du compte à partir de son adresse (même
         mécanisme que _charger_comptes) — utilisé pour le libellé
@@ -23320,27 +23472,49 @@ class DialogueAbonnementsRSS(QDialog):
         QListWidgetItem) — seul l'affichage change, aucun impact sur le
         stockage des flux (toujours liés à l'adresse, jamais au nom
         affiché, qui peut changer sans rien casser)."""
+        self._chargement_listes_rss = True
+        self.liste_comptes.blockSignals(True)
         self.liste_comptes.clear()
         donnees = charger_abonnements_rss()
         flux_liste = donnees.get("flux", [])
+        comptes_inactifs = donnees.get("comptes_inactifs", [])
         noms = charger_noms_comptes()
         item_a_selectionner = None
         total_flux = 0
+        total_actifs = 0
         for c in COMPTES:
             if est_compte_factice(c):
                 continue
             adresse = c.get("adresse", "")
             nom_affiche = noms.get(adresse) or (c.get("nom") or adresse).split(" - ")[0]
-            nb = sum(1 for f in flux_liste if f.get("compte") == adresse)
+            flux_compte = [f for f in flux_liste if f.get("compte") == adresse]
+            nb = len(flux_compte)
+            nb_actifs = sum(1 for f in flux_compte if flux_rss_actif(f, donnees))
             total_flux += nb
+            total_actifs += nb_actifs
             # « MOTO (114 flux) » plutôt que « MOTO (114) » (10/10/2026, demandé)
-            item = QListWidgetItem(f"  {nom_affiche}  ({nb} flux)")
+            if adresse in comptes_inactifs:
+                texte = f" {nom_affiche}  ({nb} flux, désactivé)"
+            elif nb_actifs < nb:
+                texte = f" {nom_affiche}  ({nb} flux, {nb - nb_actifs} désactivé{'s' if nb - nb_actifs > 1 else ''})"
+            else:
+                texte = f" {nom_affiche}  ({nb} flux)"
+            item = QListWidgetItem(texte)
             item.setData(Qt.ItemDataRole.UserRole, adresse)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked if adresse in comptes_inactifs else Qt.CheckState.Checked)
+            item.setToolTip("Case décochée : aucun flux de ce compte n'est relevé sur ce PC "
+                            "(rien n'est supprimé).")
+            if adresse in comptes_inactifs:
+                item.setForeground(QColor("#808080"))
             self.liste_comptes.addItem(item)
             if adresse == selectionner_compte:
                 item_a_selectionner = item
+        self.liste_comptes.blockSignals(False)
+        self._chargement_listes_rss = False
         if getattr(self, "lbl_comptes", None) is not None:
-            self.lbl_comptes.setText(f"Comptes : {total_flux} flux")
+            self.lbl_comptes.setText(f"Comptes : {total_flux} flux"
+                                     + (f", {total_actifs} actifs" if total_actifs < total_flux else ""))
         # Hauteur adaptée au nombre réel de comptes (18/08/2026, demandé —
         # laissait un grand vide sous le dernier compte quand il y en avait
         # peu par rapport à la hauteur généreuse de la fenêtre). Repris
@@ -23382,12 +23556,21 @@ class DialogueAbonnementsRSS(QDialog):
         if mode_tri == "alpha":
             flux_du_compte = sorted(flux_du_compte, key=lambda f: cle_tri_alpha(f.get("nom") or f.get("url") or ""))
         item_a_selectionner = None
+        compte_inactif = compte in donnees.get("comptes_inactifs", [])
+        self.liste_flux.blockSignals(True)
         for flux in flux_du_compte:
-            item = QListWidgetItem(f"  {flux.get('nom') or flux.get('url')}")
+            item = QListWidgetItem(f" {flux.get('nom') or flux.get('url')}")
             item.setData(Qt.ItemDataRole.UserRole, flux.get("id"))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked if flux.get("inactif") else Qt.CheckState.Checked)
+            if compte_inactif:
+                item.setToolTip("Tout le compte est désactivé à gauche : ce flux n'est pas relevé.")
+            if flux.get("inactif") or compte_inactif:
+                item.setForeground(QColor("#808080"))
             self.liste_flux.addItem(item)
             if flux.get("id") == selectionner_id:
                 item_a_selectionner = item
+        self.liste_flux.blockSignals(False)
         if item_a_selectionner:
             self.liste_flux.setCurrentItem(item_a_selectionner)
         self._maj_etat_boutons()
@@ -33828,7 +34011,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 23/11/2026 14h51")
+        self.setWindowTitle("COURRIER ADRIEN — 23/11/2026 20h21")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -39327,7 +39510,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 23/11/2026 à 14h51")
+        lbl_version = QLabel("Version du 23/11/2026 à 20h21")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
