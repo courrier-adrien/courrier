@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-24 17h51"
+VERSION_BUILD = "2026-11-24 20h56"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -15013,6 +15013,50 @@ def lire_cache_eml(compte, dossier, uid):
         with open(chemin, "rb") as f:
             return f.read()
     return None
+
+def lire_entetes_cache_eml(compte, dossier, uid):
+    """En-tête seul d'un .eml du cache (Message sans corps) ou None.
+
+    24/11/2026 (gel de 3 s remonté sur RÉPONDRE avec un mail de 20 Mo) :
+    pour retrouver À et Cc, le .eml entier était lu puis découpé en parties,
+    pièces jointes comprises. Ici, lecture jusqu'à la première ligne vide
+    seulement (au plus 1 Mo)."""
+    chemin = chemin_cache_eml(compte, dossier, uid)
+    if not os.path.exists(chemin):
+        return None
+    tete = b""
+    with open(chemin, "rb") as f:
+        while len(tete) < 1024 * 1024:
+            bloc = f.read(16384)
+            if not bloc:
+                break
+            tete += bloc
+            fin = min((i for i in (tete.find(b"\r\n\r\n"), tete.find(b"\n\n")) if i >= 0), default=-1)
+            if fin >= 0:
+                tete = tete[:fin]
+                break
+    return email.message_from_bytes(tete + b"\r\n\r\n")
+
+# Dernier .eml découpé en entier (24/11/2026) : répondre/transférer le
+# découpait jusqu'à 3 fois de suite (corps cité, images cid:, PJ d'origine),
+# ~1,5 s chacune pour un mail de 20 Mo. Un seul gardé, reconnu à son chemin,
+# sa taille et sa date de modification.
+_DERNIER_EML_DECOUPE = {"cle": None, "msg": None}
+
+def lire_message_cache_eml(compte, dossier, uid):
+    """Message complet d'un .eml du cache (email.message.Message) ou None."""
+    chemin = chemin_cache_eml(compte, dossier, uid)
+    try:
+        st = os.stat(chemin)
+    except OSError:
+        return None
+    cle = (chemin, st.st_size, st.st_mtime_ns)
+    if _DERNIER_EML_DECOUPE["cle"] == cle:
+        return _DERNIER_EML_DECOUPE["msg"]
+    with open(chemin, "rb") as f:
+        msg = email.message_from_bytes(f.read())
+    _DERNIER_EML_DECOUPE["cle"], _DERNIER_EML_DECOUPE["msg"] = cle, msg
+    return msg
 
 def ecrire_cache_eml(compte, dossier, uid, raw):
     """Écrit un .eml dans le cache.
@@ -29843,6 +29887,17 @@ class FenetreRedaction(QDialog):
                 self._parent_courrier.cef_widget.rect().topLeft())
             w = self._parent_courrier.cef_widget.width()
             h = self._parent_courrier.cef_widget.height()
+            # PJ .html ou vidéo affichée (24/11/2026, bug remonté : RÉPONDRE
+            # n'ouvrait qu'une fenêtre écrasée, sans le corps) : le panneau
+            # de lecture est alors réduit à l'en-tête, la PJ occupe une vue
+            # à part juste en dessous. On prend la hauteur des deux.
+            vue_pj = getattr(self._parent_courrier, "_video_panneau", None)
+            try:
+                if isinstance(vue_pj, QWidget) and vue_pj.isVisible():
+                    bas_pj = vue_pj.mapToGlobal(vue_pj.rect().bottomLeft()).y()
+                    h = max(h, bas_pj - pos.y() + 1)
+            except RuntimeError:
+                pass  # vue déjà détruite
             try:
                 import ctypes
                 titre_h = ctypes.windll.user32.GetSystemMetrics(4)
@@ -31400,6 +31455,14 @@ class FenetreRedaction(QDialog):
         v.addLayout(bandeau)
         self._layout_apercu_pj = v
         self._vue_apercu_pj = None
+        # Vue à part pour les pages web jointes (24/11/2026) : une page de
+        # 19 Mo affichée dans la vue commune devait être déchargée avant
+        # l'aperçu suivant, d'où un « Ne répond pas » au clic sur l'image
+        # d'après (et le titre déjà changé sur l'ancienne page). Elle reste
+        # chargée, cachée, jusqu'au RETOUR AU MAIL : re-cliquer dessus est
+        # instantané.
+        self._vue_page_web_pj = None
+        self._page_web_pj_chemin = None
         self._apercu_pj_chemin = None
         self._apercu_pj_generation = 0
         self._apercu_pj.hide()
@@ -31435,19 +31498,43 @@ class FenetreRedaction(QDialog):
                        + self.APERCU_PJ_PAGES_WEB):
             self._ouvrir_pj_compose_windows(chemin)
             return
+        self._apercu_pj_chemin = chemin
+        self._apercu_pj_generation += 1
+        generation = self._apercu_pj_generation
+        self.webview.hide()
+        self._apercu_pj.show()
+
+        if ext in self.APERCU_PJ_PAGES_WEB:
+            # Le fichier lui-même, chargé directement dans sa propre vue : ses
+            # images et feuilles de style voisines sur le disque s'affichent
+            # aussi. Déjà chargé (re-clic) : simplement remontré.
+            if self._vue_page_web_pj is None:
+                self._vue_page_web_pj = QWebEngineView()
+                self._vue_page_web_pj.page().setBackgroundColor(QColor("white"))
+                self._layout_apercu_pj.addWidget(self._vue_page_web_pj, 1)
+            if self._vue_apercu_pj is not None:
+                self._vue_apercu_pj.hide()
+            self._vue_page_web_pj.show()
+            self._lbl_apercu_pj.setText(f"Aperçu : {nom}")
+            self._lbl_apercu_pj.setToolTip(chemin)
+            if self._page_web_pj_chemin != chemin:
+                self._page_web_pj_chemin = chemin
+                self._vue_page_web_pj.load(QUrl.fromLocalFile(chemin))
+            return
+
         if self._vue_apercu_pj is None:
             self._vue_apercu_pj = QWebEngineView()
             self._vue_apercu_pj.setStyleSheet("QWebEngineView { background-color: #1e1e1e; }")
             self._vue_apercu_pj.page().setBackgroundColor(QColor("#1e1e1e"))
             self._layout_apercu_pj.addWidget(self._vue_apercu_pj, 1)
-        self._apercu_pj_chemin = chemin
-        self._apercu_pj_generation += 1
-        generation = self._apercu_pj_generation
+        if self._vue_page_web_pj is not None:
+            self._vue_page_web_pj.hide()  # gardée chargée, sans la décharger
+        # Page vide d'abord : plus jamais le nouveau titre au-dessus de
+        # l'ancien aperçu
+        self._vue_apercu_pj.setHtml("<html><body style='background:#1e1e1e'></body></html>")
+        self._vue_apercu_pj.show()
         self._lbl_apercu_pj.setText(f"Aperçu : {nom}")
         self._lbl_apercu_pj.setToolTip(chemin)
-        self.webview.hide()
-        self._apercu_pj.show()
-        self._vue_apercu_pj.page().setBackgroundColor(QColor("#1e1e1e"))  # blanc après une page web
 
         if ext in self.APERCU_PJ_IMAGES:
             self._afficher_apercu_pj(
@@ -31462,12 +31549,6 @@ class FenetreRedaction(QDialog):
                 self._afficher_apercu_pj(f"<p class='msg'>Lecture impossible : {html.escape(str(e))}</p>")
                 return
             self._afficher_apercu_pj(f'<pre class="doc">{html.escape(texte)}</pre>')
-            return
-        if ext in self.APERCU_PJ_PAGES_WEB:
-            # Le fichier lui-même, chargé directement : ses images et feuilles
-            # de style voisines sur le disque s'affichent aussi.
-            self._vue_apercu_pj.page().setBackgroundColor(QColor("white"))
-            self._vue_apercu_pj.load(QUrl.fromLocalFile(chemin))
             return
 
         # PDF et documents bureautiques : conversion hors du fil de l'interface
@@ -31559,6 +31640,15 @@ class FenetreRedaction(QDialog):
         self._apercu_pj.hide()
         if self._vue_apercu_pj is not None:
             self._vue_apercu_pj.setHtml("")  # libère les images du PDF
+        if self._vue_page_web_pj is not None:
+            # Page web lourde : la vue est détruite (après le retour au mail,
+            # pour qu'il s'affiche sans attendre) plutôt que vidée.
+            vue = self._vue_page_web_pj
+            self._vue_page_web_pj = None
+            self._page_web_pj_chemin = None
+            vue.hide()
+            self._layout_apercu_pj.removeWidget(vue)
+            QTimer.singleShot(0, vue.deleteLater)
         self.webview.show()
         self.webview.setFocus()
 
@@ -31585,8 +31675,13 @@ class FenetreRedaction(QDialog):
                 taille = ""
 
             w_chip = QWidget()
+            # Règle QToolTip explicite (24/11/2026) : sans sélecteur, le style
+            # de la pastille s'appliquait aussi à son info-bulle, qui perdait
+            # le Verdana 11 px et la bordure rouge des autres info-bulles.
             w_chip.setStyleSheet(
-                "background-color: #2f2f2f; border: 1px solid #5a5a5a; border-radius: 4px;"
+                "* { background-color: #2f2f2f; border: 1px solid #5a5a5a; border-radius: 4px; }"
+                "QToolTip { background-color: #2a2a2a; color: white; border: 1px solid #A52A2A;"
+                " border-radius: 0px; padding: 4px; font-family: Verdana; font-size: 11px; }"
             )
             w_chip.setToolTip((f"{nom}  ({taille})" if taille else nom)
                               + "\nCliquer pour vérifier le fichier")
@@ -34559,7 +34654,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 17h51")
+        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 20h56")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -40064,7 +40159,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 24/11/2026 à 17h51")
+        lbl_version = QLabel("Version du 24/11/2026 à 20h56")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -44241,9 +44336,8 @@ if (typeof module === 'object') {
         try:
             if self.compte_actif and self.dossier_actif:
                 dossier_imap = self._nom_imap(self.dossier_actif)
-                raw = lire_cache_eml(self.compte_actif, dossier_imap, msg_info["uid"])
-                if raw:
-                    msg_hdr = email.message_from_bytes(raw)
+                msg_hdr = lire_entetes_cache_eml(self.compte_actif, dossier_imap, msg_info["uid"])
+                if msg_hdr is not None:
                     a_origine = decoder_entete(msg_hdr.get("To", ""))
                     cc_origine = decoder_entete(msg_hdr.get("Cc", ""))
         except Exception:
@@ -44305,10 +44399,8 @@ if (typeof module === 'object') {
         dossier = msg_info.get("dossier") or self.dossier_actif
         destinataire = ""
         try:
-            raw = lire_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
-            if raw:
-                import email as _email
-                msg = _email.message_from_bytes(raw)
+            msg = lire_entetes_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
+            if msg is not None:
                 destinataire = decoder_entete(msg.get("To", ""))
         except Exception:
             pass
@@ -44377,13 +44469,9 @@ if (typeof module === 'object') {
         uid = msg_info.get("uid")
         dossier = msg_info.get("dossier") or self.dossier_actif
         try:
-            raw_cache = lire_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
-        except Exception:
-            raw_cache = None
-        if not raw_cache:
-            return ""
-        try:
-            msg = email.message_from_bytes(raw_cache)
+            msg = lire_message_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
+            if msg is None:
+                return ""
             corps_html_original = extraire_corps(msg)
         except Exception:
             return ""
@@ -44400,14 +44488,10 @@ if (typeof module === 'object') {
         uid = msg_info.get("uid")
         dossier = msg_info.get("dossier") or self.dossier_actif
         try:
-            raw_cache = lire_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
+            msg = lire_message_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
         except Exception:
-            raw_cache = None
-        if not raw_cache:
-            return []
-        try:
-            msg = email.message_from_bytes(raw_cache)
-        except Exception:
+            msg = None
+        if msg is None:
             return []
         uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
         dossier_tmp = os.path.join(DOSSIER_APERCU, f"transfert_{uid_str}")
@@ -44469,14 +44553,10 @@ if (typeof module === 'object') {
         uid = msg_info.get("uid")
         dossier = msg_info.get("dossier") or self.dossier_actif
         try:
-            raw_cache = lire_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
+            msg = lire_message_cache_eml(self.compte_actif, self._nom_imap(dossier), uid)
         except Exception:
-            raw_cache = None
-        if not raw_cache:
-            return {}
-        try:
-            msg = email.message_from_bytes(raw_cache)
-        except Exception:
+            msg = None
+        if msg is None:
             return {}
         uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
         dossier_tmp = os.path.join(DOSSIER_APERCU, f"cid_cite_{uid_str}")
@@ -44550,11 +44630,10 @@ if (typeof module === 'object') {
             cc_var = ""
             try:
                 if self.compte_actif and self.dossier_actif and msg_info.get("uid") is not None:
-                    raw = lire_cache_eml(self.compte_actif,
-                                         self._nom_imap(self.dossier_actif),
-                                         msg_info["uid"])
-                    if raw:
-                        msg_hdr = email.message_from_bytes(raw)
+                    msg_hdr = lire_entetes_cache_eml(self.compte_actif,
+                                                     self._nom_imap(self.dossier_actif),
+                                                     msg_info["uid"])
+                    if msg_hdr is not None:
                         pour = decoder_entete(msg_hdr.get("To", ""))
                         cc_var = decoder_entete(msg_hdr.get("Cc", ""))
             except Exception:
