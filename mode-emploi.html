@@ -208,7 +208,7 @@
     <tr><td><span class="btn">TODO</span></td><td>Rappels programmés (<a href="#todo">section 19</a>).</td></tr>
     <tr><td><span class="btn">CHRONO</span></td><td>Choix du tri de la liste des mails (<a href="#recherche">section 16</a>).</td></tr>
     <tr><td><span class="btn">INTERNET</span></td><td>Ouvre le mail affiché dans un navigateur installé sur l'ordinateur.</td></tr>
-    <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span></td><td>Recherche, puis retour à l'affichage normal (<a href="#recherche">section 16</a>).</td></tr>
+    <tr><td><span class="btn">RECHERCHER</span> <span class="btn">✕</span></td><td>Recherche dans les mails et leurs pièces jointes, d'un dossier, d'un compte ou de tous les comptes ; <span class="btn">✕</span> revient à l'affichage normal après le petit bonhomme (<a href="#recherche">section 16</a>).</td></tr>
   </table>
   <h3 id="mode">Mode SIMPLE, EXPERT ou PERSONNALISÉ</h3>
   <p>Le premier bouton en haut à gauche choisit les boutons affichés. Son nom indique le mode en cours : <span class="btn actif">MODE SIMPLE</span>, <span class="btn actif">MODE EXPERT</span> ou <span class="btn actif">MODE PERSO</span>. Un clic ouvre une petite fenêtre avec trois choix :</p>
@@ -239,7 +239,7 @@
     <tr><td><span class="btn">TODO</span></td><td>au moins un rappel est encore à venir (un rappel passé resté dans la liste ne compte pas), ou sa fenêtre est ouverte.</td></tr>
     <tr><td><span class="btn">CHRONO</span></td><td>toujours : on peut y choisir un autre tri.</td></tr>
     <tr><td><span class="btn">MODE</span></td><td>toujours : un mode (SIMPLE, EXPERT ou PERSONNALISÉ) est forcément choisi.</td></tr>
-    <tr><td><span class="btn">RECHERCHER</span></td><td>sa fenêtre est ouverte, puis tant que les résultats d'une recherche sont affichés.</td></tr>
+    <tr><td><span class="btn">RECHERCHER</span></td><td>sa fenêtre ou la fenêtre des résultats est ouverte, ou tant que les mails d'un expéditeur (petit bonhomme) sont affichés.</td></tr>
     <tr><td><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span></td><td>une fenêtre de rédaction ouverte par ce bouton est encore ouverte.</td></tr>
   </table>
   <p><span class="btn">INTERNET</span> et <span class="btn">SUPPRIMER</span> ne passent jamais à l'orange : ils agissent en une fois, sans rien laisser en cours.</p>
@@ -443,7 +443,9 @@
   <h2>9. Pièces jointes</h2>
   <p>Les pièces jointes s'affichent en haut du mail, avec leur icône, leur nom et leur poids.</p>
   <ul>
-    <li><b>Un clic</b> ouvre l'aperçu dans la fenêtre du mail : PDF, Word, Excel, OpenDocument, PowerPoint, images et vidéos.</li>
+    <li><b>Un clic</b> ouvre l'aperçu dans la fenêtre du mail : PDF, Word, Excel, OpenDocument, PowerPoint, pages web (.html), fichiers texte, images et vidéos. L'en-tête du mail reste affiché au-dessus, et <span class="btn">◀ Corps</span> revient au texte du mail.</li>
+    <li><b>Rechercher dans la pièce jointe :</b> la case en haut de l'aperçu (PDF, Word, Excel, page web, texte) surligne le mot cherché. <kbd>Entrée</kbd> ou <span class="btn">▼</span> va au résultat suivant, <span class="btn">▲</span> au précédent ; le compteur indique par exemple « 3 / 12 ».</li>
+    <li><b>Page web (.html) :</b> elle s'affiche telle quelle, avec ses images. En plein écran, elle est agrandie pour occuper la largeur ; <span class="btn">+</span> <span class="btn">−</span> ajustent la taille. Par sécurité, une page reçue n'a aucun accès à Courrier Adrien ni à vos fichiers.</li>
     <li>Le bouton <span class="btn">Plein écran</span> agrandit l'aperçu ; <span class="btn">Retour à la page</span> revient au mail.</li>
     <li>Pour les images et les PDF, les flèches <span class="btn">◀</span> <span class="btn">▶</span> passent d'une photo ou d'une page à l'autre. Les touches directionnelles <kbd>←</kbd> <kbd>→</kbd> font la même chose.</li>
     <li><b>Zoom :</b> boutons <span class="btn">+</span> <span class="btn">−</span>, ou touches <kbd>+</kbd> et <kbd>−</kbd> du clavier.</li>
@@ -460,7 +462,7 @@
     <li><b>Destinataires :</b> les adresses se complètent pendant la frappe. Cliquer sur l'étiquette À, Cc ou Cci ouvre le carnet d'adresses pour choisir les destinataires.</li>
     <li><b>Mise en forme :</b> boutons <span class="btn">Gras</span> <span class="btn">Italique</span> <span class="btn">Souligné</span> <span class="btn">Barré</span> <span class="btn">Couleur</span> <span class="btn">Émoticônes</span> <span class="btn">Langue</span>, ainsi que la taille de la police.</li>
     <li><b>Copier, couper, coller :</b> les boutons <span class="btn">Copier</span> <span class="btn">Couper</span> <span class="btn">Coller</span>, à côté de <span class="btn">Langue</span>, agissent dans cette fenêtre sans la quitter. Ils passent à l'orange comme ceux du bas de l'écran principal (<a href="#ecran">section 3</a>), mais seulement pour une copie ou une coupe faite dans cette fenêtre.</li>
-    <li><b>Pièces jointes :</b> elles s'affichent dans une colonne à droite. La petite croix rouge retire une pièce jointe.</li>
+    <li><b>Pièces jointes :</b> elles s'affichent dans une colonne à droite. La petite croix rouge retire une pièce jointe. Un clic sur une pièce jointe l'affiche dans la fenêtre pour la vérifier avant l'envoi (PDF, Word, Excel, PowerPoint, page web, texte, image) ; <span class="btn">RETOUR AU MAIL</span> ramène le texte en cours.</li>
     <li><b>Répondre en gardant les pièces jointes :</b> <span class="btn">TRANSFERT</span> reprend toujours les pièces jointes du mail d'origine, mais <span class="btn">RÉPONDRE</span> et <span class="btn">RÉP. À TOUS</span> ne les reprennent pas. Pour les garder, faites un <b>clic droit</b> sur <span class="btn">RÉPONDRE</span> ou <span class="btn">RÉP. À TOUS</span>, puis choisissez <b>« Répondre avec les pièces jointes »</b>.</li>
     <li><span class="btn">Accusé de réception</span> : enfoncé, il demande un accusé de lecture au destinataire.</li>
   </ul>
@@ -573,9 +575,43 @@
 
 <section id="recherche">
   <h2>16. Rechercher et trier</h2>
+  <h3>Rechercher</h3>
+  <p><span class="btn">RECHERCHER</span> ouvre une petite fenêtre. Tapez un ou plusieurs mots, puis cochez où chercher et dans quel périmètre :</p>
+  <table>
+    <tr><th>Où chercher</th><th>Ce qui est fouillé</th></tr>
+    <tr><td>Dans l'expéditeur</td><td>le nom et l'adresse de l'expéditeur.</td></tr>
+    <tr><td>Dans le sujet</td><td>l'objet du mail.</td></tr>
+    <tr><td>Dans le corps du mail</td><td>tout le texte du mail.</td></tr>
+    <tr><td>Dans les pièces jointes</td><td>le nom des pièces jointes et le texte des PDF, Word (.docx), Excel (.xlsx et .xls), LibreOffice (.odt, .ods, .odp), PowerPoint (.pptx) et fichiers texte.</td></tr>
+  </table>
+  <p>Le périmètre est au choix : <b>le dossier actuel</b>, <b>tous les dossiers du compte</b> ou <b>tous les comptes</b>. Les dossiers spam ne sont jamais fouillés : ils ont leur propre recherche (<a href="#spam">section 15</a>).</p>
+  <h3>Comment les mots sont cherchés</h3>
   <ul>
-    <li><span class="btn">RECHERCHER</span> : recherche par expéditeur ou dans les en-têtes. <span class="btn">✕</span> revient à l'affichage normal.</li>
-    <li>Le <b>petit bonhomme</b> d'un mail (à droite dans la liste) affiche tous les mails de cet expéditeur, avec leur dossier.</li>
+    <li>Les accents et les majuscules ne comptent pas : « reglement » trouve « Règlement ».</li>
+    <li>Chaque mot est cherché en <b>début de mot</b> : « factur » trouve « facture » et « factures », mais « onda » ne trouve pas « Honda ».</li>
+    <li>Plusieurs mots : le mail doit les contenir <b>tous</b>, dans n'importe quel ordre.</li>
+    <li>Entre guillemets, l'expression est cherchée telle quelle : « "avenant au bail" ».</li>
+    <li>Les lettres isolées (l', d', qu'…) sont ignorées : « l'URSSAF » cherche « URSSAF ».</li>
+  </ul>
+  <h3>La fenêtre des résultats</h3>
+  <ul>
+    <li>Une ligne par mail, du plus récent au plus ancien : date, compte, dossier, expéditeur, sujet et <b>Trouvé dans</b> (sujet, texte, ou le nom de la pièce jointe).</li>
+    <li>En bas, le <b>passage trouvé</b> du mail sélectionné, le mot surligné.</li>
+    <li>Un double-clic, la touche Entrée ou <span class="btn">Ouvrir le mail</span> affiche le mail dans la fenêtre principale, sur son compte et dans son dossier. La fenêtre des résultats reste ouverte pour ouvrir les suivants.</li>
+    <li>Mot trouvé dans une pièce jointe : <span class="btn">Ouvrir la PJ à cet endroit</span> ouvre le mail, puis la pièce jointe, et y cherche aussitôt le passage trouvé (surligné, avec le compteur de résultats).</li>
+    <li>Un même mail rangé dans plusieurs dossiers (« Tous les messages » de Gmail, par exemple) n'apparaît qu'une fois.</li>
+  </ul>
+  <h3>L'index de recherche</h3>
+  <p>Pour répondre en une fraction de seconde, Courrier Adrien tient en arrière-plan un <b>index</b> du texte de tous les mails et de leurs pièces jointes. Il ne passe jamais par Internet : tout est lu sur le disque.</p>
+  <ul>
+    <li>Au premier lancement, sa construction prend quelques minutes (environ 8 minutes pour 20 000 mails), sans gêner le reste du logiciel. La fenêtre de recherche indique où il en est ; en attendant, les résultats sont partiels.</li>
+    <li>Ensuite, il suit tout seul les mails reçus, déplacés ou supprimés.</li>
+    <li>Il est rangé dans le fichier <b>index_recherche.db</b>. Le supprimer ne fait rien perdre : il est reconstruit au lancement suivant.</li>
+  </ul>
+  <div class="attention"><b>Non lus :</b> les PDF scannés (ce sont des images, sans texte), les anciens Word .doc et les fichiers protégés ou abîmés. Leur nom reste cherchable.</div>
+  <h3>Trier, et les mails d'un expéditeur</h3>
+  <ul>
+    <li>Le <b>petit bonhomme</b> d'un mail (à droite dans la liste) affiche tous les mails de cet expéditeur, avec leur dossier. <span class="btn">✕</span> revient à l'affichage normal.</li>
     <li>Le bouton de tri change de mode à chaque clic : <span class="btn">CHRONO</span> (par date de réception) ou <span class="btn">EXPÉDITEUR</span> (par ordre alphabétique). Le tri choisi est mémorisé pour chaque dossier. Les mails épinglés restent toujours en haut.</li>
     <li>Dans la <b>Corbeille</b> seulement, un troisième mode apparaît : <span class="btn">SUPPRESSION</span>. Il affiche en premier les mails supprimés le plus récemment, pour retrouver vite un mail effacé par erreur, même dans une corbeille de plusieurs centaines de mails.</li>
   </ul>

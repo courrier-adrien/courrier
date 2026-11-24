@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-23 20h21"
+VERSION_BUILD = "2026-11-24 17h51"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -20046,6 +20046,543 @@ class PreChargeurMassif(QThread):
         duree = _time.time() - t0
         self.termine.emit(nb_fait, duree)
 
+# ---------------------------------------------------------------------------
+# Recherche globale (24/11/2026, demandée par l'utilisateur) : tous les
+# comptes, le corps des mails et le texte des pièces jointes (PDF, Word,
+# Excel, LibreOffice, PowerPoint, texte). Les mails étant tous complets sur le
+# disque, un index plein texte SQLite (FTS5, intégré à Python) est tenu à jour
+# en arrière-plan par ServiceIndexRecherche : la recherche est instantanée et
+# ne touche jamais au réseau. Accents et majuscules sont ignorés (« mediacross »
+# trouve « Médiacross »), chaque mot est cherché en début de mot (« factur »
+# trouve « facture »), plusieurs mots doivent tous être présents, et un texte
+# entre guillemets est cherché tel quel.
+# Les dossiers spam ne sont pas indexés : ils ont leur propre recherche.
+# Non lus : PDF scannés (images sans texte), Word 97-2003 (.doc).
+# L'index est un fichier à part (index_recherche.db) : le supprimer ne fait
+# rien perdre, il est simplement reconstruit au lancement suivant.
+# ---------------------------------------------------------------------------
+FICHIER_INDEX_RECHERCHE = os.path.join(DOSSIER_APP, "index_recherche.db")
+VERSION_INDEX_RECHERCHE = "1"
+TAILLE_MAX_PJ_INDEXEE = 40 * 1024 * 1024       # PJ plus grosses : nom seul
+TEXTE_MAX_CORPS_INDEXE = 500_000               # caractères
+TEXTE_MAX_PJ_INDEXE = 2_000_000                # caractères, toutes PJ d'un mail
+PAGES_MAX_PDF_INDEXE = 300
+EXTENSIONS_PJ_INDEXEES = (".pdf", ".docx", ".docm", ".dotx", ".xlsx", ".xlsm", ".xltx",
+                          ".xls", ".pptx", ".ppsx", ".odt", ".ods", ".odp", ".txt",
+                          ".csv", ".htm", ".html", ".rtf", ".xml", ".json", ".md", ".ics", ".vcf")
+SEPARATEUR_PJ_INDEX = "\u27e6"   # ⟦nom.pdf⟧ devant le texte de chaque PJ
+FIN_SEPARATEUR_PJ_INDEX = "\u27e7"
+_VERROU_INDEX_RECHERCHE = _threading.Lock()
+
+
+def _ouvrir_index_recherche():
+    """Connexion à l'index (une par fil : sqlite3 l'exige). Crée les tables
+    au besoin ; un index d'une autre version est vidé et reconstruit."""
+    import sqlite3
+    conn = sqlite3.connect(FICHIER_INDEX_RECHERCHE, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    with _VERROU_INDEX_RECHERCHE:
+        conn.execute("CREATE TABLE IF NOT EXISTS info(cle TEXT PRIMARY KEY, valeur TEXT)")
+        ligne = conn.execute("SELECT valeur FROM info WHERE cle='version'").fetchone()
+        if not ligne or ligne[0] != VERSION_INDEX_RECHERCHE:
+            conn.execute("DROP TABLE IF EXISTS mails")
+            conn.execute("DROP TABLE IF EXISTS texte")
+            conn.execute("INSERT OR REPLACE INTO info VALUES('version', ?)", (VERSION_INDEX_RECHERCHE,))
+        conn.execute("""CREATE TABLE IF NOT EXISTS mails(
+            id INTEGER PRIMARY KEY, chemin TEXT UNIQUE, adresse TEXT, dossier TEXT,
+            uid TEXT, mtime REAL, taille INTEGER, date TEXT, ts REAL, pj INTEGER)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS mails_compte ON mails(adresse, dossier)")
+        conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS texte USING fts5(
+            de, a, sujet, corps, pj_noms, pj, tokenize='unicode61 remove_diacritics 2')""")
+        conn.commit()
+    return conn
+
+
+def _html_vers_texte_index(html_brut):
+    """Texte lisible d'un HTML de mail (balises, styles et scripts retirés)."""
+    import html as _html
+    t = re.sub(r"(?is)<(head|style|script|title)\b.*?</\1\s*>", " ", html_brut)
+    t = re.sub(r"(?is)<!--.*?-->", " ", t)
+    t = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|li|h\d|table|blockquote)\s*>", "\n", t)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = _html.unescape(t)
+    t = re.sub(r"[ \t\r\f\v\u00a0]+", " ", t)
+    return re.sub(r"\n\s*\n+", "\n", t).strip()
+
+
+def _xml_vers_texte_index(xml_brut, fins_paragraphe=()):
+    """Texte des nœuds d'un XML Office/LibreOffice (balises retirées)."""
+    import html as _html
+    t = xml_brut
+    for fin in fins_paragraphe:
+        t = t.replace(fin, fin + "\n")
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = _html.unescape(t)
+    return re.sub(r"[ \t]+", " ", t)
+
+
+def _decoder_texte_index(donnees, charset=None):
+    for enc in ([charset] if charset else []) + ["utf-8", "cp1252"]:
+        try:
+            return donnees.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return donnees.decode("latin-1", errors="replace")
+
+
+def extraire_texte_piece_jointe(nom, donnees):
+    """Texte d'une pièce jointe d'après son extension ; "" si le format
+    n'est pas lu, si le fichier est illisible ou protégé."""
+    import io
+    import zipfile
+    ext = os.path.splitext(nom or "")[1].lower()
+    if ext not in EXTENSIONS_PJ_INDEXEES or not donnees or len(donnees) > TAILLE_MAX_PJ_INDEXEE:
+        return ""
+    try:
+        if ext == ".pdf":
+            import pypdfium2 as pdfium
+            morceaux = []
+            with VERROU_PDF:
+                doc = pdfium.PdfDocument(donnees)
+                nb_pages = len(doc)
+            try:
+                for i in range(min(nb_pages, PAGES_MAX_PDF_INDEXE)):
+                    # Verrou page par page : l'aperçu PDF de l'interface n'attend
+                    # jamais plus d'une page.
+                    with VERROU_PDF:
+                        page = doc[i]
+                        try:
+                            tp = page.get_textpage()
+                            try:
+                                morceaux.append(tp.get_text_range())
+                            finally:
+                                tp.close()
+                        finally:
+                            page.close()
+                    if sum(len(m) for m in morceaux) > TEXTE_MAX_PJ_INDEXE:
+                        break
+            finally:
+                with VERROU_PDF:
+                    doc.close()
+            return "\n".join(morceaux)
+        if ext in (".docx", ".docm", ".dotx", ".xlsx", ".xlsm", ".xltx", ".pptx", ".ppsx",
+                   ".odt", ".ods", ".odp"):
+            morceaux = []
+            with zipfile.ZipFile(io.BytesIO(donnees)) as z:
+                noms = z.namelist()
+                if ext in (".odt", ".ods", ".odp"):
+                    parties = [n for n in noms if n == "content.xml"]
+                    fins = ("</text:p>", "</text:h>", "</table:table-cell>")
+                elif ext.startswith(".doc"):
+                    parties = [n for n in noms if re.fullmatch(
+                        r"word/(document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml", n)]
+                    fins = ("</w:p>", "</w:tc>")
+                elif ext.startswith(".ppt") or ext == ".ppsx":
+                    parties = sorted(n for n in noms if re.fullmatch(r"ppt/(slides|notesSlides)/\w+\d+\.xml", n))
+                    fins = ("</a:p>",)
+                else:
+                    parties = []
+                    if "xl/sharedStrings.xml" in noms:
+                        parties.append("xl/sharedStrings.xml")
+                    fins = ("</si>",)
+                for partie in parties:
+                    morceaux.append(_xml_vers_texte_index(
+                        z.read(partie).decode("utf-8", errors="replace"), fins))
+                if ext.startswith(".xl"):
+                    # Feuilles : nombres et textes saisis directement dans la
+                    # cellule (les autres textes sont dans sharedStrings.xml)
+                    for partie in sorted(n for n in noms if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)):
+                        xml_f = z.read(partie).decode("utf-8", errors="replace")
+                        valeurs = re.findall(r'<c\b(?![^>]*\bt="s")[^>]*>(?:<f[^>]*>.*?</f>|<f[^>]*/>)?<v>([^<]*)</v>', xml_f)
+                        valeurs += re.findall(r"<is>.*?<t[^>]*>([^<]*)</t>", xml_f)
+                        morceaux.append(" ".join(valeurs))
+                        if sum(len(m) for m in morceaux) > TEXTE_MAX_PJ_INDEXE:
+                            break
+            return "\n".join(morceaux)
+        if ext == ".xls":
+            import xlrd
+            classeur = xlrd.open_workbook(file_contents=donnees, on_demand=True)
+            morceaux = []
+            try:
+                for feuille in classeur.sheets():
+                    morceaux.append(feuille.name)
+                    for r in range(feuille.nrows):
+                        morceaux.append(" ".join(texte_cellule_excel(v) for v in feuille.row_values(r)
+                                                 if v not in (None, "")))
+                        if sum(len(m) for m in morceaux) > TEXTE_MAX_PJ_INDEXE:
+                            break
+            finally:
+                classeur.release_resources()
+            return "\n".join(morceaux)
+        texte = _decoder_texte_index(donnees)
+        if ext in (".htm", ".html", ".xml"):
+            return _html_vers_texte_index(texte)
+        if ext == ".rtf":
+            texte = re.sub(r"\\'([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]).decode("cp1252", "replace"), texte)
+            texte = re.sub(r"\\(par|line|tab)\b ?", "\n", texte)
+            texte = re.sub(r"\\[a-zA-Z]+-?\d* ?|[{}]", "", texte)
+        return texte
+    except Exception as e:
+        print(f"[INDEX] PJ {nom!r} illisible : {type(e).__name__}: {e}")
+        return ""
+
+
+def extraire_texte_mail_index(raw):
+    """{de, a, sujet, date, corps, pj_noms, pj, nb_pj} d'un .eml complet."""
+    msg = email.message_from_bytes(raw)
+    texte_brut, texte_html, noms_pj, textes_pj = [], [], [], []
+    taille_pj = 0
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        type_mime = (part.get_content_type() or "").lower()
+        nom = decoder_entete(part.get_filename() or "")
+        dispo = str(part.get("Content-Disposition") or "").lower()
+        if nom or dispo.startswith("attachment"):
+            if not nom:
+                continue
+            noms_pj.append(nom)
+            if taille_pj < TEXTE_MAX_PJ_INDEXE:
+                try:
+                    donnees = part.get_payload(decode=True) or b""
+                except Exception:
+                    donnees = b""
+                t = extraire_texte_piece_jointe(nom, donnees).strip()
+                if t:
+                    t = t[:TEXTE_MAX_PJ_INDEXE - taille_pj]
+                    taille_pj += len(t)
+                    textes_pj.append(f"{SEPARATEUR_PJ_INDEX}{nom}{FIN_SEPARATEUR_PJ_INDEX}\n{t}")
+            continue
+        if type_mime not in ("text/plain", "text/html"):
+            continue
+        try:
+            donnees = part.get_payload(decode=True) or b""
+        except Exception:
+            continue
+        texte = _decoder_texte_index(donnees, part.get_content_charset())
+        (texte_brut if type_mime == "text/plain" else texte_html).append(texte)
+    brut = "\n".join(texte_brut).strip()
+    depuis_html = _html_vers_texte_index("\n".join(texte_html)) if texte_html else ""
+    # Le texte brut suffit d'ordinaire ; certains mails n'y mettent qu'un
+    # « affichez ce message dans votre navigateur » : le HTML prend alors le relais.
+    corps = brut if len(brut) >= 0.3 * len(depuis_html) else depuis_html
+    return {
+        "de": decoder_entete(msg.get("From", "")),
+        "a": " ".join(decoder_entete(msg.get(c, "")) for c in ("To", "Cc")).strip(),
+        "sujet": decoder_entete(msg.get("Subject", "")),
+        "date": msg.get("Date", "") or "",
+        "corps": corps[:TEXTE_MAX_CORPS_INDEXE],
+        "pj_noms": "\n".join(noms_pj),
+        "pj": "\n".join(textes_pj),
+        "nb_pj": len(noms_pj),
+    }
+
+
+def _horodatage_index(date_brute, defaut):
+    try:
+        return parsedate_to_datetime(date_brute).timestamp()
+    except Exception:
+        return defaut
+
+
+def inventaire_eml_index(comptes):
+    """{chemin: (adresse, dossier_safe, uid, mtime, taille)} des .eml à
+    indexer : comptes configurés, hors dossiers spam."""
+    inventaire = {}
+    for compte in list(comptes):
+        adresse = compte.get("adresse", "")
+        dossier_compte = os.path.join(DOSSIER_STORAGE, adresse.replace("@", "_at_"))
+        try:
+            sous_dossiers = os.listdir(dossier_compte)
+        except OSError:
+            continue
+        for dossier_safe in sous_dossiers:
+            if dossier_safe.startswith("_") or dossier_est_spam(dossier_safe):
+                continue
+            chemin_dossier = os.path.join(dossier_compte, dossier_safe)
+            try:
+                with os.scandir(chemin_dossier) as it:
+                    for entree in it:
+                        if not entree.name.endswith(".eml") or not entree.is_file():
+                            continue
+                        st = entree.stat()
+                        inventaire[entree.path] = (adresse, dossier_safe,
+                                                   uid_depuis_nom_fichier(entree.name[:-4]),
+                                                   st.st_mtime, st.st_size)
+            except OSError:
+                continue
+    return inventaire
+
+
+class ServiceIndexRecherche(QThread):
+    """Tient l'index de la recherche globale à jour, en permanence et en
+    arrière-plan : à chaque passe, il compare les .eml du disque à l'index
+    (nouveaux, modifiés, déplacés, supprimés) et ne relit que ce qui a changé,
+    les mails les plus récents d'abord. Une passe toutes les 5 minutes, ou
+    tout de suite quand reveiller() est appelé (nouveaux mails prêts)."""
+
+    progres = Signal(int, int)   # (nb_faits, nb_a_faire) pendant une passe
+    termine = Signal(int)        # nb de mails dans l'index en fin de passe
+
+    def __init__(self, comptes):
+        super().__init__()
+        self.comptes = comptes
+        self._actif = True
+        self._reveil = _threading.Event()
+        self.en_cours = (0, 0)     # lu par l'interface : (faits, à faire)
+        self.nb_indexes = 0
+
+    def arreter(self):
+        self._actif = False
+        self._reveil.set()
+
+    def reveiller(self):
+        self._reveil.set()
+
+    def run(self):
+        import time as _t
+        try:
+            conn = _ouvrir_index_recherche()
+        except Exception as e:
+            print(f"[INDEX] ouverture impossible : {e}")
+            return
+        try:
+            while self._actif:
+                try:
+                    self._passe(conn)
+                except Exception:
+                    import traceback as _tb
+                    print(f"[INDEX] erreur de passe\n{_tb.format_exc()}")
+                self._reveil.wait(300)
+                self._reveil.clear()
+                _t.sleep(2)   # regroupe les réveils rapprochés
+        finally:
+            conn.close()
+
+    def _passe(self, conn):
+        import time as _t
+        t0 = _t.time()
+        disque = inventaire_eml_index(self.comptes)
+        connus = {chemin: (mtime, taille, ident) for ident, chemin, mtime, taille in
+                  conn.execute("SELECT id, chemin, mtime, taille FROM mails")}
+        disparus = [connus[c][2] for c in connus if c not in disque]
+        if disparus:
+            with _VERROU_INDEX_RECHERCHE:
+                for i in range(0, len(disparus), 500):
+                    lot = disparus[i:i + 500]
+                    marques = ",".join("?" * len(lot))
+                    conn.execute(f"DELETE FROM mails WHERE id IN ({marques})", lot)
+                    conn.execute(f"DELETE FROM texte WHERE rowid IN ({marques})", lot)
+                conn.commit()
+        a_faire = [c for c, (_a, _d, _u, mtime, taille) in disque.items()
+                   if c not in connus or connus[c][0] != mtime or connus[c][1] != taille]
+        a_faire.sort(key=lambda c: disque[c][3], reverse=True)
+        nb = len(a_faire)
+        self.nb_indexes = len(disque) - nb
+        if not nb:
+            self.en_cours = (0, 0)
+            if disparus:
+                print(f"[INDEX] {len(disparus)} mail(s) retiré(s) de l'index")
+            self.termine.emit(len(disque))
+            return
+        print(f"[INDEX] {nb} mail(s) à indexer, {len(disparus)} retiré(s)")
+        dernier_commit = _t.time()
+        dernier_signal = 0
+        for n, chemin in enumerate(a_faire, 1):
+            if not self._actif:
+                break
+            adresse, dossier_safe, uid, mtime, taille = disque[chemin]
+            try:
+                with open(chemin, "rb") as f:
+                    raw = f.read()
+                infos = extraire_texte_mail_index(raw)
+            except Exception as e:
+                print(f"[INDEX] {os.path.basename(chemin)} illisible : {e}")
+                infos = None
+            with _VERROU_INDEX_RECHERCHE:
+                ancien = connus.get(chemin)
+                if ancien:
+                    conn.execute("DELETE FROM mails WHERE id=?", (ancien[2],))
+                    conn.execute("DELETE FROM texte WHERE rowid=?", (ancien[2],))
+                if infos is not None:
+                    cur = conn.execute(
+                        "INSERT INTO mails(chemin, adresse, dossier, uid, mtime, taille, date, ts, pj)"
+                        " VALUES(?,?,?,?,?,?,?,?,?)",
+                        (chemin, adresse, dossier_safe, uid, mtime, taille, infos["date"],
+                         _horodatage_index(infos["date"], mtime), infos["nb_pj"]))
+                    conn.execute("INSERT INTO texte(rowid, de, a, sujet, corps, pj_noms, pj)"
+                                 " VALUES(?,?,?,?,?,?,?)",
+                                 (cur.lastrowid, infos["de"], infos["a"], infos["sujet"],
+                                  infos["corps"], infos["pj_noms"], infos["pj"]))
+                if _t.time() - dernier_commit > 2:
+                    conn.commit()
+                    dernier_commit = _t.time()
+            self.en_cours = (n, nb)
+            self.nb_indexes = len(disque) - nb + n
+            if _t.time() - dernier_signal > 1:
+                self.progres.emit(n, nb)
+                dernier_signal = _t.time()
+            # Laisse respirer l'interface (le fil d'affichage partage le GIL)
+            _t.sleep(0.004)
+        with _VERROU_INDEX_RECHERCHE:
+            conn.commit()
+        self.en_cours = (0, 0)
+        print(f"[INDEX] passe terminée : {nb} mail(s) en {_t.time() - t0:.0f} s")
+        self.termine.emit(self.nb_indexes)
+
+
+def _normaliser_recherche(texte):
+    """Minuscules sans accents, MÊME LONGUEUR que le texte d'origine (les
+    positions trouvées dans l'un valent pour l'autre)."""
+    import unicodedata
+    return "".join((unicodedata.normalize("NFD", c)[0] if c.isalpha() else c).lower()[:1] or c
+                   for c in texte)
+
+
+def termes_recherche(saisie):
+    """[(terme, est_expression)] : mots isolés, ou texte entre guillemets."""
+    termes = []
+    for expr, mot in re.findall(r'"([^"]+)"|(\S+)', saisie or ""):
+        if expr:
+            mots = re.findall(r"\w+", expr)
+            if mots:
+                termes.append((" ".join(mots), True))
+        else:
+            termes.extend((m, False) for m in re.findall(r"\w+", mot))
+    # Lettres isolées (l', d', j', qu'…) : trouvées dans presque tous les
+    # mails et très lentes en début de mot — ignorées s'il reste autre chose.
+    longs = [t for t in termes if t[1] or len(t[0]) > 1]
+    return longs or termes
+
+
+def _requete_fts(termes, colonnes, operateur="AND"):
+    parties = []
+    for terme, expression in termes:
+        terme = terme.replace('"', "")
+        parties.append(f'"{terme}"' if expression else f'"{terme}"*')
+    return "{" + " ".join(colonnes) + "} : (" + f" {operateur} ".join(parties) + ")"
+
+
+COLONNES_RECHERCHE = {"de": ("de",), "a": ("a",), "sujet": ("sujet",),
+                      "corps": ("corps",), "pj": ("pj_noms", "pj")}
+LIBELLES_COLONNES_RECHERCHE = {"de": "expéditeur", "a": "destinataire", "sujet": "sujet",
+                               "corps": "texte", "pj": "PJ"}
+
+
+def rechercher_dans_index(saisie, champs, adresses=None, dossier=None, limite=3000):
+    """Résultats de la recherche globale, du plus récent au plus ancien :
+    [{adresse, nom_safe, uid, de, a, sujet, date, a_pj, trouve_dans: [champ]}].
+    champs : parmi "de", "a", "sujet", "corps", "pj". adresses : comptes à
+    fouiller (None = tous) ; dossier : dossier_safe seul (avec un compte)."""
+    termes = termes_recherche(saisie)
+    colonnes = [c for ch in champs for c in COLONNES_RECHERCHE.get(ch, ())]
+    if not termes or not colonnes or not os.path.exists(FICHIER_INDEX_RECHERCHE):
+        return []
+    conn = _ouvrir_index_recherche()
+    try:
+        sql = ("SELECT m.id, m.adresse, m.dossier, m.uid, m.date, m.pj, t.de, t.a, t.sujet "
+               "FROM texte t JOIN mails m ON m.id = t.rowid WHERE texte MATCH ?")
+        params = [_requete_fts(termes, colonnes)]
+        if adresses is not None:
+            sql += f" AND m.adresse IN ({','.join('?' * len(adresses))})"
+            params += list(adresses)
+        if dossier is not None:
+            sql += " AND m.dossier = ?"
+            params.append(dossier)
+        sql += " ORDER BY m.ts DESC LIMIT ?"
+        params.append(limite)
+        lignes = conn.execute(sql, params).fetchall()
+        resultats = {}
+        for ident, adresse, dossier_safe, uid, date, nb_pj, de, a, sujet in lignes:
+            resultats[ident] = {"id": ident, "adresse": adresse, "nom_safe": dossier_safe,
+                                "uid": uid, "date": date, "a_pj": bool(nb_pj), "de": de or "",
+                                "a": a or "", "sujet": sujet or "", "trouve_dans": []}
+        # Où chaque mot a été trouvé (au moins un des mots dans ce champ)
+        if resultats:
+            import json as _json
+            ids = _json.dumps(list(resultats))
+            for champ in champs:
+                cols = COLONNES_RECHERCHE.get(champ)
+                if not cols:
+                    continue
+                for (ident,) in conn.execute(
+                        "SELECT rowid FROM texte WHERE texte MATCH ? AND rowid IN "
+                        "(SELECT value FROM json_each(?))",
+                        (_requete_fts(termes, cols, "OR"), ids)):
+                    resultats[ident]["trouve_dans"].append(champ)
+        return list(resultats.values())
+    finally:
+        conn.close()
+
+
+def extrait_resultat_recherche(ident, saisie, champs):
+    """(libellé, avant, trouvé, après) : passage où le premier mot cherché
+    apparaît, dans le texte ou une PJ (libellé « PJ nom.pdf ») ; None sinon."""
+    termes = termes_recherche(saisie)
+    if not termes or not os.path.exists(FICHIER_INDEX_RECHERCHE):
+        return None
+    conn = _ouvrir_index_recherche()
+    try:
+        ligne = conn.execute("SELECT sujet, de, a, corps, pj_noms, pj FROM texte WHERE rowid=?",
+                             (ident,)).fetchone()
+    finally:
+        conn.close()
+    if not ligne:
+        return None
+    sujet, de, a, corps, pj_noms, pj = ligne
+    morceaux = []   # (libellé, texte)
+    if "sujet" in champs:
+        morceaux.append(("Sujet", sujet or ""))
+    if "de" in champs:
+        morceaux.append(("Expéditeur", de or ""))
+    if "a" in champs:
+        morceaux.append(("Destinataire", a or ""))
+    if "corps" in champs:
+        morceaux.append(("Texte du mail", corps or ""))
+    if "pj" in champs:
+        for nom in (pj_noms or "").split("\n"):
+            if nom:
+                morceaux.append((f"PJ {nom}", nom))
+        for m in re.finditer(re.escape(SEPARATEUR_PJ_INDEX) + r"([^" + FIN_SEPARATEUR_PJ_INDEX + r"]*)"
+                             + re.escape(FIN_SEPARATEUR_PJ_INDEX) + r"\n(.*?)(?=" +
+                             re.escape(SEPARATEUR_PJ_INDEX) + r"|\Z)", pj or "", re.S):
+            morceaux.append((f"PJ {m.group(1)}", m.group(2)))
+    motifs = []
+    for terme, expression in sorted(termes, key=lambda t: -len(t[0])):
+        t = _normaliser_recherche(terme)
+        if expression:
+            motifs.append(r"\b" + r"\W+".join(re.escape(w) for w in t.split()) + r"\b")
+        else:
+            motifs.append(r"\b" + re.escape(t))
+    for libelle, texte in morceaux:
+        norm = _normaliser_recherche(texte)
+        for motif in motifs:
+            m = re.search(motif, norm)
+            if not m:
+                continue
+            debut = max(0, m.start() - 90)
+            fin = min(len(texte), m.end() + 140)
+            avant = ("…" if debut else "") + re.sub(r"\s+", " ", texte[debut:m.start()])
+            apres = re.sub(r"\s+", " ", texte[m.end():fin]) + ("…" if fin < len(texte) else "")
+            return libelle, avant, texte[m.start():m.end()], apres
+    return None
+
+
+def etat_index_recherche():
+    """(nb de mails dans l'index) — 0 si l'index n'existe pas encore."""
+    if not os.path.exists(FICHIER_INDEX_RECHERCHE):
+        return 0
+    try:
+        conn = _ouvrir_index_recherche()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM mails").fetchone()[0]
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
 class ServiceCompletudeHtml(QThread):
     """Garantit, EN PERMANENCE et sans aucune action de l'utilisateur, que
     chaque .eml présent sur le disque (tous comptes, tous dossiers, IMAP comme
@@ -30836,6 +31373,9 @@ class FenetreRedaction(QDialog):
     APERCU_PJ_TEXTES = (".txt", ".csv", ".log")
     APERCU_PJ_DOCUMENTS = (".doc", ".docx", ".odt", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf")
     APERCU_PJ_PAGES_PDF_MAX = 30
+    # Pages web (24/11/2026, bug remonté : un .html joint s'ouvrait dans le
+    # navigateur de Windows) : affichées telles quelles dans l'aperçu
+    APERCU_PJ_PAGES_WEB = (".html", ".htm")
 
     def _construire_apercu_pj(self):
         """Panneau d'aperçu, masqué au départ ; la vue web est créée au
@@ -30891,7 +31431,8 @@ class FenetreRedaction(QDialog):
             self._statut_pj(f"Fichier introuvable (déplacé ou supprimé ?) : {nom}")
             return
         ext = os.path.splitext(nom)[1].lower()
-        if ext not in self.APERCU_PJ_IMAGES + self.APERCU_PJ_TEXTES + self.APERCU_PJ_DOCUMENTS:
+        if ext not in (self.APERCU_PJ_IMAGES + self.APERCU_PJ_TEXTES + self.APERCU_PJ_DOCUMENTS
+                       + self.APERCU_PJ_PAGES_WEB):
             self._ouvrir_pj_compose_windows(chemin)
             return
         if self._vue_apercu_pj is None:
@@ -30906,6 +31447,7 @@ class FenetreRedaction(QDialog):
         self._lbl_apercu_pj.setToolTip(chemin)
         self.webview.hide()
         self._apercu_pj.show()
+        self._vue_apercu_pj.page().setBackgroundColor(QColor("#1e1e1e"))  # blanc après une page web
 
         if ext in self.APERCU_PJ_IMAGES:
             self._afficher_apercu_pj(
@@ -30920,6 +31462,12 @@ class FenetreRedaction(QDialog):
                 self._afficher_apercu_pj(f"<p class='msg'>Lecture impossible : {html.escape(str(e))}</p>")
                 return
             self._afficher_apercu_pj(f'<pre class="doc">{html.escape(texte)}</pre>')
+            return
+        if ext in self.APERCU_PJ_PAGES_WEB:
+            # Le fichier lui-même, chargé directement : ses images et feuilles
+            # de style voisines sur le disque s'affichent aussi.
+            self._vue_apercu_pj.page().setBackgroundColor(QColor("white"))
+            self._vue_apercu_pj.load(QUrl.fromLocalFile(chemin))
             return
 
         # PDF et documents bureautiques : conversion hors du fil de l'interface
@@ -34011,7 +34559,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 23/11/2026 20h21")
+        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 17h51")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -34604,6 +35152,10 @@ class ClientMail(QMainWindow):
         if not (getattr(self, '_remplisseur', None) and self._remplisseur.isRunning()):
             self._remplisseur = RemplisseurCorps()
             self._remplisseur.start()
+        # Index de la recherche globale (24/11/2026, voir ServiceIndexRecherche)
+        if not (getattr(self, '_indexeur', None) and self._indexeur.isRunning()):
+            self._indexeur = ServiceIndexRecherche(COMPTES)
+            self._indexeur.start()
 
     def _on_html_pret(self, adresse, dossier_safe):
         """Des mails d'un dossier viennent de devenir COMPLETS (html + photos)
@@ -34612,6 +35164,8 @@ class ClientMail(QMainWindow):
         aucune action de l'utilisateur. Mêmes garde-fous que les autres
         rafraîchissements automatiques (IDLE, Graph) : jamais pendant un
         glisser-déposer, ni par-dessus des résultats de recherche affichés."""
+        if getattr(self, '_indexeur', None):
+            self._indexeur.reveiller()   # nouveaux mails à indexer pour la recherche
         self._maj_compteurs_non_lus()
         if not self.compte_actif or self.compte_actif.get("adresse", "") != adresse:
             return
@@ -39510,7 +40064,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 23/11/2026 à 20h21")
+        lbl_version = QLabel("Version du 24/11/2026 à 17h51")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -42786,8 +43340,14 @@ if (typeof module === 'object') {
         # Champs de recherche
         cb_expediteur = QCheckBox("Dans l'expéditeur")
         cb_sujet = QCheckBox("Dans le sujet")
+        # Corps et pièces jointes (24/11/2026) : passent par l'index de la
+        # recherche globale (ServiceIndexRecherche)
+        cb_corps = QCheckBox("Dans le corps du mail")
+        cb_pj = QCheckBox("Dans les pièces jointes (PDF, Word, Excel, LibreOffice…)")
         layout.addWidget(cb_expediteur)
         layout.addWidget(cb_sujet)
+        layout.addWidget(cb_corps)
+        layout.addWidget(cb_pj)
 
         # Périmètre
         lbl2 = QLabel("Périmètre :")
@@ -42795,8 +43355,26 @@ if (typeof module === 'object') {
         layout.addWidget(lbl2)
         rb_actuel = QRadioButton("Dossier actuel uniquement")
         rb_tous = QRadioButton("Tous les dossiers du compte")
+        rb_comptes = QRadioButton("Tous les comptes")
         layout.addWidget(rb_actuel)
         layout.addWidget(rb_tous)
+        layout.addWidget(rb_comptes)
+
+        # État de l'index, rafraîchi tant que la fenêtre est ouverte
+        lbl_index = QLabel("")
+        lbl_index.setWordWrap(True)
+        lbl_index.setStyleSheet("color: #888888; font-size: 10px; margin-top: 4px;")
+        layout.addWidget(lbl_index)
+
+        def _maj_etat_index():
+            try:
+                lbl_index.setText(self._texte_etat_index_recherche())
+            except RuntimeError:
+                return   # fenêtre fermée
+        _maj_etat_index()
+        timer_index = QTimer(dlg)
+        timer_index.timeout.connect(_maj_etat_index)
+        timer_index.start(2000)
 
         # Indicateur de progression
         self._lbl_recherche_progress = QLabel("")
@@ -42820,44 +43398,340 @@ if (typeof module === 'object') {
             terme = champ.text().strip()
             if not terme:
                 return
+            champs = [ch for ch, cb in (("de", cb_expediteur), ("sujet", cb_sujet),
+                                        ("corps", cb_corps), ("pj", cb_pj)) if cb.isChecked()]
+            if not champs:
+                self._lbl_recherche_progress.setText("Cochez au moins un endroit où chercher.")
+                return
+            if not termes_recherche(terme):
+                self._lbl_recherche_progress.setText("Tapez au moins un mot (lettres ou chiffres).")
+                return
 
-            if rb_actuel.isChecked():
-                # Recherche locale dans la liste affichée
-                terme_lower = terme.lower()
-                nb = 0
-                for i in range(self.liste_messages.count()):
-                    it = self.liste_messages.item(i)
-                    trouve = False
-                    if cb_expediteur.isChecked() and terme_lower in (it.data(Qt.ItemDataRole.UserRole + 1) or "").lower():
-                        trouve = True
-                    if cb_sujet.isChecked() and terme_lower in (it.data(Qt.ItemDataRole.UserRole + 2) or "").lower():
-                        trouve = True
-                    it.setHidden(not trouve)
-                    if trouve:
-                        nb += 1
-                self.label_statut.setText(f"  {nb} résultat(s) pour : {terme}")
-                self._filtre_actif = terme_lower
-                self.btn_effacer_filtre.setVisible(True)
-                self._maj_label_dossier()
-                dlg.accept()
+            # Toutes les recherches passent par l'index et s'affichent dans la
+            # même fenêtre de résultats (24/11/2026, demandé) ; seul le
+            # périmètre change.
+            compte = self.compte_actif
+            if rb_comptes.isChecked():
+                adresses, dossier, titre = None, None, "tous les comptes"
+            elif rb_actuel.isChecked():
+                dossier = self._nom_imap(self.dossier_actif).replace("/", "_").replace("\\", "_").replace('"', '')
+                adresses = [compte["adresse"]]
+                titre = f"le dossier {self._libelle_dossier_recherche(self.dossier_actif or '')}"
             else:
-                # Recherche sur le DISQUE (cache local) de tous les dossiers du
-                # compte — 18/09/2026, demandé par l'utilisateur : tout mail est
-                # intégralement sur le disque dur (complet, photos comprises)
-                # AVANT d'être visible, la recherche ne doit donc jamais
-                # interroger le serveur ni lister un mail qui n'est pas prêt.
-                # Remplace _recherche_imap_globale (conservée, plus appelée).
-                self._lbl_recherche_progress.setText("Recherche en cours...")
-                QApplication.processEvents()
-                resultats = self._recherche_cache_globale(terme, cb_expediteur.isChecked(),
-                                                          cb_sujet.isChecked())
-                dlg.accept()
-                self._afficher_resultats_recherche(resultats, terme)
+                adresses, dossier = [compte["adresse"]], None
+                titre = f"le compte {self._nom_compte_recherche(compte['adresse'])}"
+            self._lbl_recherche_progress.setText("Recherche en cours...")
+            QApplication.processEvents()
+            if etat_index_recherche() or cb_corps.isChecked() or cb_pj.isChecked():
+                resultats = self._completer_resultats_index(
+                    rechercher_dans_index(terme, champs, adresses=adresses, dossier=dossier), terme)
+            else:
+                # Index pas encore construit (tout premier lancement) :
+                # ancienne recherche sur le disque, compte affiché seulement
+                # (18/09/2026 : jamais le serveur, jamais un mail pas prêt).
+                terme_min = terme.lower()
+                resultats = [r for r in self._recherche_cache_globale(terme, "de" in champs, "sujet" in champs)
+                             if dossier is None or r["nom_safe"] == dossier]
+                for r in resultats:
+                    r.update(adresse=compte["adresse"], id=None,
+                             trouve_dans=[c for c in ("de", "sujet") if terme_min in (r.get(c) or "").lower()])
+            dlg.accept()
+            self._ouvrir_resultats_recherche(terme, champs, resultats, titre)
 
         btn_ok.clicked.connect(lancer_recherche)
         champ.returnPressed.connect(lancer_recherche)
         dlg.show()
         self._conserver_fenetre_secondaire(dlg)
+
+    # --- Recherche globale par l'index (24/11/2026, voir ServiceIndexRecherche) ---
+
+    def _texte_etat_index_recherche(self):
+        idx = getattr(self, '_indexeur', None)
+        nb = idx.nb_indexes if idx and idx.nb_indexes else etat_index_recherche()
+        nb_txt = f"{nb:,}".replace(",", " ")
+        if idx and idx.isRunning() and idx.en_cours[1]:
+            fait, total = idx.en_cours
+            reste = f"{total - fait:,}".replace(",", " ")
+            return (f"Corps et pièces jointes : {nb_txt} mail(s) indexé(s), {reste} en cours "
+                    f"d'indexation — résultats partiels en attendant.")
+        if not nb:
+            return "Corps et pièces jointes : index en préparation…"
+        return f"Corps et pièces jointes : {nb_txt} mail(s) indexé(s)."
+
+    @staticmethod
+    def _libelle_dossier_recherche(nom_affiche):
+        """Nom de dossier lisible (mêmes règles que la liste des résultats)."""
+        if nom_affiche == "INBOX":
+            return "Boîte de réception"
+        parties = [p for p in re.split(r"[./]", nom_affiche) if p not in ("INBOX", "DOSSIERS", "")]
+        return " › ".join(nom_affichage_dossier(p) for p in parties) if parties else nom_affiche
+
+    def _completer_resultats_index(self, bruts, saisie):
+        """Résultats bruts de l'index → dictionnaires de la liste des résultats
+        (mêmes clés que _recherche_cache_globale), sans les mails pas encore
+        complets ou supprimés depuis, ni les doublons (Gmail range un même
+        mail dans plusieurs dossiers ; un mail déplacé peut traîner)."""
+        comptes = {c.get("adresse"): c for c in COMPTES}
+        visibles, metas, libelles = {}, {}, {}
+        resultats = []
+        for r in bruts:
+            compte = comptes.get(r["adresse"])
+            if not compte:
+                continue
+            cle = (r["adresse"], r["nom_safe"])
+            if cle not in visibles:
+                try:
+                    visibles[cle] = uids_visibles_en_cache(compte, r["nom_safe"])
+                    metas[cle] = charger_cache_meta(compte, r["nom_safe"])
+                except Exception:
+                    visibles[cle], metas[cle] = set(), {}
+            if r["uid"] not in visibles[cle]:
+                continue
+            if r["adresse"] not in libelles:
+                if self.compte_actif and compte.get("adresse") == self.compte_actif.get("adresse"):
+                    paires = list((self._map_imap or {}).items())
+                else:
+                    paires = charger_cache_arbo(compte)[1] or []
+                libelles[r["adresse"]] = {
+                    b.replace("/", "_").replace("\\", "_").replace('"', ''): a for a, b in paires}
+            info = metas[cle].get(r["uid"], {}) or {}
+            resultats.append({
+                "id": r["id"],
+                "adresse": r["adresse"],
+                "dossier": libelles[r["adresse"]].get(r["nom_safe"], r["nom_safe"]),
+                "nom_safe": r["nom_safe"],
+                "uid": r["uid"].encode(),
+                "de": r["de"], "a": r["a"],
+                "sujet": r["sujet"] or "(sans sujet)",
+                "date": r["date"],
+                "lu": True,
+                "repondu": info.get("repondu", False),
+                "a_pj": r["a_pj"] or info.get("a_pj", False),
+                "epingle": bool(info.get("epingle", False)),
+                "trouve_dans": r["trouve_dans"],
+            })
+        # Doublons : un seul exemplaire par (compte, sujet, date), en gardant
+        # de préférence un dossier « réel » plutôt que Corbeille, Envoyés,
+        # « Tous les messages » de Gmail…
+        def _secondaire(r):
+            ns = r["nom_safe"].lower()
+            return 1 if any(m in ns for m in ("trash", "corbeille", "all mail", "tous les messages",
+                                               "drafts", "brouillons", "archive")) else 0
+        vus, uniques = set(), []
+        for r in sorted(resultats, key=_secondaire):
+            cle = (r["adresse"], r["sujet"].strip().lower(), r["date"].strip())
+            if cle not in vus:
+                vus.add(cle)
+                uniques.append(r)
+        ordre = {r["id"]: i for i, r in enumerate(resultats)}
+        uniques.sort(key=lambda r: ordre[r["id"]])   # garde l'ordre chronologique de l'index
+        # Où le mot a été trouvé, quand ce n'est ni l'expéditeur ni le sujet
+        # (visibles dans la liste) : « texte » ou « PJ devis.pdf »
+        for r in uniques[:300]:
+            if not ({"de", "sujet"} & set(r["trouve_dans"])):
+                ex = extrait_resultat_recherche(r["id"], saisie, r["trouve_dans"])
+                if ex:
+                    r["trouve_libelle"] = "texte" if ex[0] == "Texte du mail" else ex[0]
+        return uniques
+
+    def _ouvrir_resultats_recherche(self, saisie, champs, resultats, titre="tous les comptes"):
+        """Fenêtre des résultats, pour tous les périmètres (dossier, compte,
+        tous les comptes — titre le précise) : une ligne par mail, le
+        passage trouvé en dessous ; double-clic (ou Entrée, ou « Ouvrir le
+        mail ») = ouvrir le mail dans la fenêtre principale, sur son compte et
+        son dossier. La fenêtre reste ouverte pour ouvrir les suivants."""
+        import html as _html
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                                       QTreeWidget, QTreeWidgetItem, QHeaderView)
+        fen = QDialog(None)
+        fen.setWindowTitle(f"Recherche dans {titre} : {saisie}")
+        fen.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowTitleHint |
+                           Qt.WindowType.WindowCloseButtonHint |
+                           Qt.WindowType.WindowMinimizeButtonHint |
+                           Qt.WindowType.WindowMaximizeButtonHint)
+        fen.resize(1100, 640)
+        fen.setStyleSheet("""
+            QDialog, QWidget { background-color: #2a2a2a; color: white; font-family: Verdana; font-size: 11px; }
+            QTreeWidget { background-color: #1e1e1e; border: 1px solid #5a5a5a; }
+            QTreeWidget::item { padding: 3px 2px; }
+            QTreeWidget::item:selected { background-color: #F5DEB3; color: black; }
+            QHeaderView::section { background-color: #3a3a3a; color: #dddddd; border: none;
+                                   border-right: 1px solid #555; padding: 4px; }
+        """ + STYLE_BOUTON + STYLE_SCROLLBAR)  # barres rouges comme partout
+        lay = QVBoxLayout(fen)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        en_tete = QLabel(f"{len(resultats)} résultat(s) pour « {_html.escape(saisie)} » — "
+                         f"{_html.escape(self._texte_etat_index_recherche())}")
+        en_tete.setWordWrap(True)
+        en_tete.setStyleSheet("color: #aaaaaa;")
+        lay.addWidget(en_tete)
+
+        arbre = QTreeWidget()
+        arbre.setRootIsDecorated(False)
+        arbre.setUniformRowHeights(True)
+        arbre.setHeaderLabels(["Date", "Compte", "Dossier", "De", "Sujet", "Trouvé dans"])
+        noms_comptes = {}
+        for r in resultats:
+            adresse = r["adresse"]
+            if adresse not in noms_comptes:
+                noms_comptes[adresse] = self._nom_compte_recherche(adresse)
+            dans = r.get("trouve_libelle") or ", ".join(
+                LIBELLES_COLONNES_RECHERCHE.get(c, c) for c in r["trouve_dans"])
+            de = r["de"].split("<")[0].strip().strip('"') or r["de"]
+            it = QTreeWidgetItem([self._formater_date(r["date"]), noms_comptes[adresse],
+                                  self._libelle_dossier_recherche(r["dossier"]), de, r["sujet"], dans])
+            it.setData(0, Qt.ItemDataRole.UserRole, r)
+            arbre.addTopLevelItem(it)
+        # Colonnes à la largeur de leur contenu, fenêtre élargie d'autant
+        # dans la limite de l'écran ; si tout ne tient pas, les colonnes les
+        # plus larges sont tronquées d'abord (24/11/2026, demandé).
+        en_tetes = arbre.header()
+        en_tetes.setStretchLastSection(False)
+        en_tetes.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        naturelles = []
+        for col in range(arbre.columnCount()):
+            arbre.resizeColumnToContents(col)
+            naturelles.append(arbre.columnWidth(col) + 14)
+
+        def _ajuster_colonnes():
+            dispo = arbre.viewport().width()
+            if dispo <= 0:
+                return
+            largeurs = list(naturelles)
+            if sum(largeurs) > dispo:
+                # Plafond commun le plus haut possible : seules les colonnes
+                # plus larges que lui sont rognées.
+                plafond = max(largeurs)
+                restantes = sorted(largeurs, reverse=True)
+                for i in range(len(restantes)):
+                    fixes = sum(restantes[i + 1:])
+                    plafond = (dispo - fixes) // (i + 1)
+                    if i + 1 >= len(restantes) or plafond >= restantes[i + 1]:
+                        break
+                largeurs = [min(l, max(40, plafond)) for l in largeurs]
+            else:
+                # Place en trop : répartie au prorata, rien n'est rogné
+                surplus = dispo - sum(largeurs)
+                total = sum(largeurs) or 1
+                largeurs = [l + surplus * l // total for l in largeurs]
+            for col, l in enumerate(largeurs):
+                arbre.setColumnWidth(col, l)
+
+        class _SurveillanceLargeur(QObject):
+            def eventFilter(self, objet, evenement):
+                if evenement.type() == QEvent.Type.Resize:
+                    _ajuster_colonnes()
+                return False
+        arbre._surveillance_largeur = _SurveillanceLargeur(arbre)
+        arbre.viewport().installEventFilter(arbre._surveillance_largeur)
+        lay.addWidget(arbre, 1)
+
+        extrait = QLabel("")
+        extrait.setWordWrap(True)
+        extrait.setTextFormat(Qt.TextFormat.RichText)
+        extrait.setMinimumHeight(70)
+        extrait.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        extrait.setStyleSheet("background-color: #1e1e1e; border: 1px solid #5a5a5a; padding: 8px;")
+        lay.addWidget(extrait)
+
+        bas = QHBoxLayout()
+        bas.addStretch(1)
+        # Mot trouvé dans une PJ : l'ouvrir directement à cet endroit (24/11/2026)
+        btn_pj = QPushButton("  Ouvrir la PJ à cet endroit  ")
+        btn_pj.setToolTip("Ouvre le mail, puis la pièce jointe, et y cherche le passage trouvé")
+        btn_ouvrir = QPushButton("  Ouvrir le mail  ")
+        btn_fermer = QPushButton("  Fermer  ")
+        for b in (btn_pj, btn_ouvrir, btn_fermer):
+            b.setStyleSheet(STYLE_BOUTON)
+        btn_pj.setVisible(False)
+        bas.addWidget(btn_pj)
+        bas.addSpacing(8)
+        bas.addWidget(btn_ouvrir)
+        bas.addSpacing(8)
+        bas.addWidget(btn_fermer)
+        lay.addLayout(bas)
+
+        def _sur_selection():
+            it = arbre.currentItem()
+            if not it:
+                extrait.setText("")
+                return
+            r = it.data(0, Qt.ItemDataRole.UserRole)
+            ex = (extrait_resultat_recherche(r["id"], saisie, r["trouve_dans"] or champs)
+                  if r.get("id") is not None else None)
+            etat_extrait["ex"] = ex
+            btn_pj.setVisible(bool(ex and ex[0].startswith("PJ ")))
+            if not ex:
+                extrait.setText(f"<span style='color:#aaaaaa'>{_html.escape(r['sujet'])}</span>")
+                return
+            libelle, avant, trouve, apres = ex
+            extrait.setText(
+                f"<span style='color:#aaaaaa'>{_html.escape(libelle)} :</span><br>"
+                f"{_html.escape(avant)}<span style='background-color:#DAA520; color:black;'>"
+                f"{_html.escape(trouve)}</span>{_html.escape(apres)}")
+
+        etat_extrait = {"ex": None}
+
+        def _ouvrir(*_a, pj=False):
+            it = arbre.currentItem()
+            if not it:
+                return
+            r = it.data(0, Qt.ItemDataRole.UserRole)
+            compte = next((c for c in COMPTES if c.get("adresse") == r["adresse"]), None)
+            if compte is None:
+                extrait.setText("Ce compte n'existe plus dans COURRIER.")
+                return
+            # Une liste de résultats affichée dans la fenêtre principale est
+            # d'abord refermée, comme avec le bouton qui efface le filtre.
+            if getattr(self, '_items_sauvegardes', None) or getattr(self, '_filtre_actif', None):
+                try:
+                    self._effacer_filtre()
+                except Exception:
+                    pass
+            ex = etat_extrait["ex"]
+            if pj and ex and ex[0].startswith("PJ "):
+                # ex = ("PJ nom.pdf", avant, texte trouvé tel qu'écrit, après)
+                self.ouvrir_pj_a_l_endroit(compte, r["nom_safe"], r["uid"], ex[0][3:], ex[2])
+            else:
+                self.aller_au_mail(compte, r["nom_safe"], r["uid"])
+
+        arbre.currentItemChanged.connect(lambda *_a: _sur_selection())
+        arbre.itemDoubleClicked.connect(lambda *_a: _ouvrir())
+        arbre.itemActivated.connect(lambda *_a: _ouvrir())
+        btn_ouvrir.clicked.connect(lambda *_a: _ouvrir())
+        btn_pj.clicked.connect(lambda *_a: _ouvrir(pj=True))
+        btn_fermer.clicked.connect(fen.close)
+        if resultats:
+            arbre.setCurrentItem(arbre.topLevelItem(0))
+        else:
+            extrait.setText("Aucun mail trouvé. Si l'indexation est en cours, réessayez dans quelques minutes.")
+        # Largeur voulue = toutes les colonnes en entier (marges, cadre et
+        # barre de défilement de 32 px comprises) ; centrer_fenetre_ecran la
+        # ramène à la zone utile de l'écran si elle est trop large.
+        fen.resize(max(700, sum(naturelles) + 24 + 32 + 6), 640)
+        fen.show()
+        QTimer.singleShot(0, lambda: centrer_fenetre_ecran(fen))
+        self._conserver_fenetre_secondaire(fen)
+        # RECHERCHER reste orange tant que cette fenêtre est ouverte (elle
+        # naît après la fermeture du dialogue, hors de _suivre_fenetre).
+        bouton = getattr(self, "_btn_rechercher", None)
+        if bouton is not None:
+            if not hasattr(self, "_fenetres_boutons"):
+                self._fenetres_boutons = {}
+            self._fenetres_boutons[bouton] = self._fenetres_boutons.get(bouton, []) + [fen]
+            fen.finished.connect(lambda *_a: QTimer.singleShot(0, self._maj_boutons_actifs_rapides))
+            self._maj_boutons_actifs_rapides()
+
+    def _nom_compte_recherche(self, adresse):
+        noms = charger_noms_comptes()
+        if adresse in noms:
+            return noms[adresse]
+        for c in COMPTES:
+            if c.get("adresse") == adresse:
+                return (c.get("nom") or adresse).split(" - ")[0]
+        return adresse
 
     def _recherche_cache_globale(self, terme, dans_expediteur, dans_sujet, dans_destinataire=False):
         """Recherche dans les _meta.json locaux de tous les dossiers du compte actif.
@@ -43185,6 +44059,8 @@ if (typeof module === 'object') {
             nom_court_dossier = " › ".join(parties_filtrees) if parties_filtrees else dossier
             if dossier == "INBOX":
                 nom_court_dossier = "Boîte de réception"
+            if msg.get("trouve_libelle"):   # recherche dans le corps / les PJ (24/11/2026)
+                nom_court_dossier += f" · {msg['trouve_libelle']}"
             item.setData(Qt.ItemDataRole.UserRole + 1, f"{expediteur} [{nom_court_dossier}]")
             item.setData(ROLE_EXPEDITEUR_BRUT, msg["de"])
             if _corresp:
@@ -45610,6 +46486,8 @@ if (typeof module === 'object') {
             if self._item_selectionne != uid_att:
                 return
             def _resultat(ok):
+                if ok is True:
+                    self._ouvrir_pj_attendue(uid_att)
                 # 25 essais × 200 ms : jusqu'à 5 s pour un mail lourd
                 if ok is False and tentative < 25:
                     QTimer.singleShot(200, lambda: _injecter(tentative + 1))
@@ -45622,6 +46500,79 @@ if (typeof module === 'object') {
                 pass
 
         _injecter()
+
+    # --- « Ouvrir la PJ à cet endroit » de la recherche globale (24/11/2026) ---
+    # Le mail est ouvert (aller_au_mail) avec une PJ « attendue » : dès que la
+    # barre des PJ du mail est en place (_on_pieces_jointes), cette PJ est
+    # ouverte, puis le texte trouvé est cherché dedans (case « Rechercher dans
+    # la pièce jointe »), une fois l'aperçu prêt.
+
+    def ouvrir_pj_a_l_endroit(self, compte, dossier_safe, uid, nom_pj, texte):
+        uid = uid.decode() if isinstance(uid, bytes) else str(uid)
+        self._pj_attendue = {"uid": uid, "nom": nom_pj, "texte": texte, "depuis": time.time()}
+        # Même mail déjà affiché : forcer son réaffichage (sinon le garde-fou
+        # anti-rechargement ne repasse pas par la barre des PJ)
+        self._cle_cache_html_affichee = None
+        self.aller_au_mail(compte, dossier_safe, uid)
+
+    def _ouvrir_pj_attendue(self, uid_affiche):
+        attendue = getattr(self, '_pj_attendue', None)
+        if not attendue:
+            return
+        u = uid_affiche.decode() if isinstance(uid_affiche, bytes) else str(uid_affiche)
+        if u != attendue["uid"]:
+            if time.time() - attendue["depuis"] > 30:
+                self._pj_attendue = None   # abandonnée (autre mail affiché depuis)
+            return
+        self._pj_attendue = None
+        pjs = getattr(self, '_pieces_jointes_courantes', []) or []
+        index = next((i for i, p in enumerate(pjs) if p.get("nom") == attendue["nom"]), None)
+        if index is None:
+            index = next((i for i, p in enumerate(pjs)
+                          if (p.get("nom") or "").strip().lower() == attendue["nom"].strip().lower()), None)
+        if index is None:
+            self.label_statut.setText(f"  Pièce jointe introuvable dans ce mail : {attendue['nom']}")
+            return
+        self._ouvrir_pj_depuis_js(index)
+        if attendue["texte"]:
+            QTimer.singleShot(400, lambda: self._chercher_dans_pj_quand_prete(attendue["texte"], u, 0))
+
+    def _chercher_dans_pj_quand_prete(self, texte, uid, essai):
+        """Attend que l'aperçu de la PJ soit prêt (Word converti, page HTML
+        chargée, PDF ouvert), puis y lance la recherche du texte trouvé."""
+        sel = self._item_selectionne
+        if (sel.decode() if isinstance(sel, bytes) else str(sel)) != uid or essai > 50:
+            return   # autre mail, ou 20 s sans aperçu prêt
+
+        def _lancer():
+            if not hasattr(self, '_rech_pj_champ') or not self._rech_pj_champ.isVisible():
+                return   # type de PJ sans recherche (image…)
+            self._rech_pj_champ.setText(texte)
+            self._rech_pj_chercher(1)
+
+        if getattr(self, '_pdf_doc', None) is not None:
+            _lancer()
+            return
+        if getattr(self, '_mode_page_html', False):
+            if getattr(self, '_page_html_chargee', False):
+                QTimer.singleShot(200, _lancer)
+            else:
+                QTimer.singleShot(400, lambda: self._chercher_dans_pj_quand_prete(texte, uid, essai + 1))
+            return
+        if getattr(self, '_mode_doc', False):
+            def _pret(ok):
+                if ok:
+                    QTimer.singleShot(200, _lancer)
+                else:
+                    QTimer.singleShot(400, lambda: self._chercher_dans_pj_quand_prete(texte, uid, essai + 1))
+            try:
+                self.webview.page().runJavaScript(
+                    "(function(){var d=document.getElementById('__doc_viewer__');"
+                    "return !!(d && d.textContent.length > 0);})();", _pret)
+            except Exception:
+                pass
+            return
+        QTimer.singleShot(400, lambda: self._chercher_dans_pj_quand_prete(texte, uid, essai + 1))
 
     def _conserver_fenetre_secondaire(self, dlg):
         """Empêche une fenêtre secondaire indépendante (QDialog(None) affichée
@@ -46333,8 +47284,7 @@ if (typeof module === 'object') {
             self._previsualiser_video(pj)
 
         elif ext in (".html", ".htm"):
-            self._viewer_pj_plein_page = True
-            self._afficher_dans_cef(data.decode("utf-8", errors="replace"))
+            self._previsualiser_page_html(pj)
 
         elif ext in (".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ppt", ".pptx"):
             # Convertir en HTML et afficher dans CEF
@@ -46348,18 +47298,32 @@ if (typeof module === 'object') {
             # molette/+/- que ceux-ci avant leur correctif — en réutilisant
             # le même conteneur, ce fichier hérite automatiquement de
             # _doc_changer_zoom sans code supplémentaire.
+            # Sous l'en-tête et le bloc PJ, comme Word/Excel (24/11/2026 :
+            # la page remplaçait tout le panneau, en-tête compris).
             contenu = data.decode("utf-8", errors="replace")
-            import html as _html
-            contenu_esc = _html.escape(contenu)
-            html_txt = f"""<html><body style="background:#1e1e1e;margin:0;">
-<div id="__doc_viewer__" style="color:#ddd;
-font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;">
-{contenu_esc}</div></body></html>"""
-            self._viewer_pj_plein_page = True
+            doc = getattr(self, '_pdf_doc', None)
+            if doc:
+                pdf_fermer(doc)
+                self._pdf_doc = None
             self._mode_doc = True
             self._mode_image = False
             self._doc_zoom = 1.0
-            self._afficher_dans_cef(html_txt)
+            js = f"""
+(function() {{
+    ['__pdf_viewer__','__doc_viewer__','__img_viewer__'].forEach(function(id) {{
+        var el = document.getElementById(id); if (el) el.remove();
+    }});
+    var div = document.createElement('div');
+    div.id = '__doc_viewer__';
+    div.style.cssText = 'background:#1e1e1e;color:#ddd;font-family:Verdana,sans-serif;'
+        + 'font-size:14px;white-space:pre-wrap;padding:10px;overflow:auto;box-sizing:border-box;';
+    div.textContent = {json.dumps(contenu)};
+    window.__pjAfficherViewer(div);
+}})();"""
+            try:
+                self.webview.page().runJavaScript(js)
+            except Exception:
+                pass
 
         else:
             # Autres types : ouvrir avec l'appli par défaut. Le fichier doit
@@ -46383,6 +47347,140 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
     # le webview (réduit à leur hauteur), le lecteur natif occupe le reste du
     # panneau juste en dessous — même rendu "dans la fenêtre du mail" que
     # pour un PDF, avec le bouton CORPS pour revenir au mail.
+
+    def _previsualiser_page_html(self, pj):
+        """PJ .html/.htm sous l'en-tête et le bloc PJ, avec ◀ Corps
+        (24/11/2026, bug remonté : la page remplaçait tout le panneau de
+        lecture, en-tête et retour au mail compris). Même montage que la
+        vidéo : le panneau de lecture ne garde que le bandeau + bloc PJ, une
+        vue web à part affiche la page juste en dessous. Une vue à part car
+        les pages de mail interdisent les cadres (CSP_PAGES_MAIL) et parce
+        que cette page, venue de l'expéditeur, n'a ainsi aucun accès au pont
+        de COURRIER. Ses scripts tournent et ses images en ligne s'affichent,
+        mais elle ne peut pas lire d'autres fichiers de l'ordinateur. Libérée
+        par _liberer_video
+        (◀ Corps, changement de mail ou de PJ)."""
+        import tempfile
+        self._liberer_pdfxchange()  # libère aussi une vidéo ou une page précédente
+        # Barre du haut des PJ (24/11/2026, demandé) : + / - (zoom de la
+        # page) et Plein écran, comme pour Word ; pas de pages ni de recherche
+        if not hasattr(self, '_pdf_nav') or not self._pdf_nav:
+            self._creer_nav_pdf()
+        self._pdf_btn_prec.hide()
+        self._pdf_btn_suiv.hide()
+        self._pdf_btn_zp.show()
+        self._pdf_btn_zm.show()
+        self._pdf_btn_zp.setEnabled(True)
+        self._pdf_btn_zm.setEnabled(True)
+        self._pdf_lbl.hide()
+        self._rech_pj_reinitialiser()
+        self._rech_pj_afficher(True)   # recherche indispensable sur une longue page
+        self._pdf_nav.show()
+        self._mode_doc = False
+        self._mode_image = False
+        self._mode_page_html = True
+        ext = os.path.splitext(pj["nom"])[1].lower()
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=ext, prefix='courrier_pj_', dir=DOSSIER_APERCU
+        ) as f:
+            f.write(pj["data"])
+            self._video_chemin_temp = f.name   # supprimé par _liberer_video
+        chemin = self._video_chemin_temp
+        generation = self._video_generation
+
+        js = """
+(function() {
+    ['__pdf_viewer__','__doc_viewer__','__img_viewer__','__video_viewer__'].forEach(function(id) {
+        var el = document.getElementById(id); if (el) el.remove();
+    });
+    var d = document.createElement('div');
+    d.id = '__video_viewer__';
+    if (window.__pjAfficherViewer) window.__pjAfficherViewer(d);
+    window.scrollTo(0, 0);
+    var b = document.getElementById('__bloc_pj__') || document.body.querySelector('div');
+    return b ? Math.ceil(b.getBoundingClientRect().bottom) : 0;
+})();"""
+
+        def _construire(hauteur_entete):
+            if generation != getattr(self, '_video_generation', 0) or self._video_chemin_temp != chemin:
+                return  # autre mail ou autre PJ entre-temps
+            vue = QWebEngineView()
+            vue.page().setBackgroundColor(QColor("white"))
+            vue.page().findTextFinished.connect(self._rech_pj_doc_resultat)
+            # En plein écran, la page est agrandie pour occuper la largeur
+            vue.loadFinished.connect(lambda ok: QTimer.singleShot(200, self._page_html_ajuster_largeur))
+            def _chargee(ok, v=vue):
+                if getattr(self, '_video_panneau', None) is v:
+                    self._page_html_chargee = True   # voir _chercher_dans_pj_quand_prete
+            vue.loadFinished.connect(_chargee)
+            reglages = vue.settings()
+            reglages.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, False)
+            # Images et styles en ligne de la page : autorisés, comme dans un
+            # navigateur (sans accès aux fichiers locaux, rien à divulguer)
+            reglages.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+            layout = self.webview.parent().layout()
+            layout.insertWidget(layout.indexOf(self.webview) + 1, vue, 1)
+            if hauteur_entete and hauteur_entete > 0:
+                self.webview.setFixedHeight(int(hauteur_entete * self.webview.zoomFactor()) + 2)
+            self._video_panneau = vue
+            self._video_web = False
+            resize_origine = vue.resizeEvent
+            def _sur_resize(event):
+                resize_origine(event)
+                QTimer.singleShot(100, lambda: self._video_ajuster_entete(3))
+            vue.resizeEvent = _sur_resize
+            self._video_ajuster_entete()
+            vue.load(QUrl.fromLocalFile(chemin))
+            vue.setFocus()   # flèches et molette pour la page, pas pour la liste
+        try:
+            self.webview.page().runJavaScript(js, _construire)
+        except Exception:
+            _construire(0)
+
+    def _page_html_ajuster_largeur(self):
+        """PJ .html en plein écran (24/11/2026, remonté : « la fenêtre passe
+        en plein écran mais pas le html ») : beaucoup de pages ont une
+        colonne de largeur fixe centrée, qui restait étroite au milieu de
+        l'écran. Comme « ajuster en largeur » pour un PDF, on agrandit alors
+        la page pour que cette colonne occupe la largeur (au plus 250 %).
+        Hors plein écran : taille normale (100 %). + / - restent libres."""
+        vue = getattr(self, '_video_panneau', None)
+        if not getattr(self, '_mode_page_html', False) or not hasattr(vue, 'setZoomFactor'):
+            return
+        if not getattr(self, '_pdf_plein_ecran', False):
+            vue.setZoomFactor(1.0)
+            return
+        # Largeur de la colonne de contenu : on descend dans les enveloppes
+        # pleine largeur jusqu'au premier niveau plus étroit que la fenêtre
+        js = """
+(function() {
+    var W = window.innerWidth, el = document.body, prof = 0;
+    while (el && prof < 6) {
+        var max = 0, large = null;
+        for (var i = 0; i < el.children.length; i++) {
+            var r = el.children[i].getBoundingClientRect();
+            if (r.width > max) { max = r.width; large = el.children[i]; }
+        }
+        if (!large || max < 50) return 0;
+        if (max < W - 30) return max / W;
+        el = large; prof++;
+    }
+    return 0;
+})();"""
+        def _appliquer(rapport):
+            vue2 = getattr(self, '_video_panneau', None)
+            if vue2 is not vue or not rapport:
+                return
+            try:
+                cible = min(2.5, vue.zoomFactor() * 0.94 / float(rapport))
+            except (TypeError, ValueError, ZeroDivisionError):
+                return
+            if cible > vue.zoomFactor() * 1.05:
+                vue.setZoomFactor(round(cible, 2))
+        try:
+            vue.page().runJavaScript(js, _appliquer)
+        except Exception:
+            pass
 
     def _liberer_video(self):
         """Arrête le lecteur vidéo, retire son panneau, rend au webview sa
@@ -46427,6 +47525,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
                 pass  # encore verrouillé : nettoyé au prochain démarrage
         self._video_chemin_temp = None
         self._video_web = False
+        self._mode_page_html = False
+        self._page_html_chargee = False
 
     def _previsualiser_video(self, pj):
         """Affiche une PJ vidéo dans le panneau de lecture, sous le bandeau
@@ -47012,15 +48112,24 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
 
         self._pdf_btn_prec.clicked.connect(self._pdf_page_prec)
         self._pdf_btn_suiv.clicked.connect(self._pdf_page_suiv)
+        def _zoom_page_html(delta):
+            # PJ .html (24/11/2026) : zoom de sa vue à part, de 25 % à 300 %
+            vue = getattr(self, '_video_panneau', None)
+            if vue is not None and hasattr(vue, 'setZoomFactor'):
+                vue.setZoomFactor(max(0.25, min(3.0, round(vue.zoomFactor() + delta, 2))))
         def _zoomer_plus():
-            if getattr(self, '_pdf_doc', None) is not None:
+            if getattr(self, '_mode_page_html', False):
+                _zoom_page_html(0.1)
+            elif getattr(self, '_pdf_doc', None) is not None:
                 self._pdf_changer_zoom(0.25)
             elif getattr(self, '_mode_doc', False):
                 self._doc_changer_zoom(0.1)
             elif getattr(self, '_mode_image', False):
                 self._img_changer_zoom(0.25)
         def _zoomer_moins():
-            if getattr(self, '_pdf_doc', None) is not None:
+            if getattr(self, '_mode_page_html', False):
+                _zoom_page_html(-0.1)
+            elif getattr(self, '_pdf_doc', None) is not None:
                 self._pdf_changer_zoom(-0.25)
             elif getattr(self, '_mode_doc', False):
                 self._doc_changer_zoom(-0.1)
@@ -47105,6 +48214,9 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         self._rech_pj_lbl.setText("")
         try:
             self.webview.page().findText("")
+            vue = getattr(self, '_video_panneau', None)
+            if getattr(self, '_mode_page_html', False) and hasattr(vue, 'findText'):
+                vue.page().findText("")
         except Exception:
             pass
 
@@ -47130,6 +48242,17 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             elif self._pdf_rech:
                 self._pdf_rech_idx = (self._pdf_rech_idx + sens) % len(self._pdf_rech)
             self._pdf_surligner(defiler=True)
+        elif getattr(self, '_mode_page_html', False):
+            # PJ .html (24/11/2026) : recherche du moteur web dans sa vue à part
+            vue = getattr(self, '_video_panneau', None)
+            if vue is None or not hasattr(vue, 'findText'):
+                return
+            from PySide6.QtWebEngineCore import QWebEnginePage as _WEP
+            self._rech_source = "pj"
+            if sens > 0:
+                vue.page().findText(texte)
+            else:
+                vue.page().findText(texte, _WEP.FindFlag.FindBackward)
         elif getattr(self, '_mode_doc', False):
             from PySide6.QtWebEngineCore import QWebEnginePage as _WEP
             self._rech_source = "pj"
@@ -47188,7 +48311,8 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
         """Compteur « 2 / 7 » de la recherche Word/Excel."""
         if getattr(self, '_rech_source', "pj") != "pj":
             return
-        if not getattr(self, '_mode_doc', False) or not hasattr(self, '_rech_pj_lbl'):
+        if not (getattr(self, '_mode_doc', False) or getattr(self, '_mode_page_html', False)) \
+                or not hasattr(self, '_rech_pj_lbl'):
             return
         if not self._rech_pj_champ.text().strip():
             self._rech_pj_lbl.setText("")
@@ -47507,6 +48631,9 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
                     QTimer.singleShot(250, self._pdf_ajuster_page)
 
             QTimer.singleShot(150, _forcer_cef_et_injecter)
+            if getattr(self, '_mode_page_html', False):
+                QTimer.singleShot(300, lambda: self._video_ajuster_entete(4))
+                QTimer.singleShot(500, self._page_html_ajuster_largeur)
 
             self._pdf_nav.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self._pdf_nav.setFocus()
@@ -47533,7 +48660,12 @@ font-family:Verdana,sans-serif;font-size:14px;white-space:pre-wrap;padding:10px;
             self._pdf_nav.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self._pdf_nav.setFocus()
             self._pdf_nav.keyPressEvent = self._pdf_key_handler
-            if getattr(self, '_mode_doc', False):
+            if getattr(self, '_mode_page_html', False):
+                # PJ .html : le panneau de lecture garde la hauteur de l'en-tête
+                # (voir _previsualiser_page_html), il ne doit pas être réétiré
+                QTimer.singleShot(150, lambda: self._video_ajuster_entete(4))
+                QTimer.singleShot(200, self._page_html_ajuster_largeur)
+            elif getattr(self, '_mode_doc', False):
                 QTimer.singleShot(150, self._recalculer_hauteur_doc_viewer)
             else:
                 QTimer.singleShot(50, self._forcer_cef_sous_barre)
@@ -53445,12 +54577,14 @@ __JS_TRADUCTION__
                 self._retelechargeur.arreter()
                 if getattr(self, '_remplisseur', None):
                     self._remplisseur.arreter()
+            if getattr(self, '_indexeur', None):
+                self._indexeur.arreter()
         except Exception:
             pass
         # Arrêter les autres threads
         for attr in ['chargeur_dossiers', 'chargeur_messages', 'chargeur_corps',
                      'chargeur_non_lus', '_thread_rattrapage_auto', '_prechargeur',
-                     '_retelechargeur']:
+                     '_retelechargeur', '_indexeur']:
             t = getattr(self, attr, None)
             if t and t.isRunning():
                 try:
