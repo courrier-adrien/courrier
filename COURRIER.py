@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-24 22h14"
+VERSION_BUILD = "2026-11-24 22h59"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -34654,7 +34654,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 22h14")
+        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 22h59")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -40159,7 +40159,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 24/11/2026 à 22h14")
+        lbl_version = QLabel("Version du 24/11/2026 à 22h59")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -43686,11 +43686,20 @@ if (typeof module === 'object') {
         en_tetes.setStretchLastSection(False)
         en_tetes.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         naturelles = []
-        for col in range(arbre.columnCount()):
-            arbre.resizeColumnToContents(col)
-            naturelles.append(arbre.columnWidth(col) + 14)
+
+        def _mesurer_colonnes():
+            # Mesure faite une fois la feuille de style appliquée (Verdana
+            # 11 px) : avant l'affichage, Qt mesure avec la police par
+            # défaut et sous-estime les colonnes (25/11/2026, remonté :
+            # colonnes tronquées alors que l'écran avait de la place).
+            naturelles.clear()
+            for col in range(arbre.columnCount()):
+                arbre.resizeColumnToContents(col)
+                naturelles.append(arbre.columnWidth(col) + 14)
 
         def _ajuster_colonnes():
+            if not naturelles:
+                return
             dispo = arbre.viewport().width()
             if dispo <= 0:
                 return
@@ -43805,9 +43814,24 @@ if (typeof module === 'object') {
         # Largeur voulue = toutes les colonnes en entier (marges, cadre et
         # barre de défilement de 32 px comprises) ; centrer_fenetre_ecran la
         # ramène à la zone utile de l'écran si elle est trop large.
+        fen.ensurePolished()
+        arbre.ensurePolished()
+        _mesurer_colonnes()
         fen.resize(max(700, sum(naturelles) + 24 + 32 + 6), 640)
         fen.show()
-        QTimer.singleShot(0, lambda: centrer_fenetre_ecran(fen))
+
+        def _apres_affichage():
+            # Nouvelle mesure avec la police réellement affichée, fenêtre
+            # élargie d'autant, puis ramenée à l'écran et centrée.
+            try:
+                _mesurer_colonnes()
+                fen.resize(max(700, sum(naturelles) + 24 + 32 + 6), fen.height())
+                _ajuster_colonnes()
+                centrer_fenetre_ecran(fen)
+                _ajuster_colonnes()
+            except RuntimeError:
+                pass  # fenêtre déjà refermée
+        QTimer.singleShot(0, _apres_affichage)
         self._conserver_fenetre_secondaire(fen)
         # RECHERCHER reste orange tant que cette fenêtre est ouverte (elle
         # naît après la fermeture du dialogue, hors de _suivre_fenetre).
