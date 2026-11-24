@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-24 22h59"
+VERSION_BUILD = "2026-11-24 23h30"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -20113,6 +20113,7 @@ TEXTE_MAX_PJ_INDEXE = 2_000_000                # caractères, toutes PJ d'un mai
 PAGES_MAX_PDF_INDEXE = 300
 EXTENSIONS_PJ_INDEXEES = (".pdf", ".docx", ".docm", ".dotx", ".xlsx", ".xlsm", ".xltx",
                           ".xls", ".pptx", ".ppsx", ".odt", ".ods", ".odp", ".txt",
+                          ".doc", ".dot", ".ppt", ".pps",   # anciens formats (25/11/2026)
                           ".csv", ".htm", ".html", ".rtf", ".xml", ".json", ".md", ".ics", ".vcf")
 SEPARATEUR_PJ_INDEX = "\u27e6"   # ⟦nom.pdf⟧ devant le texte de chaque PJ
 FIN_SEPARATEUR_PJ_INDEX = "\u27e7"
@@ -20139,6 +20140,13 @@ def _ouvrir_index_recherche():
         conn.execute("CREATE INDEX IF NOT EXISTS mails_compte ON mails(adresse, dossier)")
         conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS texte USING fts5(
             de, a, sujet, corps, pj_noms, pj, tokenize='unicode61 remove_diacritics 2')""")
+        # Formats de PJ ajoutés après coup : seuls les mails qui en ont
+        # sont relus (mtime -1 = « modifié » pour la passe suivante).
+        ligne = conn.execute("SELECT valeur FROM info WHERE cle='formats_pj'").fetchone()
+        if not ligne or ligne[0] != "2":
+            conn.execute("UPDATE mails SET mtime=-1 WHERE id IN (SELECT rowid FROM texte"
+                         " WHERE texte MATCH 'pj_noms : (doc OR dot OR ppt OR pps)')")
+            conn.execute("INSERT OR REPLACE INTO info VALUES('formats_pj', '2')")
         conn.commit()
     return conn
 
@@ -20173,6 +20181,169 @@ def _decoder_texte_index(donnees, charset=None):
         except (LookupError, UnicodeDecodeError):
             continue
     return donnees.decode("latin-1", errors="replace")
+
+
+def _flux_ole(donnees):
+    """{nom: octets} des flux d'un fichier Office ancien (format OLE2,
+    « Compound File ») : .doc, .xls, .ppt d'avant 2007. Lecture maison,
+    sans module ni Word installé (25/11/2026)."""
+    import struct
+    if donnees[:8] != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        raise ValueError("pas un fichier Office ancien")
+    taille_secteur = 1 << struct.unpack_from("<H", donnees, 0x1E)[0]
+    taille_mini = 1 << struct.unpack_from("<H", donnees, 0x20)[0]
+    (nb_fat, premier_rep, _tr, seuil_mini, premier_minifat, nb_minifat,
+     premier_difat, nb_difat) = struct.unpack_from("<IIIIIIII", donnees, 0x2C)
+    nb_secteurs = (len(donnees) - taille_secteur) // taille_secteur + 1
+
+    def secteur(n):
+        debut = (n + 1) * taille_secteur
+        return donnees[debut:debut + taille_secteur]
+
+    difat = list(struct.unpack_from("<109I", donnees, 0x4C))
+    n, vus = premier_difat, 0
+    while n < 0xFFFFFFFA and vus < nb_difat and n < nb_secteurs:
+        valeurs = struct.unpack(f"<{taille_secteur // 4}I", secteur(n))
+        difat.extend(valeurs[:-1])
+        n, vus = valeurs[-1], vus + 1
+    fat = []
+    for s in difat[:nb_fat]:
+        if s >= 0xFFFFFFFA:
+            break
+        fat.extend(struct.unpack(f"<{taille_secteur // 4}I", secteur(s)))
+
+    def chaine(debut, table, lire, taille_bloc):
+        morceaux, n, garde = [], debut, 0
+        while n < len(table) and n < 0xFFFFFFFA and garde <= len(table):
+            morceaux.append(lire(n))
+            n, garde = table[n], garde + 1
+        return b"".join(morceaux)
+
+    repertoire = chaine(premier_rep, fat, secteur, taille_secteur)
+    entrees = []
+    for i in range(0, len(repertoire) - 127, 128):
+        e = repertoire[i:i + 128]
+        lg = struct.unpack_from("<H", e, 64)[0]
+        nom = e[:max(0, lg - 2)].decode("utf-16-le", errors="replace")
+        entrees.append((nom, e[66], struct.unpack_from("<I", e, 116)[0],
+                        struct.unpack_from("<I", e, 120)[0]))
+    if not entrees:
+        raise ValueError("répertoire vide")
+    _n, _t, debut_racine, taille_racine = entrees[0]
+    flux_mini = chaine(debut_racine, fat, secteur, taille_secteur)[:taille_racine]
+    minifat = []
+    if nb_minifat:
+        brut = chaine(premier_minifat, fat, secteur, taille_secteur)
+        minifat = list(struct.unpack(f"<{len(brut) // 4}I", brut[:len(brut) // 4 * 4]))
+
+    def mini(n):
+        return flux_mini[n * taille_mini:(n + 1) * taille_mini]
+
+    flux = {}
+    for nom, type_entree, debut, taille in entrees[1:]:
+        if type_entree != 2 or nom in flux:   # 2 = flux (stream)
+            continue
+        if taille < seuil_mini:
+            flux[nom] = chaine(debut, minifat, mini, taille_mini)[:taille]
+        else:
+            flux[nom] = chaine(debut, fat, secteur, taille_secteur)[:taille]
+    return flux
+
+
+def _nettoyer_texte_word(t):
+    import re
+    # Champs Word : \x13 code \x14 résultat \x15 -> on garde le résultat
+    for _ in range(5):
+        t2 = re.sub(r"\x13[^\x13\x14\x15]*\x14([^\x13\x14\x15]*)\x15", r"\1", t)
+        t2 = re.sub(r"\x13[^\x13\x14\x15]*\x15", "", t2)
+        if t2 == t:
+            break
+        t = t2
+    t = t.replace("\r", "\n").replace("\x0b", "\n").replace("\x0c", "\n").replace("\x07", "\t")
+    t = re.sub(r"[\x00-\x08\x0e-\x1f]", "", t)
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def texte_doc_ancien(donnees):
+    """Texte d'un .doc Word 97 à 2003 (table des morceaux du document)."""
+    import struct
+    flux = _flux_ole(donnees)
+    wd = flux.get("WordDocument")
+    if not wd or struct.unpack_from("<H", wd, 0)[0] != 0xA5EC:
+        raise ValueError("flux WordDocument absent")
+    drapeaux = struct.unpack_from("<H", wd, 0x0A)[0]
+    if drapeaux & 0x0100:
+        raise ValueError("document protégé par mot de passe")
+    table = flux.get("1Table" if drapeaux & 0x0200 else "0Table")
+    pos = 32
+    csw = struct.unpack_from("<H", wd, pos)[0]
+    pos += 2 + csw * 2
+    cslw = struct.unpack_from("<H", wd, pos)[0]
+    pos += 2 + cslw * 4
+    pos += 2   # cbRgFcLcb
+    fc_clx, lcb_clx = struct.unpack_from("<II", wd, pos + 33 * 8)
+    if not table or not lcb_clx:
+        raise ValueError("table des morceaux absente")
+    clx = table[fc_clx:fc_clx + lcb_clx]
+    i = 0
+    while i < len(clx) and clx[i] == 0x01:            # Prc (mises en forme) à sauter
+        i += 3 + struct.unpack_from("<H", clx, i + 1)[0]
+    if i >= len(clx) or clx[i] != 0x02:
+        raise ValueError("table des morceaux illisible")
+    lcb = struct.unpack_from("<I", clx, i + 1)[0]
+    plc = clx[i + 5:i + 5 + lcb]
+    nb = (lcb - 4) // 12
+    cps = struct.unpack_from(f"<{nb + 1}I", plc, 0)
+    morceaux = []
+    for k in range(nb):
+        fc = struct.unpack_from("<I", plc, (nb + 1) * 4 + k * 8 + 2)[0]
+        nb_car = cps[k + 1] - cps[k]
+        if nb_car <= 0:
+            continue
+        if fc & 0x40000000:
+            debut = (fc & 0x3FFFFFFF) // 2
+            morceaux.append(wd[debut:debut + nb_car].decode("cp1252", errors="replace"))
+        else:
+            morceaux.append(wd[fc:fc + 2 * nb_car].decode("utf-16-le", errors="replace"))
+    return _nettoyer_texte_word("".join(morceaux))
+
+
+def texte_ppt_ancien(donnees):
+    """Texte d'un .ppt PowerPoint 97 à 2003 : diapositives et commentaires,
+    sans les textes des masques (« Cliquez pour modifier… »)."""
+    import struct
+    import re
+    flux = _flux_ole(donnees)
+    pp = flux.get("PowerPoint Document")
+    if not pp:
+        raise ValueError("flux PowerPoint Document absent")
+    morceaux = []
+
+    def parcourir(debut, fin, profondeur):
+        pos = debut
+        while pos + 8 <= fin:
+            ver_inst, type_rec, lg = struct.unpack_from("<HHI", pp, pos)
+            contenu = pos + 8
+            if contenu + lg > fin:
+                lg = fin - contenu
+            if (ver_inst & 0x0F) == 0x0F:
+                if type_rec not in (0x03F8, 0x0FD9) and profondeur < 20:  # masques
+                    parcourir(contenu, contenu + lg, profondeur + 1)
+            elif type_rec == 0x0FA0:
+                morceaux.append(pp[contenu:contenu + lg].decode("utf-16-le", errors="replace"))
+            elif type_rec == 0x0FA8:
+                morceaux.append(pp[contenu:contenu + lg].decode("cp1252", errors="replace"))
+            pos = contenu + lg
+
+    parcourir(0, len(pp), 0)
+    vus, uniques = set(), []
+    for m in morceaux:
+        m = re.sub(r"[\x00-\x08\x0e-\x1f]", "", m.replace("\r", "\n").replace("\x0b", "\n")).strip()
+        if m and m not in vus:      # anciennes versions enregistrées en double
+            vus.add(m)
+            uniques.append(m)
+    return "\n".join(uniques)
 
 
 def extraire_texte_piece_jointe(nom, donnees):
@@ -20210,6 +20381,20 @@ def extraire_texte_piece_jointe(nom, donnees):
                 with VERROU_PDF:
                     doc.close()
             return "\n".join(morceaux)
+        if ext in (".doc", ".dot", ".ppt", ".pps"):
+            # Word / PowerPoint 97-2003, lus sans Office (25/11/2026). Un
+            # « .doc » est parfois un .docx renommé ou un RTF : lu comme tel.
+            if donnees[:2] == b"PK":
+                return extraire_texte_piece_jointe(nom + "x", donnees)
+            if donnees[:5] == b"{\\rtf":
+                return extraire_texte_piece_jointe(os.path.splitext(nom)[0] + ".rtf", donnees)
+            debut = donnees[:200].lstrip(b"\xef\xbb\xbf \r\n\t").lower()
+            if debut.startswith((b"<?xml", b"<html", b"<!doctype")):
+                # Word 2003 « XML » ou page web enregistrés en .doc
+                return _html_vers_texte_index(_decoder_texte_index(donnees))
+            if ext in (".doc", ".dot"):
+                return texte_doc_ancien(donnees)
+            return texte_ppt_ancien(donnees)
         if ext in (".docx", ".docm", ".dotx", ".xlsx", ".xlsm", ".xltx", ".pptx", ".ppsx",
                    ".odt", ".ods", ".odp"):
             morceaux = []
@@ -34654,7 +34839,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 22h59")
+        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 23h30")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -40159,7 +40344,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 24/11/2026 à 22h59")
+        lbl_version = QLabel("Version du 24/11/2026 à 23h30")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -49384,6 +49569,18 @@ if (typeof module === 'object') {
                     return result.value
             except Exception as e:
                 pass
+        if est_binaire:
+            # Lecteur maison (25/11/2026) : ne demande pas Word, plus rapide
+            # et accents justes ; Word ne sert plus qu'en repli.
+            try:
+                import html as html_mod
+                texte = texte_doc_ancien(open(chemin, "rb").read())
+                if texte.strip():
+                    return "\n".join(
+                        f"<p>{html_mod.escape(l).replace(chr(9), ' &nbsp; ')}</p>" if l.strip()
+                        else "<p>&nbsp;</p>" for l in texte.split("\n"))
+            except Exception as e:
+                print(f"[PREV-DOC] lecteur .doc : {e}")
         try:
             import win32com.client as wc
             import pythoncom
@@ -49653,7 +49850,15 @@ if (typeof module === 'object') {
             powerpoint.Quit()
             return '\n'.join(parties)
         except Exception:
-            raise
+            if ext not in (".ppt", ".pps"):
+                raise
+        # PowerPoint absent : lecteur maison (25/11/2026), texte des
+        # diapositives d'un seul tenant (sans le découpage par diapositive).
+        texte = texte_ppt_ancien(open(chemin, "rb").read())
+        if not texte.strip():
+            raise ValueError("aucun texte dans la présentation")
+        lignes = "".join(f"<p>{html_mod.escape(l)}</p>" for l in texte.split("\n") if l.strip())
+        return f'{STYLE}<div class="slide">{lignes}</div>'
 
     def _sur_changement_url_lecture(self, qurl):
         """Connecté à webview.urlChanged. Affiche la barre CORPS/COPIER/
