@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-24 23h30"
+VERSION_BUILD = "2026-11-25 14h32"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -25521,6 +25521,7 @@ class DialogueCarnetAdresses(QDialog):
         self.lbl_statut.setStyleSheet("color: #90c090;" if nb else "color: #e0a050;")
         self.lbl_statut.setText(f"{nb} contact(s) copié(s) dans « {dossier_destination} »." if nb
                                 else f"Déjà présent(s) dans « {dossier_destination} ».")
+        return nb
 
     def _restaurer_sauvegarde(self):
         """Bouton Restaurer (17/10/2026) : le carnet d'adresses, ou les
@@ -25743,10 +25744,10 @@ class DialogueCarnetAdresses(QDialog):
         self.lbl_statut.setText(f"Carnet restauré ({libelle.split('   —')[0].strip()}).")
 
     def _copier_vers(self):
-        """Bouton Copier vers… : copie les contacts sélectionnés dans un
-        dossier choisi dans une liste."""
-        from PySide6.QtWidgets import QInputDialog
-        ids = [it.data(Qt.ItemDataRole.UserRole) for it in self.liste_contacts.selectedItems()]
+        """Bouton Copier vers… : copie les contacts sélectionnés dans un ou
+        plusieurs dossiers cochés. 25/11/2026 (demandé) : la liste déroulante
+        est remplacée par une fenêtre de cases à cocher, affichée directement."""
+        ids =[it.data(Qt.ItemDataRole.UserRole) for it in self.liste_contacts.selectedItems()]
         if not ids:
             self.lbl_statut.setStyleSheet("color: #e08080;")
             self.lbl_statut.setText("Sélectionnez un ou plusieurs contacts à copier.")
@@ -25758,13 +25759,82 @@ class DialogueCarnetAdresses(QDialog):
             self.lbl_statut.setStyleSheet("color: #e08080;")
             self.lbl_statut.setText("Aucun autre dossier : créez-en un d'abord.")
             return
-        libelles = [d.upper() for d in dossiers]
-        choix, ok = QInputDialog.getItem(self, "Copier vers…",
-                                         f"Copier {len(ids)} contact(s) dans le dossier :",
-                                         libelles, 0, False)
-        if not ok:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Copier vers…")
+        dlg.setMinimumWidth(320)
+        dlg.setStyleSheet(self.styleSheet() + """
+            QDialog { background-color: #2a2a2a; }
+            QLabel { color: white; }
+            QListWidget { background-color: #1e1e1e; color: white; border: 1px solid #5a5a5a; }
+        """)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(f"Copier {len(ids)} contact(s) dans les dossiers cochés :"))
+        liste = QListWidget()
+        for d in dossiers:
+            item = QListWidgetItem(d.upper())
+            item.setData(Qt.ItemDataRole.UserRole, d)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            liste.addItem(item)
+        # Clic sur le nom = cocher/décocher ; un clic sur la case elle-même
+        # est déjà inversé par Qt (itemChanged arrive avant itemClicked).
+        case_deja_inversee = {}
+        liste.itemChanged.connect(lambda it: case_deja_inversee.update(item=it))
+        liste.itemPressed.connect(lambda it: case_deja_inversee.clear())
+
+        def _sur_clic(it):
+            if case_deja_inversee.pop("item", None) is it:
+                return
+            it.setCheckState(Qt.CheckState.Unchecked if it.checkState() == Qt.CheckState.Checked
+                             else Qt.CheckState.Checked)
+            case_deja_inversee.pop("item", None)
+        liste.itemClicked.connect(_sur_clic)
+        # Tous les dossiers visibles d'emblée, sans ascenseur, si l'écran le
+        # permet (25/11/2026, demandé) ; sinon hauteur de l'écran et ascenseur.
+        # Mesure refaite une fois la fenêtre affichée (sizeHintForRow peu
+        # fiable avant).
+        liste.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        lay.addWidget(liste, 1)
+
+        def _ajuster_hauteur():
+            hauteur_ligne = max(liste.sizeHintForRow(0), 20)
+            voulu = hauteur_ligne * liste.count() + 2 * liste.frameWidth() + 4
+            ecran = (dlg.screen() or QApplication.primaryScreen()).availableGeometry()
+            # Titre, texte et boutons autour de la liste (+ barre de titre
+            # Windows, inconnue avant l'affichage)
+            habillage = max(dlg.frameGeometry().height() - liste.height(),
+                            dlg.sizeHint().height() - liste.sizeHint().height() + 40)
+            liste.setFixedHeight(max(hauteur_ligne * 3, min(voulu, ecran.height() - habillage - 10)))
+            dlg.adjustSize()
+        # 1re mesure avant l'affichage : Qt place alors la fenêtre dans l'écran
+        # (pas de calcul de position à la main : y faux à 150 % barre en haut)
+        _ajuster_hauteur()
+        QTimer.singleShot(0, _ajuster_hauteur)
+
+        ligne = QHBoxLayout()
+        ligne.addStretch(1)
+        btn_ok = QPushButton("  Copier  ")
+        btn_annuler = QPushButton("  Annuler  ")
+        btn_ok.clicked.connect(dlg.accept)
+        btn_annuler.clicked.connect(dlg.reject)
+        ligne.addWidget(btn_ok)
+        ligne.addWidget(btn_annuler)
+        lay.addLayout(ligne)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._copier_contacts_vers_dossier(ids, dossiers[libelles.index(choix)])
+        destinations = [liste.item(i).data(Qt.ItemDataRole.UserRole) for i in range(liste.count())
+                        if liste.item(i).checkState() == Qt.CheckState.Checked]
+        if not destinations:
+            self.lbl_statut.setStyleSheet("color: #e08080;")
+            self.lbl_statut.setText("Rien n'a été copié (aucun dossier coché).")
+            return
+        total = sum(self._copier_contacts_vers_dossier(ids, d) or 0 for d in destinations)
+        if len(destinations) > 1:
+            noms = ", ".join(f"« {d} »" for d in destinations)
+            self.lbl_statut.setStyleSheet("color: #90c090;" if total else "color: #e0a050;")
+            self.lbl_statut.setText(f"{total} copie(s) de contact dans {noms}." if total
+                                    else f"Déjà présent(s) dans {noms}.")
         self._rafraichir_contacts()
 
     def _on_dossier_change(self, item, ancien=None):
@@ -34839,7 +34909,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 24/11/2026 23h30")
+        self.setWindowTitle("COURRIER ADRIEN — 25/11/2026 14h32")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35774,7 +35844,7 @@ class ClientMail(QMainWindow):
         layout_haut.addWidget(self.btn_tri)
         layout_haut.addSpacing(3)
 
-        btn_firefox = QPushButton("INTERNET")
+        btn_firefox = QPushButton("◀ NAVIGATEUR")
         btn_firefox.setStyleSheet(STYLE_BOUTON_HAUT)
         btn_firefox.clicked.connect(self.ouvrir_dans_firefox)
         layout_haut.addWidget(btn_firefox)
@@ -36357,9 +36427,24 @@ class ClientMail(QMainWindow):
         self.label_url.setMinimumWidth(0)
         self.label_url.setMaximumWidth(16777215)
         self.label_url.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Bouton CORPS en gris avec flèche, comme le « ◀ Corps » du bloc des
+        # PJ (24/11/2026, demandé par l'utilisateur) ; largeur figée sur
+        # celle de l'ancien bouton rouge « CORPS ».
         self.btn_corps_url = QPushButton("CORPS")
         self.btn_corps_url.setFixedHeight(22)
         self.btn_corps_url.setStyleSheet(STYLE_BOUTON_BARRE_URL)
+        self.btn_corps_url.ensurePolished()
+        _largeur_corps = self.btn_corps_url.sizeHint().width()
+        self.btn_corps_url.setStyleSheet(
+            STYLE_BOUTON_BARRE_URL
+            .replace("background-color: #A52A2A", "background-color: #555555")
+            .replace("#6b1a1a", "#333333")
+            .replace("padding: 3px 7px", "padding: 3px 2px")
+            .replace("padding-top: 5px; padding-left: 9px;", "padding-top: 5px; padding-left: 4px;")
+            + "QPushButton:hover { background-color: #777777; }")
+        self.btn_corps_url.setText("◀ Corps")
+        self.btn_corps_url.setFixedWidth(_largeur_corps)
+        self.btn_corps_url.setToolTip("Revenir au corps du mail")
         self.btn_corps_url.clicked.connect(self._revenir_corps_mail)
         btn_copier_url = QPushButton("COPIER")
         btn_copier_url.setFixedHeight(22)
@@ -36368,7 +36453,7 @@ class ClientMail(QMainWindow):
             QApplication.clipboard().setText(getattr(self, '_url_courante', '') or '')
             self.label_url.selectAll()
         btn_copier_url.clicked.connect(_copier_url)
-        btn_url_firefox = QPushButton("INTERNET")
+        btn_url_firefox = QPushButton("◀ NAVIGATEUR")
         btn_url_firefox.setFixedHeight(22)
         btn_url_firefox.setStyleSheet(STYLE_BOUTON_BARRE_URL)
         btn_url_firefox.setToolTip("Ouvrir cette page dans un navigateur (menu de choix)")
@@ -40344,7 +40429,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 24/11/2026 à 23h30")
+        lbl_version = QLabel("Version du 25/11/2026 à 14h32")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
