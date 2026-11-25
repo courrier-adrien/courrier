@@ -137,7 +137,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QTextBrowser, QSplitter, QLabel,
     QFrame, QSizePolicy, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator,
-    QPushButton, QDialog, QStyledItemDelegate, QStyle, QComboBox, QLineEdit
+    QPushButton, QDialog, QStyledItemDelegate, QStyle, QComboBox, QLineEdit, QSpacerItem
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QRect, QSize, QObject, Slot, QUrl, QItemSelectionModel, QEvent
 
@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-25 17h09"
+VERSION_BUILD = "2026-11-25 21h16"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -20661,12 +20661,24 @@ class ServiceIndexRecherche(QThread):
         self.termine.emit(self.nb_indexes)
 
 
+_TABLE_NORMALISATION = None
+
+
 def _normaliser_recherche(texte):
     """Minuscules sans accents, MÊME LONGUEUR que le texte d'origine (les
-    positions trouvées dans l'un valent pour l'autre)."""
-    import unicodedata
-    return "".join((unicodedata.normalize("NFD", c)[0] if c.isalpha() else c).lower()[:1] or c
-                   for c in texte)
+    positions trouvées dans l'un valent pour l'autre). Table de conversion
+    calculée une fois : rapide même sur une PJ de 2 millions de caractères."""
+    global _TABLE_NORMALISATION
+    if _TABLE_NORMALISATION is None:
+        import unicodedata
+        table = {}
+        for code in range(0x3000):
+            c = chr(code)
+            n = (unicodedata.normalize("NFD", c)[0] if c.isalpha() else c).lower()
+            if len(n) == 1 and n != c:
+                table[code] = n
+        _TABLE_NORMALISATION = table
+    return texte.translate(_TABLE_NORMALISATION)
 
 
 def termes_recherche(saisie):
@@ -20686,24 +20698,91 @@ def termes_recherche(saisie):
 
 
 def _requete_fts(termes, colonnes, operateur="AND"):
+    # Petits mots (3 lettres ou moins) cherchés en entier quand un mot plus
+    # long est tapé : « de » en début de mot réveillait des milliers de mots
+    # (des, depuis, demande…) et « base de données » prenait 97 s (25/11/2026).
+    entiers = any(len(t) > 3 for t, e in termes if not e)
     parties = []
     for terme, expression in termes:
         terme = terme.replace('"', "")
-        parties.append(f'"{terme}"' if expression else f'"{terme}"*')
-    return "{" + " ".join(colonnes) + "} : (" + f" {operateur} ".join(parties) + ")"
+        # (2 lettres ou moins : toujours en entier, « en » seul prenait 2 min)
+        entier = expression or len(terme) <= 2 or (entiers and len(terme) <= 3)
+        parties.append(f'"{terme}"' if entier else f'"{terme}"*')
+    if operateur == "NEAR":
+        corps = "NEAR(" + " ".join(parties) + f", {DISTANCE_MOTS_PROCHES})"
+    else:
+        corps = "(" + f" {operateur} ".join(parties) + ")"
+    return "{" + " ".join(colonnes) + "} : " + corps
 
 
 COLONNES_RECHERCHE = {"de": ("de",), "a": ("a",), "sujet": ("sujet",),
                       "corps": ("corps",), "pj": ("pj_noms", "pj")}
 LIBELLES_COLONNES_RECHERCHE = {"de": "expéditeur", "a": "destinataire", "sujet": "sujet",
                                "corps": "texte", "pj": "PJ"}
+# Recherche à plusieurs mots (25/11/2026, comme COURRIER ADRIEN ANDROID 0.79) :
+# résultats rangés en trois groupes, chacun du plus récent au plus ancien.
+DISTANCE_MOTS_PROCHES = 12          # mots d'écart au plus
+NB_MAX_VERIF_EXPRESSION = 400       # résultats relus pour l'expression exacte
+GROUPES_RECHERCHE = (("exacte", "Expression exacte « {saisie} »"),
+                     ("proches", "Tous les mots, proches les uns des autres"),
+                     ("eloignes", "Tous les mots, mais éloignés"))
+
+
+def _mots_recherche(termes):
+    """Mots normalisés, dans l'ordre tapé (une expression compte ses mots)."""
+    return [w for terme, _e in termes for w in _normaliser_recherche(terme).split()]
+
+
+def _motif_expression_exacte(termes):
+    """Les mots tapés qui se suivent, séparés seulement par des espaces ou de
+    la ponctuation ; le dernier peut être un début de mot (« factur »)."""
+    mots = _mots_recherche(termes)
+    if len(mots) < 2:
+        return None
+    fin = r"\b" if len(mots[-1]) <= 3 else r"\w*"
+    return re.compile(r"\b" + r"[\W_]+".join(re.escape(w) for w in mots) + fin)
+
+
+def _motif_mot(mot):
+    """Un mot surligné : en entier s'il fait 3 lettres ou moins (« en » ne
+    s'allume plus dans « entre »), sinon tout mot qui commence par lui."""
+    return re.compile(r"\b" + re.escape(mot) + (r"\b" if len(mot) <= 3 else r"\w*"))
+
+
+def _textes_index(conn, ident, champs):
+    """[(libellé, texte)] des endroits cochés d'un mail de l'index."""
+    ligne = conn.execute("SELECT sujet, de, a, corps, pj_noms, pj FROM texte WHERE rowid=?",
+                         (ident,)).fetchone()
+    if not ligne:
+        return []
+    sujet, de, a, corps, pj_noms, pj = ligne
+    morceaux = []
+    if "sujet" in champs:
+        morceaux.append(("Sujet", sujet or ""))
+    if "de" in champs:
+        morceaux.append(("Expéditeur", de or ""))
+    if "a" in champs:
+        morceaux.append(("Destinataire", a or ""))
+    if "corps" in champs:
+        morceaux.append(("Texte du mail", corps or ""))
+    if "pj" in champs:
+        for nom in (pj_noms or "").split("\n"):
+            if nom:
+                morceaux.append((f"PJ {nom}", nom))
+        for m in re.finditer(re.escape(SEPARATEUR_PJ_INDEX) + r"([^" + FIN_SEPARATEUR_PJ_INDEX + r"]*)"
+                             + re.escape(FIN_SEPARATEUR_PJ_INDEX) + r"\n(.*?)(?=" +
+                             re.escape(SEPARATEUR_PJ_INDEX) + r"|\Z)", pj or "", re.S):
+            morceaux.append((f"PJ {m.group(1)}", m.group(2)))
+    return morceaux
 
 
 def rechercher_dans_index(saisie, champs, adresses=None, dossier=None, limite=3000):
     """Résultats de la recherche globale, du plus récent au plus ancien :
-    [{adresse, nom_safe, uid, de, a, sujet, date, a_pj, trouve_dans: [champ]}].
-    champs : parmi "de", "a", "sujet", "corps", "pj". adresses : comptes à
-    fouiller (None = tous) ; dossier : dossier_safe seul (avec un compte)."""
+    [{adresse, nom_safe, uid, de, a, sujet, date, a_pj, trouve_dans: [champ],
+    groupe}]. champs : parmi "de", "a", "sujet", "corps", "pj". adresses :
+    comptes à fouiller (None = tous) ; dossier : dossier_safe seul (avec un
+    compte). groupe ("exacte", "proches", "eloignes") : seulement quand au
+    moins 2 mots sont cherchés, sinon None."""
     termes = termes_recherche(saisie)
     colonnes = [c for ch in champs for c in COLONNES_RECHERCHE.get(ch, ())]
     if not termes or not colonnes or not os.path.exists(FICHIER_INDEX_RECHERCHE):
@@ -20726,11 +20805,12 @@ def rechercher_dans_index(saisie, champs, adresses=None, dossier=None, limite=30
         for ident, adresse, dossier_safe, uid, date, nb_pj, de, a, sujet in lignes:
             resultats[ident] = {"id": ident, "adresse": adresse, "nom_safe": dossier_safe,
                                 "uid": uid, "date": date, "a_pj": bool(nb_pj), "de": de or "",
-                                "a": a or "", "sujet": sujet or "", "trouve_dans": []}
-        # Où chaque mot a été trouvé (au moins un des mots dans ce champ)
+                                "a": a or "", "sujet": sujet or "", "trouve_dans": [],
+                                "groupe": None}
         if resultats:
             import json as _json
             ids = _json.dumps(list(resultats))
+            # Où chaque mot a été trouvé (au moins un des mots dans ce champ)
             for champ in champs:
                 cols = COLONNES_RECHERCHE.get(champ)
                 if not cols:
@@ -20740,62 +20820,134 @@ def rechercher_dans_index(saisie, champs, adresses=None, dossier=None, limite=30
                         "(SELECT value FROM json_each(?))",
                         (_requete_fts(termes, cols, "OR"), ids)):
                     resultats[ident]["trouve_dans"].append(champ)
+            if len(termes) >= 2:
+                _classer_resultats_recherche(conn, resultats, termes, champs, colonnes, ids)
         return list(resultats.values())
     finally:
         conn.close()
 
 
+def _classer_resultats_recherche(conn, resultats, termes, champs, colonnes, ids):
+    """Groupe de chaque résultat : mots proches (NEAR de FTS5, dans un même
+    texte), dont expression exacte (vérifiée en relisant le texte : la
+    requête « phrase » de FTS ratait certains documents Word), sinon éloignés."""
+    for r in resultats.values():
+        r["groupe"] = "eloignes"
+    proches = [ident for (ident,) in conn.execute(
+        "SELECT rowid FROM texte WHERE texte MATCH ? AND rowid IN (SELECT value FROM json_each(?))",
+        (_requete_fts(termes, colonnes, "NEAR"), ids))]
+    for ident in proches:
+        resultats[ident]["groupe"] = "proches"
+    motif = _motif_expression_exacte(termes)
+    if motif is None:
+        return
+    ordre = {ident: i for i, ident in enumerate(resultats)}   # du plus récent au plus ancien
+    for ident in sorted(proches, key=ordre.get)[:NB_MAX_VERIF_EXPRESSION]:
+        if any(motif.search(_normaliser_recherche(texte))
+               for _l, texte in _textes_index(conn, ident, champs)):
+            resultats[ident]["groupe"] = "exacte"
+
+
 def extrait_resultat_recherche(ident, saisie, champs):
-    """(libellé, avant, trouvé, après) : passage où le premier mot cherché
-    apparaît, dans le texte ou une PJ (libellé « PJ nom.pdf ») ; None sinon."""
+    """(libellé, morceaux, cible) du meilleur passage d'un mail, ou None :
+    libellé = « Sujet », « Texte du mail », « PJ nom.pdf »… ; morceaux =
+    [(texte, surligné)] à afficher ; cible = texte à chercher dans la PJ
+    ouverte (l'expression entière si elle y est, sinon le mot le plus long,
+    tels qu'écrits dans le document). Meilleur passage : l'expression
+    exacte, sinon l'endroit où le plus de mots différents sont réunis à
+    moins de 150 lettres, sinon le premier mot trouvé."""
     termes = termes_recherche(saisie)
     if not termes or not os.path.exists(FICHIER_INDEX_RECHERCHE):
         return None
     conn = _ouvrir_index_recherche()
     try:
-        ligne = conn.execute("SELECT sujet, de, a, corps, pj_noms, pj FROM texte WHERE rowid=?",
-                             (ident,)).fetchone()
+        textes = _textes_index(conn, ident, champs)
+        visibles_txt = _textes_index(conn, ident, ("sujet", "de"))
     finally:
         conn.close()
-    if not ligne:
+    if not textes:
         return None
-    sujet, de, a, corps, pj_noms, pj = ligne
-    morceaux = []   # (libellé, texte)
-    if "sujet" in champs:
-        morceaux.append(("Sujet", sujet or ""))
-    if "de" in champs:
-        morceaux.append(("Expéditeur", de or ""))
-    if "a" in champs:
-        morceaux.append(("Destinataire", a or ""))
-    if "corps" in champs:
-        morceaux.append(("Texte du mail", corps or ""))
-    if "pj" in champs:
-        for nom in (pj_noms or "").split("\n"):
-            if nom:
-                morceaux.append((f"PJ {nom}", nom))
-        for m in re.finditer(re.escape(SEPARATEUR_PJ_INDEX) + r"([^" + FIN_SEPARATEUR_PJ_INDEX + r"]*)"
-                             + re.escape(FIN_SEPARATEUR_PJ_INDEX) + r"\n(.*?)(?=" +
-                             re.escape(SEPARATEUR_PJ_INDEX) + r"|\Z)", pj or "", re.S):
-            morceaux.append((f"PJ {m.group(1)}", m.group(2)))
-    motifs = []
-    for terme, expression in sorted(termes, key=lambda t: -len(t[0])):
-        t = _normaliser_recherche(terme)
-        if expression:
-            motifs.append(r"\b" + r"\W+".join(re.escape(w) for w in t.split()) + r"\b")
-        else:
-            motifs.append(r"\b" + re.escape(t))
-    for libelle, texte in morceaux:
+    mots = list(dict.fromkeys(_mots_recherche(termes)))
+    motifs = [_motif_mot(w) for w in mots]
+    exacte = _motif_expression_exacte(termes)
+    # Mots déjà visibles dans la liste (sujet, expéditeur) : à égalité, le
+    # passage qui montre les AUTRES mots est préféré (« girerd haricot » :
+    # le haricot de la facture plutôt que Girerd, déjà dans l'expéditeur).
+    visibles = {i for i, motif in enumerate(motifs)
+                if any(motif.search(_normaliser_recherche(t)) for _l, t in visibles_txt)}
+    meilleur = None     # (score, libellé, texte, norm, position, cible_span)
+    for libelle, texte in textes:
         norm = _normaliser_recherche(texte)
-        for motif in motifs:
-            m = re.search(motif, norm)
-            if not m:
-                continue
-            debut = max(0, m.start() - 90)
-            fin = min(len(texte), m.end() + 140)
-            avant = ("…" if debut else "") + re.sub(r"\s+", " ", texte[debut:m.start()])
-            apres = re.sub(r"\s+", " ", texte[m.end():fin]) + ("…" if fin < len(texte) else "")
-            return libelle, avant, texte[m.start():m.end()], apres
-    return None
+        m = exacte.search(norm) if exacte else None
+        if m:
+            meilleur = ((len(mots) + 1, 0, 0), libelle, texte, norm, m.start(), (m.start(), m.end()))
+            break
+        trouves = []    # (position, n° du mot, fin)
+        for i, motif in enumerate(motifs):
+            for mm in motif.finditer(norm):
+                trouves.append((mm.start(), i, mm.end()))
+                if len(trouves) > 20000:
+                    break
+        if not trouves:
+            continue
+        trouves.sort()
+        # Fenêtre de 150 lettres réunissant le plus de mots différents ; à
+        # égalité, le texte ou la PJ passe avant le sujet et l'expéditeur,
+        # déjà visibles dans la liste (« girerd haricot » : le haricot de la
+        # facture PDF plutôt que Girerd dans le sujet).
+        score, pos = (0, 0), trouves[0][0]
+        debut = 0
+        for fin_i in range(len(trouves)):
+            while trouves[fin_i][0] - trouves[debut][0] > 150:
+                debut += 1
+            differents = {t[1] for t in trouves[debut:fin_i + 1]}
+            s = (len(differents), len(differents - visibles))
+            if s > score:
+                score, pos = s, trouves[debut][0]
+                if s[0] == len(mots) and not s[0] - s[1]:
+                    break
+        score = score + (0 if libelle in ("Sujet", "Expéditeur", "Destinataire") else 1,)
+        if meilleur is None or score > meilleur[0]:
+            # Cible : le plus long des mots trouvés ici, tel qu'écrit, près du passage
+            presents = {k for _p, k, _f in trouves}
+            long_i = max(presents, key=lambda k: len(mots[k]))
+            span = next(((p, f) for p, k, f in trouves if k == long_i and p >= pos), None) \
+                or next(((p, f) for p, k, f in trouves if k == long_i), None) \
+                or (trouves[0][0], trouves[0][2])
+            meilleur = (score, libelle, texte, norm, pos, span)
+    if meilleur is None:
+        return None
+    _s, libelle, texte, norm, pos, span = meilleur
+    debut = max(0, pos - 40)
+    while debut > 0 and debut > pos - 60 and texte[debut - 1].isalnum():
+        debut -= 1      # ne pas couper un mot au début
+    fin = min(len(texte), debut + 300)
+    # Zones à surligner : l'expression d'un bloc, puis chaque mot
+    zones = []
+    passage_norm = norm[debut:fin]
+    if exacte:
+        zones += [(m.start(), m.end()) for m in exacte.finditer(passage_norm)]
+    for motif in motifs:
+        for m in motif.finditer(passage_norm):
+            if not any(a <= m.start() < b for a, b in zones):
+                zones.append((m.start(), m.end()))
+    zones.sort()
+    morceaux, curseur = [], 0
+    passage = texte[debut:fin]
+    for a, b in zones:
+        if a < curseur:
+            continue
+        if a > curseur:
+            morceaux.append((passage[curseur:a], False))
+        morceaux.append((passage[a:b], True))
+        curseur = b
+    morceaux.append((passage[curseur:], False))
+    morceaux = [(re.sub(r"\s+", " ", t), s) for t, s in morceaux if t]
+    if debut:
+        morceaux.insert(0, ("…", False))
+    if fin < len(texte):
+        morceaux.append(("…", False))
+    return libelle, morceaux, texte[span[0]:span[1]]
 
 
 def etat_index_recherche():
@@ -30569,11 +30721,8 @@ class FenetreRedaction(QDialog):
         self.btn_langue.setFixedWidth(self.btn_langue.sizeHint().width())
         barre_forme.addWidget(self.btn_langue)
 
-        # Copier / Couper / Coller propres à cette fenêtre (25/10/2026,
-        # demandé), indépendants de ceux de la fenêtre principale : l'action
-        # se fait ici sans aller-retour par elle. Orange comme les autres
-        # tant qu'une copie ou une coupe attend d'être collée.
-        barre_forme.addWidget(creer_cadre_presse_papiers(STYLE_BOUTON, barre_redaction=True))
+        # Copier / Couper / Coller / Tout / Effacer : déplacés en bas de la
+        # fenêtre le 25/11/2026 (voir les macros, plus bas).
 
         # "Ouvrir un HTML" (27/10/2026, demandé) : remplace le corps par un
         # fichier .html tel quel (la newsletter, envoyée depuis le compte
@@ -30632,7 +30781,24 @@ class FenetreRedaction(QDialog):
         # (12/11/2026, demandé) : toujours à portée, même quand un autre
         # programme s'intercale entre cette fenêtre et la fenêtre principale.
         self._cadre_macros_redac, self._zone_macros_redac = creer_cadre_macros("cadreMacrosRedac")
-        layout.addWidget(self._cadre_macros_redac, 0, Qt.AlignmentFlag.AlignHCenter)
+        # COPIER / COUPER / COLLER / TOUT / EFFACER à droite sur la même
+        # ligne (25/11/2026, demandé, comme le logiciel de texte ; orange tant
+        # qu'une copie ou une coupe attend d'être collée). Une même rangée
+        # de mise en page : quand la fenêtre rétrécit, les macros glissent
+        # vers la gauche au lieu de passer sous ce cadre. Le vide de gauche,
+        # large comme le cadre, garde les macros centrées tant qu'il y a la
+        # place, et se réduit en premier.
+        cadre_presse = creer_cadre_presse_papiers(STYLE_BTN_MACRO, barre_redaction=True)
+        rangee_bas = QHBoxLayout()
+        rangee_bas.setContentsMargins(0, 0, 0, 0)
+        rangee_bas.setSpacing(8)
+        rangee_bas.addSpacerItem(QSpacerItem(cadre_presse.sizeHint().width(), 0,
+                                             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
+        rangee_bas.addStretch(1)
+        rangee_bas.addWidget(self._cadre_macros_redac)
+        rangee_bas.addStretch(1)
+        rangee_bas.addWidget(cadre_presse)
+        layout.addLayout(rangee_bas)
         self._regenerer_macros_redaction()
 
         layout_externe.addLayout(layout, 1)
@@ -34616,8 +34782,9 @@ def remplir_cadre_macros(cadre, zone, macros, action, style=STYLE_BTN_MACRO, san
     cadre.setVisible(zone.count() > 0)
 
 
-def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
-    """Cadre COPIER / COUPER / COLLER de la barre du bas (25/10/2026,
+def creer_cadre_presse_papiers(style_bouton, barre_redaction=False, seulement=None):
+    """Cadre COPIER / COUPER / COLLER / TOUT / EFFACER de la barre du bas
+    (TOUT et EFFACER ajoutés le 25/11/2026, voir plus bas) (25/10/2026,
     demandé, même encadré blanc que les macros ; repris dans photos,
     navigateur et explorateur). Chaque bouton rejoue Ctrl+C / Ctrl+X /
     Ctrl+V au clavier : l'effet est exactement celui du raccourci là où
@@ -34655,18 +34822,19 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     class LASTINPUTINFO(ctypes.Structure):
         _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
     cadre = QFrame()
-    cadre.setObjectName("cadrePressePapiersRedaction" if barre_redaction else "cadrePressePapiers")
+    # Encadré blanc dans les deux cas (25/11/2026, demandé : la fenêtre
+    # Rédiger a désormais ce cadre en bas, comme la barre du logiciel de texte)
+    nom_cadre = "cadrePressePapiersRedaction" if barre_redaction else "cadrePressePapiers"
+    cadre.setObjectName(nom_cadre)
     layout = QHBoxLayout(cadre)
     layout.setSpacing(4)
-    if barre_redaction:
-        layout.setContentsMargins(0, 0, 0, 0)
-    else:
-        cadre.setStyleSheet(
-            "QFrame#cadrePressePapiers { border: 1px solid white; background-color: #A52A2A; }")
-        cadre.setFixedHeight(22)
-        layout.setContentsMargins(3, 2, 3, 2)
+    cadre.setStyleSheet(
+        f"QFrame#{nom_cadre} {{ border: 1px solid white; background-color: #A52A2A; }}")
+    cadre.setFixedHeight(22)
+    layout.setContentsMargins(3, 2, 3, 2)
     focus_avant = [None]
     fenetre_avant = [None]  # autre fenêtre de COURRIER à réactiver (Rédiger...)
+    widget_avant = [None]   # widget qui avait le focus (TOUT / EFFACER)
     boutons = {}
     attente = [None]  # "COPIER"/"COUPER" cliqué, en attente du presse-papiers
     coupe_signalee = [0.0]  # time.monotonic() du dernier Ctrl+X repéré
@@ -34700,6 +34868,14 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
                 and precedente is not fenetre_bouton and precedente.isVisible()
                 and time.monotonic() - fenetres_actives["depuis"] < 0.5):
             fenetre_avant[0] = precedente
+        # Élément de saisie visé par TOUT / EFFACER : celui qui a le focus
+        # dans la fenêtre où l'on était
+        widget_avant[0] = QApplication.focusWidget()
+        if fenetre_avant[0] is not None:
+            for w in QApplication.topLevelWidgets():
+                if w.windowHandle() is fenetre_avant[0]:
+                    widget_avant[0] = w.focusWidget()
+                    break
 
     def _rendre_focus():
         if fenetre_avant[0] is not None:
@@ -34880,16 +35056,104 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
     for libelle, vk, raccourci in (("COPIER", 0x43, "Ctrl+C"),
                                    ("COUPER", 0x58, "Ctrl+X"),
                                    ("COLLER", 0x56, "Ctrl+V")):
-        btn = QPushButton(f" {libelle.capitalize()} " if barre_redaction else libelle)
+        btn = QPushButton(libelle)
         btn.setStyleSheet(style_actif)
-        if not barre_redaction:
-            btn.setFixedHeight(16)
+        btn.setFixedHeight(16)
         btn.setToolTip(f"{libelle.capitalize()} ({raccourci})")
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.pressed.connect(_memoriser_focus)
         btn.clicked.connect(lambda _=False, libelle=libelle, vk=vk: _rejouer(libelle, vk))
         layout.addWidget(btn)
         boutons[libelle] = btn
+
+    # TOUT et EFFACER (25/11/2026, demandé, comme la barre du logiciel de texte).
+    # Pas de touche rejouée ici : Suppr sur la liste ou le corps d'un mail
+    # supprime le mail, et Ctrl+A y est détourné par la page. On agit donc
+    # directement sur l'élément qui avait le focus ; EFFACER ne fait rien
+    # hors d'une zone de saisie, jamais un mail n'est supprimé par lui.
+    def _vue_web(w):
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        while w is not None:
+            if isinstance(w, QWebEngineView):
+                return w
+            w = w.parentWidget()
+        return None
+
+    _JS_EFFACER = """(function(){
+        var d = document, a = d.activeElement;
+        while (a && a.tagName === 'IFRAME') {
+            try { d = a.contentDocument; a = d.activeElement; } catch (e) { return false; }
+        }
+        if (!a) return false;
+        var t = a.tagName;
+        var saisie = a.isContentEditable || t === 'TEXTAREA'
+            || (t === 'INPUT' && /^(text|search|email|url|tel|password|)$/i.test(a.getAttribute('type') || ''));
+        if (!saisie || a.readOnly || a.disabled) return false;
+        d.execCommand('forwardDelete');
+        return true;
+    })()"""
+
+    def _signaler(btn, texte):
+        from PySide6.QtWidgets import QToolTip
+        QToolTip.showText(btn.mapToGlobal(btn.rect().bottomLeft()), texte, btn)
+
+    def _tout(btn):
+        w = widget_avant[0]
+        _rendre_focus()
+        if w is None:
+            return
+        fen = w.window()
+        if w is getattr(fen, "liste_messages", None) and hasattr(fen, "selectionner_tout"):
+            fen.selectionner_tout()
+            return
+        vue = _vue_web(w)
+        if vue is not None:
+            from PySide6.QtWebEngineCore import QWebEnginePage
+            vue.page().triggerAction(QWebEnginePage.WebAction.SelectAll)
+            return
+        if hasattr(w, "selectAll"):
+            w.selectAll()
+
+    def _effacer(btn):
+        w = widget_avant[0]
+        _rendre_focus()
+        if w is not None:
+            vue = _vue_web(w)
+            if vue is not None:
+                vue.page().runJavaScript(
+                    _JS_EFFACER, 0,
+                    lambda ok: ok or _signaler(btn, "Placez d'abord le curseur dans une zone de texte"))
+                return
+            from PySide6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit
+            if isinstance(w, QLineEdit) and not w.isReadOnly():
+                w.del_()
+                return
+            if isinstance(w, (QTextEdit, QPlainTextEdit)) and not w.isReadOnly():
+                curseur = w.textCursor()
+                curseur.deleteChar()
+                w.setTextCursor(curseur)
+                return
+        _signaler(btn, "Placez d'abord le curseur dans une zone de texte")
+
+    for libelle, bulle, action in (
+            ("TOUT", "Tout sélectionner (Ctrl+A) : le texte de la zone où se trouve le curseur,\n"
+                     "ou tous les mails si c'est la liste des mails", _tout),
+            ("EFFACER", "Effacer le texte sélectionné, ou le caractère après le curseur\n"
+                        "(touche Suppr) — n'agit que dans une zone de texte, jamais sur les mails", _effacer)):
+        btn = QPushButton(libelle)
+        btn.setStyleSheet(style_actif)
+        btn.setFixedHeight(16)
+        btn.setToolTip(bulle)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.pressed.connect(_memoriser_focus)
+        btn.clicked.connect(lambda _=False, a=action, b=btn: a(b))
+        layout.addWidget(btn)
+        boutons[libelle] = btn
+    # seulement=("COPIER",) (25/11/2026, demandé) : les autres boutons sont
+    # créés mais cachés, la logique d'allumage restant la même
+    if seulement:
+        for libelle, btn in boutons.items():
+            btn.setVisible(libelle in seulement)
     QApplication.clipboard().dataChanged.connect(_presse_papiers_change)
     cadre._surveillant_ctrl_x = _SurveillantCtrlX(cadre)
     QApplication.instance().installEventFilter(cadre._surveillant_ctrl_x)
@@ -34909,7 +35173,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 25/11/2026 17h09")
+        self.setWindowTitle("COURRIER ADRIEN — 25/11/2026 21h16")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -35917,7 +36181,10 @@ class ClientMail(QMainWindow):
                 btn.customContextMenuRequested.connect(_menu_avec_pj)
 
         # SUPPRIMER tout à droite, après RENVOYER (20/10/2026, demandé)
-        btn_supprimer_barre = QPushButton("SUPPRIMER")
+        # « SUPP. MAIL » (25/11/2026, demandé) : à ne pas confondre avec
+        # EFFACER de la barre du bas, qui efface du texte
+        btn_supprimer_barre = QPushButton("SUPP. MAIL")
+        btn_supprimer_barre.setToolTip("Supprimer le ou les mails sélectionnés (touche Suppr)")
         btn_supprimer_barre.setStyleSheet(STYLE_BOUTON_HAUT)
         btn_supprimer_barre.clicked.connect(self.supprimer_message)
         layout_haut.addWidget(btn_supprimer_barre)
@@ -37784,8 +38051,10 @@ if (typeof module === 'object') {
         # COPIER / COUPER / COLLER (25/10/2026, demandé) : à l'extrême droite
         # de la ligne, à la place qu'occupait DÉLAI (même case de grille que
         # les macros centrées).
-        layout_zone_mail.addWidget(creer_cadre_presse_papiers(STYLE_BTN_BAS), 0, 0,
-                                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # 25/11/2026 (demandé) : seul COPIER reste dans la fenêtre
+        # principale ; le cadre complet (COUPER, COLLER, TOUT, EFFACER) est
+        # en bas de chaque fenêtre Rédiger.
+        cadre_copier = creer_cadre_presse_papiers(STYLE_BTN_BAS, seulement=("COPIER",))
 
         # Boutons de macros simples (un par macro définie dans macros.json,
         # déclenchées sur le mail actuellement sélectionné dans la liste) —
@@ -37796,7 +38065,20 @@ if (typeof module === 'object') {
         # propage aux boutons qu'il contient.
         cadre_macros, self._zone_boutons_macros = creer_cadre_macros()
         self._cadre_macros = cadre_macros
-        layout_zone_mail.addWidget(cadre_macros, 0, 0, Qt.AlignmentFlag.AlignCenter)
+        # Macros et COPIER sur une même rangée (25/11/2026, bug remonté :
+        # fenêtre réduite, les macros centrées passaient sous le cadre de
+        # droite). Le vide de gauche, large comme COPIER, garde les macros
+        # centrées tant qu'il y a la place et se réduit en premier.
+        rangee_bas = QHBoxLayout()
+        rangee_bas.setContentsMargins(0, 0, 0, 0)
+        rangee_bas.setSpacing(8)
+        rangee_bas.addSpacerItem(QSpacerItem(cadre_copier.sizeHint().width(), 0,
+                                             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum))
+        rangee_bas.addStretch(1)
+        rangee_bas.addWidget(cadre_macros, 0, Qt.AlignmentFlag.AlignVCenter)
+        rangee_bas.addStretch(1)
+        rangee_bas.addWidget(cadre_copier, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout_zone_mail.addLayout(rangee_bas, 0, 0)
         self._regenerer_boutons_macros(STYLE_BTN_BAS)
         # 18/11/2026 : macros changées par la synchro avec le téléphone → boutons refaits
         self._relais_macros = _RelaisMacros(self)
@@ -40429,7 +40711,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 25/11/2026 à 17h09")
+        lbl_version = QLabel("Version du 25/11/2026 à 21h16")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -43724,6 +44006,41 @@ if (typeof module === 'object') {
         layout.addWidget(rb_actuel)
         layout.addWidget(rb_tous)
         layout.addWidget(rb_comptes)
+        # Une case par compte sous « Tous les comptes » (25/11/2026, comme
+        # COURRIER ADRIEN ANDROID) : cocher « Tous les comptes » les coche
+        # toutes ; décocher un compte le retire de la recherche ; cocher un
+        # compte seul passe sur ce périmètre avec ce compte-là.
+        cases_comptes = []      # [(case, adresse)]
+        maj_cases = {"en_cours": False}
+        for c in COMPTES:
+            adresse_c = c.get("adresse", "")
+            if not adresse_c:
+                continue
+            case = QCheckBox(self._nom_compte_recherche(adresse_c))
+            case.setStyleSheet("margin-left: 24px;")
+            layout.addWidget(case)
+            cases_comptes.append((case, adresse_c))
+
+        def _cocher_comptes(etat):
+            maj_cases["en_cours"] = True
+            try:
+                for case, _a in cases_comptes:
+                    case.setChecked(etat)
+            finally:
+                maj_cases["en_cours"] = False
+
+        def _sur_case_compte(case_cliquee, coche):
+            if maj_cases["en_cours"] or not coche or rb_comptes.isChecked():
+                return
+            rb_comptes.setChecked(True)      # coche toutes les cases…
+            _cocher_comptes(False)           # … puis ne garde que celle-ci
+            maj_cases["en_cours"] = True
+            case_cliquee.setChecked(True)
+            maj_cases["en_cours"] = False
+
+        for case, _a in cases_comptes:
+            case.toggled.connect(lambda coche, c=case: _sur_case_compte(c, coche))
+        rb_comptes.toggled.connect(lambda coche: _cocher_comptes(coche) if not maj_cases["en_cours"] else None)
 
         # État de l'index, rafraîchi tant que la fenêtre est ouverte
         lbl_index = QLabel("")
@@ -43777,7 +44094,17 @@ if (typeof module === 'object') {
             # périmètre change.
             compte = self.compte_actif
             if rb_comptes.isChecked():
-                adresses, dossier, titre = None, None, "tous les comptes"
+                choisis = [(case.text(), a) for case, a in cases_comptes if case.isChecked()]
+                if not choisis:
+                    self._lbl_recherche_progress.setText("Cochez au moins un compte.")
+                    return
+                dossier = None
+                if len(choisis) == len(cases_comptes):
+                    adresses, titre = None, "tous les comptes"
+                else:
+                    adresses = [a for _n, a in choisis]
+                    titre = ("le compte " if len(choisis) == 1 else "les comptes ") + \
+                        ", ".join(n for n, _a in choisis)
             elif rb_actuel.isChecked():
                 dossier = self._nom_imap(self.dossier_actif).replace("/", "_").replace("\\", "_").replace('"', '')
                 adresses = [compte["adresse"]]
@@ -43874,6 +44201,7 @@ if (typeof module === 'object') {
                 "a_pj": r["a_pj"] or info.get("a_pj", False),
                 "epingle": bool(info.get("epingle", False)),
                 "trouve_dans": r["trouve_dans"],
+                "groupe": r.get("groupe"),
             })
         # Doublons : un seul exemplaire par (compte, sujet, date), en gardant
         # de préférence un dossier « réel » plutôt que Corbeille, Envoyés,
@@ -43889,7 +44217,10 @@ if (typeof module === 'object') {
                 vus.add(cle)
                 uniques.append(r)
         ordre = {r["id"]: i for i, r in enumerate(resultats)}
-        uniques.sort(key=lambda r: ordre[r["id"]])   # garde l'ordre chronologique de l'index
+        # Ordre chronologique de l'index, groupe par groupe quand plusieurs
+        # mots sont cherchés (expression exacte, proches, éloignés)
+        rangs = {g: i for i, (g, _t) in enumerate(GROUPES_RECHERCHE)}
+        uniques.sort(key=lambda r: (rangs.get(r.get("groupe"), 0), ordre[r["id"]]))
         # Où le mot a été trouvé, quand ce n'est ni l'expéditeur ni le sujet
         # (visibles dans la liste) : « texte » ou « PJ devis.pdf »
         for r in uniques[:300]:
@@ -43938,7 +44269,32 @@ if (typeof module === 'object') {
         arbre.setUniformRowHeights(True)
         arbre.setHeaderLabels(["Date", "Compte", "Dossier", "De", "Sujet", "Trouvé dans"])
         noms_comptes = {}
+        # Plusieurs mots cherchés : un bandeau rouge devant chaque groupe
+        # (25/11/2026, comme COURRIER ADRIEN ANDROID)
+        bandeaux = []       # [(item, texte)]
+        libelles_groupes = dict(GROUPES_RECHERCHE)
+        nb_par_groupe = {}
         for r in resultats:
+            nb_par_groupe[r.get("groupe")] = nb_par_groupe.get(r.get("groupe"), 0) + 1
+        groupe_courant = None
+        police_bandeau = QFont("Verdana")
+        police_bandeau.setPixelSize(11)
+        police_bandeau.setBold(True)
+        for r in resultats:
+            groupe = r.get("groupe")
+            if groupe and groupe != groupe_courant:
+                groupe_courant = groupe
+                texte_bandeau = (libelles_groupes.get(groupe, groupe).format(saisie=saisie)
+                                 + f"  ({nb_par_groupe[groupe]})")
+                bandeau = QTreeWidgetItem([texte_bandeau])
+                bandeau.setFlags(Qt.ItemFlag.ItemIsEnabled)   # ni sélectionnable ni ouvrable
+                for col in range(6):
+                    bandeau.setBackground(col, QColor("#A52A2A"))
+                    bandeau.setForeground(col, QColor("white"))
+                bandeau.setFont(0, police_bandeau)
+                arbre.addTopLevelItem(bandeau)
+                bandeau.setFirstColumnSpanned(True)
+                bandeaux.append((bandeau, texte_bandeau))
             adresse = r["adresse"]
             if adresse not in noms_comptes:
                 noms_comptes[adresse] = self._nom_compte_recherche(adresse)
@@ -43969,6 +44325,10 @@ if (typeof module === 'object') {
             fm = arbre.fontMetrics()
             nb = arbre.topLevelItemCount()
             etat_colonnes["auto"] = True
+            # Les bandeaux de groupe s'étalent sur toute la largeur : vidés le
+            # temps de la mesure pour ne pas élargir la colonne Date.
+            for bandeau, _t in bandeaux:
+                bandeau.setText(0, "")
             try:
                 for col in range(arbre.columnCount()):
                     arbre.resizeColumnToContents(col)
@@ -43985,6 +44345,8 @@ if (typeof module === 'object') {
                     naturelles.append(max(maxi, entete))
                     courantes.append(min(max(maxi, entete), max(p90, entete)))
             finally:
+                for bandeau, texte_bandeau in bandeaux:
+                    bandeau.setText(0, texte_bandeau)
                 etat_colonnes["auto"] = False
 
         def _ajuster_colonnes():
@@ -44079,6 +44441,8 @@ if (typeof module === 'object') {
                 extrait.setText("")
                 return
             r = it.data(0, Qt.ItemDataRole.UserRole)
+            if r is None:       # bandeau de groupe
+                return
             ex = (extrait_resultat_recherche(r["id"], saisie, r["trouve_dans"] or champs)
                   if r.get("id") is not None else None)
             etat_extrait["ex"] = ex
@@ -44086,11 +44450,13 @@ if (typeof module === 'object') {
             if not ex:
                 extrait.setText(f"<span style='color:#aaaaaa'>{_html.escape(r['sujet'])}</span>")
                 return
-            libelle, avant, trouve, apres = ex
-            extrait.setText(
-                f"<span style='color:#aaaaaa'>{_html.escape(libelle)} :</span><br>"
-                f"{_html.escape(avant)}<span style='background-color:#DAA520; color:black;'>"
-                f"{_html.escape(trouve)}</span>{_html.escape(apres)}")
+            # Tous les mots cherchés surlignés (l'expression exacte d'un bloc)
+            libelle, morceaux, _cible = ex
+            corps_extrait = "".join(
+                f"<span style='background-color:#DAA520; color:black;'>{_html.escape(t)}</span>"
+                if surligne else _html.escape(t) for t, surligne in morceaux)
+            extrait.setText(f"<span style='color:#aaaaaa'>{_html.escape(libelle)} :</span><br>"
+                            f"{corps_extrait}")
 
         etat_extrait = {"ex": None}
 
@@ -44099,6 +44465,8 @@ if (typeof module === 'object') {
             if not it:
                 return
             r = it.data(0, Qt.ItemDataRole.UserRole)
+            if r is None:       # bandeau de groupe
+                return
             compte = next((c for c in COMPTES if c.get("adresse") == r["adresse"]), None)
             if compte is None:
                 extrait.setText("Ce compte n'existe plus dans COURRIER.")
@@ -44112,7 +44480,8 @@ if (typeof module === 'object') {
                     pass
             ex = etat_extrait["ex"]
             if pj and ex and ex[0].startswith("PJ "):
-                # ex = ("PJ nom.pdf", avant, texte trouvé tel qu'écrit, après)
+                # ex = ("PJ nom.pdf", morceaux, cible) ; cible = l'expression
+                # exacte telle qu'écrite si elle y est, sinon le mot le plus long
                 self.ouvrir_pj_a_l_endroit(compte, r["nom_safe"], r["uid"], ex[0][3:], ex[2])
             else:
                 self.aller_au_mail(compte, r["nom_safe"], r["uid"])
@@ -44124,7 +44493,9 @@ if (typeof module === 'object') {
         btn_pj.clicked.connect(lambda *_a: _ouvrir(pj=True))
         btn_fermer.clicked.connect(fen.close)
         if resultats:
-            arbre.setCurrentItem(arbre.topLevelItem(0))
+            # Premier vrai résultat (le premier élément peut être un bandeau)
+            arbre.setCurrentItem(next(arbre.topLevelItem(i) for i in range(arbre.topLevelItemCount())
+                                      if arbre.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) is not None))
         else:
             extrait.setText("Aucun mail trouvé. Si l'indexation est en cours, réessayez dans quelques minutes.")
         # Largeur voulue = toutes les colonnes en entier (marges, cadre et

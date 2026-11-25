@@ -226,7 +226,7 @@
     <li>Les autres boutons (<span class="btn">COMPTES</span> <span class="btn">ADRESSES</span> <span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span>…) restent toujours affichés.</li>
   </ul>
   <h3>Barre du haut, à droite : les actions sur les mails</h3>
-  <p><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span> (renvoie le mail à l'identique) et <span class="btn">SUPPRIMER</span> (supprime le ou les mails sélectionnés).</p>
+  <p><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span> (renvoie le mail à l'identique) et <span class="btn">SUPP. MAIL</span> (supprime le ou les mails sélectionnés, comme la touche <kbd>Suppr</kbd>). À ne pas confondre avec <span class="btn">EFFACER</span> des fenêtres de rédaction, qui efface du texte (<a href="#redaction">section 10</a>).</p>
   <h3>Boutons en orange : ce qui est en cours</h3>
   <p>Un bouton passe de rouge à orange quand ce qu'il commande est en cours. Par exemple <span class="btn actif">TODO</span> au lieu de <span class="btn">TODO</span>. D'un coup d'œil, vous voyez ce qui est en service :</p>
   <table>
@@ -242,18 +242,17 @@
     <tr><td><span class="btn">RECHERCHER</span></td><td>sa fenêtre ou la fenêtre des résultats est ouverte, ou tant que les mails d'un expéditeur (petit bonhomme) sont affichés.</td></tr>
     <tr><td><span class="btn">NOUVEAU</span> <span class="btn">RÉPONDRE</span> <span class="btn">RÉP. À TOUS</span> <span class="btn">TRANSFERT</span> <span class="btn">RENVOYER</span></td><td>une fenêtre de rédaction ouverte par ce bouton est encore ouverte.</td></tr>
   </table>
-  <p><span class="btn">INTERNET</span> et <span class="btn">SUPPRIMER</span> ne passent jamais à l'orange : ils agissent en une fois, sans rien laisser en cours.</p>
+  <p><span class="btn">INTERNET</span> et <span class="btn">SUPP. MAIL</span> ne passent jamais à l'orange : ils agissent en une fois, sans rien laisser en cours.</p>
   <h3>Barre du bas (barre d'état)</h3>
-  <p>Sous la liste et le mail affiché : <span class="btn">SPAM</span> / <span class="btn">NON SPAM</span> pour le mail affiché, les boutons de vos macros au centre, et <span class="btn">COPIER</span> <span class="btn">COUPER</span> <span class="btn">COLLER</span> à droite.</p>
+  <p>Sous la liste et le mail affiché : <span class="btn">SPAM</span> / <span class="btn">NON SPAM</span> pour le mail affiché, les boutons de vos macros au centre, et <span class="btn">COPIER</span> à droite. Quand la fenêtre est étroite, les macros se décalent vers la gauche pour laisser la place à <span class="btn">COPIER</span>.</p>
   <p>Tout en bas : l'état du compte et ses compteurs, les téléchargements en cours (progression, pause, arrêt, dossier d'enregistrement), puis <span class="btn actif">DÉLAI</span> (toujours orange : le délai d'envoi est toujours en service), <span class="btn">CONSOLE</span>, <span class="btn">À PROPOS</span>, <span class="btn">AIDE</span> (ouvre ce mode d'emploi), <span class="btn">DÉFAUT</span> et <span class="btn">FERMER</span>.</p>
-  <h3>COPIER, COUPER, COLLER</h3>
-  <p>Ces trois boutons font exactement comme <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>X</kbd> et <kbd>Ctrl</kbd>+<kbd>V</kbd> là où vous étiez : dans un champ, dans le mail affiché, sur des mails ou des fichiers sélectionnés.</p>
+  <h3>COPIER</h3>
+  <p>Ce bouton fait exactement comme <kbd>Ctrl</kbd>+<kbd>C</kbd> là où vous étiez : dans un champ, dans le mail affiché, sur des mails sélectionnés.</p>
   <ul>
-    <li><span class="btn actif">COPIER</span> reste orange tant qu'une copie attend dans le presse-papiers. Cela vaut aussi pour <kbd>Ctrl</kbd>+<kbd>C</kbd> au clavier ou une copie faite dans une autre application.</li>
-    <li><span class="btn actif">COUPER</span> reste orange tant qu'une coupe attend d'être collée : par ce bouton, par <kbd>Ctrl</kbd>+<kbd>X</kbd>, ou des fichiers coupés dans l'Explorateur Windows. Il s'éteint une fois la coupe collée.</li>
-    <li>Un clic sur <span class="btn actif">COPIER</span> ou <span class="btn actif">COUPER</span> allumé l'éteint et <b>vide le presse-papiers</b>, sans rien copier ni couper.</li>
+    <li><span class="btn actif">COPIER</span> reste orange tant qu'une copie faite dans Courrier Adrien attend dans le presse-papiers, <kbd>Ctrl</kbd>+<kbd>C</kbd> au clavier compris. Il s'éteint seul au bout de 30 secondes, ou dès qu'une autre application copie quelque chose.</li>
+    <li>Un clic sur <span class="btn actif">COPIER</span> allumé l'éteint et <b>vide le presse-papiers</b>, sans rien copier.</li>
   </ul>
-  <p>Les fenêtres de rédaction ont leurs propres boutons Copier, Couper, Coller (<a href="#redaction">section 10</a>). Une copie faite dans une fenêtre de rédaction n'allume que les boutons de cette fenêtre, pas ceux d'ici.</p>
+  <p>Les fenêtres de rédaction ont la barre complète <span class="btn">COPIER</span> <span class="btn">COUPER</span> <span class="btn">COLLER</span> <span class="btn">TOUT</span> <span class="btn">EFFACER</span> (<a href="#redaction">section 10</a>). Une copie faite dans une fenêtre de rédaction n'allume que les boutons de cette fenêtre, pas celui d'ici.</p>
   <div class="note"><b>Affichage Windows à 125 % ou plus :</b> si la place manque, la barre du haut réduit d'elle-même la taille de ses boutons pour que tout reste visible.</div>
 </section>
 
@@ -461,7 +460,13 @@
   <ul>
     <li><b>Destinataires :</b> les adresses se complètent pendant la frappe. Cliquer sur l'étiquette À, Cc ou Cci ouvre le carnet d'adresses pour choisir les destinataires.</li>
     <li><b>Mise en forme :</b> boutons <span class="btn">Gras</span> <span class="btn">Italique</span> <span class="btn">Souligné</span> <span class="btn">Barré</span> <span class="btn">Couleur</span> <span class="btn">Émoticônes</span> <span class="btn">Langue</span>, ainsi que la taille de la police.</li>
-    <li><b>Copier, couper, coller :</b> les boutons <span class="btn">Copier</span> <span class="btn">Couper</span> <span class="btn">Coller</span>, à côté de <span class="btn">Langue</span>, agissent dans cette fenêtre sans la quitter. Ils passent à l'orange comme ceux du bas de l'écran principal (<a href="#ecran">section 3</a>), mais seulement pour une copie ou une coupe faite dans cette fenêtre.</li>
+    <li><b>Copier, couper, coller, tout, effacer :</b> en bas de la fenêtre, à droite de vos macros, les boutons <span class="btn">COPIER</span> <span class="btn">COUPER</span> <span class="btn">COLLER</span> <span class="btn">TOUT</span> <span class="btn">EFFACER</span> agissent dans cette fenêtre sans la quitter :
+      <ul>
+        <li><span class="btn">COPIER</span>, <span class="btn">COUPER</span> et <span class="btn">COLLER</span> font comme <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>X</kbd> et <kbd>Ctrl</kbd>+<kbd>V</kbd>. <span class="btn actif">COPIER</span> passe à l'orange comme celui de l'écran principal (<a href="#ecran">section 3</a>) ; <span class="btn actif">COUPER</span> reste orange tant qu'une coupe attend d'être collée. Seule une copie ou une coupe faite dans cette fenêtre les allume ; un clic sur un bouton allumé l'éteint et vide le presse-papiers.</li>
+        <li><span class="btn">TOUT</span> sélectionne tout le texte de la zone où se trouve le curseur (le corps du mail, l'objet, un destinataire…), comme <kbd>Ctrl</kbd>+<kbd>A</kbd>.</li>
+        <li><span class="btn">EFFACER</span> efface le texte sélectionné, ou le caractère juste après le curseur, comme la touche <kbd>Suppr</kbd>. Il n'agit que dans une zone de texte et <b>ne supprime jamais de mail</b> : pour cela, c'est <span class="btn">SUPP. MAIL</span> dans l'écran principal.</li>
+      </ul>
+      Quand la fenêtre est étroite, les macros se décalent vers la gauche pour laisser la place à ces boutons.</li>
     <li><b>Pièces jointes :</b> elles s'affichent dans une colonne à droite. La petite croix rouge retire une pièce jointe. Un clic sur une pièce jointe l'affiche dans la fenêtre pour la vérifier avant l'envoi (PDF, Word, Excel, PowerPoint, page web, texte, image) ; <span class="btn">RETOUR AU MAIL</span> ramène le texte en cours. Une page web jointe reste prête tant que vous ne revenez pas au mail : on peut passer à une autre pièce jointe puis y revenir aussitôt, même pour une très grosse page. <span class="btn">Ouvrir avec Windows</span> ouvre le fichier avec son programme habituel. Survolez une pièce jointe pour voir son nom complet et son poids.</li>
     <li><b>Répondre en gardant les pièces jointes :</b> <span class="btn">TRANSFERT</span> reprend toujours les pièces jointes du mail d'origine, mais <span class="btn">RÉPONDRE</span> et <span class="btn">RÉP. À TOUS</span> ne les reprennent pas. Pour les garder, faites un <b>clic droit</b> sur <span class="btn">RÉPONDRE</span> ou <span class="btn">RÉP. À TOUS</span>, puis choisissez <b>« Répondre avec les pièces jointes »</b>.</li>
     <li><span class="btn">Accusé de réception</span> : enfoncé, il demande un accusé de lecture au destinataire.</li>
@@ -584,21 +589,28 @@
     <tr><td>Dans le corps du mail</td><td>tout le texte du mail.</td></tr>
     <tr><td>Dans les pièces jointes</td><td>le nom des pièces jointes et le texte des PDF, Word (.docx et anciens .doc), Excel (.xlsx et .xls), LibreOffice (.odt, .ods, .odp), PowerPoint (.pptx et anciens .ppt) et fichiers texte.</td></tr>
   </table>
-  <p>Le périmètre est au choix : <b>le dossier actuel</b>, <b>tous les dossiers du compte</b> ou <b>tous les comptes</b>. Les dossiers spam ne sont jamais fouillés : ils ont leur propre recherche (<a href="#spam">section 15</a>).</p>
+  <p>Le périmètre est au choix : <b>le dossier actuel</b>, <b>tous les dossiers du compte</b> ou <b>tous les comptes</b>. Sous « Tous les comptes », une case par compte : décochez ceux à laisser de côté, ou cochez un seul compte pour ne chercher que dans celui-là. Les dossiers spam ne sont jamais fouillés : ils ont leur propre recherche (<a href="#spam">section 15</a>).</p>
   <h3>Comment les mots sont cherchés</h3>
   <ul>
     <li>Les accents et les majuscules ne comptent pas : « reglement » trouve « Règlement ».</li>
     <li>Chaque mot est cherché en <b>début de mot</b> : « factur » trouve « facture » et « factures », mais « onda » ne trouve pas « Honda ».</li>
-    <li>Plusieurs mots : le mail doit les contenir <b>tous</b>, dans n'importe quel ordre.</li>
+    <li>Les petits mots sont cherchés <b>en entier</b> : ceux de 2 lettres toujours, ceux de 3 lettres quand un mot plus long est tapé avec eux. « en » ne trouve pas « entre ».</li>
+    <li>Plusieurs mots : le mail doit les contenir <b>tous</b>, dans n'importe quel ordre et à n'importe quel endroit coché (par exemple l'expéditeur pour l'un, la pièce jointe pour l'autre).</li>
     <li>Entre guillemets, l'expression est cherchée telle quelle : « "avenant au bail" ».</li>
     <li>Les lettres isolées (l', d', qu'…) sont ignorées : « l'URSSAF » cherche « URSSAF ».</li>
   </ul>
   <h3>La fenêtre des résultats</h3>
   <ul>
     <li>Une ligne par mail, du plus récent au plus ancien : date, compte, dossier, expéditeur, sujet et <b>Trouvé dans</b> (sujet, texte, ou le nom de la pièce jointe).</li>
-    <li>En bas, le <b>passage trouvé</b> du mail sélectionné, le mot surligné.</li>
+    <li>Avec <b>au moins deux mots</b>, les résultats forment trois groupes, chacun sous un bandeau rouge et du plus récent au plus ancien :
+      <ol>
+        <li><b>Expression exacte</b> : les mots se suivent dans l'ordre tapé, séparés seulement par des espaces ou de la ponctuation ;</li>
+        <li><b>Tous les mots, proches les uns des autres</b> : à 12 mots d'écart au plus, dans un même texte ;</li>
+        <li><b>Tous les mots, mais éloignés</b> : tous présents, mais dispersés. Ce sont souvent les bons : « girerd haricot » trouve la facture PDF de Girerd où figurent les haricots.</li>
+      </ol></li>
+    <li>En bas, le <b>meilleur passage</b> du mail sélectionné : l'expression exacte si elle y est, sinon l'endroit où le plus de mots cherchés sont réunis. Tous les mots cherchés y sont surlignés.</li>
     <li>Un double-clic, la touche Entrée ou <span class="btn">Ouvrir le mail</span> affiche le mail dans la fenêtre principale, sur son compte et dans son dossier. La fenêtre des résultats reste ouverte pour ouvrir les suivants.</li>
-    <li>Mot trouvé dans une pièce jointe : <span class="btn">Ouvrir la PJ à cet endroit</span> ouvre le mail, puis la pièce jointe, et y cherche aussitôt le passage trouvé (surligné, avec le compteur de résultats).</li>
+    <li>Mot trouvé dans une pièce jointe : <span class="btn">Ouvrir la PJ à cet endroit</span> ouvre le mail, puis la pièce jointe, et y cherche aussitôt le passage trouvé (surligné, avec le compteur de résultats) : l'expression entière si elle y est, sinon le plus long des mots cherchés.</li>
     <li>Un même mail rangé dans plusieurs dossiers (« Tous les messages » de Gmail, par exemple) n'apparaît qu'une fois.</li>
   </ul>
   <h3>L'index de recherche</h3>
