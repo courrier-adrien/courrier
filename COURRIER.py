@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-25 14h32"
+VERSION_BUILD = "2026-11-25 17h09"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -34909,7 +34909,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False):
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 25/11/2026 14h32")
+        self.setWindowTitle("COURRIER ADRIEN — 25/11/2026 17h09")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -40429,7 +40429,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 25/11/2026 à 14h32")
+        lbl_version = QLabel("Version du 25/11/2026 à 17h09")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -43955,7 +43955,9 @@ if (typeof module === 'object') {
         en_tetes = arbre.header()
         en_tetes.setStretchLastSection(False)
         en_tetes.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        naturelles = []
+        naturelles = []     # largeur du texte le plus long de chaque colonne
+        courantes = []      # largeur suffisant à 9 lignes sur 10
+        etat_colonnes = {"auto": False, "manuel": False}
 
         def _mesurer_colonnes():
             # Mesure faite une fois la feuille de style appliquée (Verdana
@@ -43963,39 +43965,83 @@ if (typeof module === 'object') {
             # défaut et sous-estime les colonnes (25/11/2026, remonté :
             # colonnes tronquées alors que l'écran avait de la place).
             naturelles.clear()
-            for col in range(arbre.columnCount()):
-                arbre.resizeColumnToContents(col)
-                naturelles.append(arbre.columnWidth(col) + 14)
+            courantes.clear()
+            fm = arbre.fontMetrics()
+            nb = arbre.topLevelItemCount()
+            etat_colonnes["auto"] = True
+            try:
+                for col in range(arbre.columnCount()):
+                    arbre.resizeColumnToContents(col)
+                    maxi = arbre.columnWidth(col) + 14
+                    tailles = sorted(fm.horizontalAdvance(arbre.topLevelItem(i).text(col))
+                                     for i in range(nb))
+                    if tailles:
+                        # Marge de Qt (retrait, padding) reprise de la mesure maxi
+                        marge = maxi - tailles[-1]
+                        p90 = tailles[min(len(tailles) - 1, int(len(tailles) * 0.9))] + marge
+                    else:
+                        p90 = maxi
+                    entete = max(0, en_tetes.sectionSizeHint(col)) + 8
+                    naturelles.append(max(maxi, entete))
+                    courantes.append(min(max(maxi, entete), max(p90, entete)))
+            finally:
+                etat_colonnes["auto"] = False
 
         def _ajuster_colonnes():
-            if not naturelles:
+            if not naturelles or etat_colonnes["manuel"]:
                 return
-            dispo = arbre.viewport().width()
+            # 4 px laissés à droite : la poignée de la dernière colonne reste
+            # attrapable à côté de la barre de défilement.
+            dispo = arbre.viewport().width() - 4
             if dispo <= 0:
                 return
-            largeurs = list(naturelles)
-            if sum(largeurs) > dispo:
-                # Plafond commun le plus haut possible : seules les colonnes
-                # plus larges que lui sont rognées.
-                plafond = max(largeurs)
-                restantes = sorted(largeurs, reverse=True)
+            if sum(naturelles) <= dispo:
+                # Place en trop : répartie au prorata, rien n'est rogné
+                surplus = dispo - sum(naturelles)
+                total = sum(naturelles) or 1
+                largeurs = [l + surplus * l // total for l in naturelles]
+            elif sum(courantes) <= dispo:
+                # Tout ne tient pas : chaque colonne reçoit d'abord de quoi
+                # montrer 9 lignes sur 10 en entier, puis le reste va aux
+                # colonnes encore rognées, au prorata de ce qui leur manque.
+                # Une seule PJ au nom très long ne vole donc plus la place
+                # du Sujet (25/11/2026, remonté sur l'écran du Dell).
+                reste = dispo - sum(courantes)
+                manques = [n - c for n, c in zip(naturelles, courantes)]
+                total = sum(manques) or 1
+                largeurs = [c + reste * m // total for c, m in zip(courantes, manques)]
+            else:
+                # Même les largeurs courantes ne tiennent pas : plafond commun
+                # le plus haut possible, seules les plus larges sont rognées.
+                restantes = sorted(courantes, reverse=True)
+                plafond = restantes[0]
                 for i in range(len(restantes)):
                     fixes = sum(restantes[i + 1:])
                     plafond = (dispo - fixes) // (i + 1)
                     if i + 1 >= len(restantes) or plafond >= restantes[i + 1]:
                         break
-                largeurs = [min(l, max(40, plafond)) for l in largeurs]
-            else:
-                # Place en trop : répartie au prorata, rien n'est rogné
-                surplus = dispo - sum(largeurs)
-                total = sum(largeurs) or 1
-                largeurs = [l + surplus * l // total for l in largeurs]
-            for col, l in enumerate(largeurs):
-                arbre.setColumnWidth(col, l)
+                largeurs = [min(l, max(40, plafond)) for l in courantes]
+            etat_colonnes["auto"] = True
+            try:
+                for col, l in enumerate(largeurs):
+                    arbre.setColumnWidth(col, l)
+            finally:
+                etat_colonnes["auto"] = False
+
+        def _colonne_tiree(*_a):
+            # Colonne élargie ou rétrécie à la main : l'ajustement automatique
+            # s'arrête pour cette fenêtre (sinon il défaisait aussitôt le
+            # geste, la barre horizontale apparue redimensionnant la vue).
+            if not etat_colonnes["auto"]:
+                etat_colonnes["manuel"] = True
+        en_tetes.sectionResized.connect(_colonne_tiree)
 
         class _SurveillanceLargeur(QObject):
             def eventFilter(self, objet, evenement):
-                if evenement.type() == QEvent.Type.Resize:
+                # Seule une vraie variation de largeur compte : l'apparition
+                # de la barre horizontale ne change que la hauteur.
+                if (evenement.type() == QEvent.Type.Resize
+                        and evenement.size().width() != evenement.oldSize().width()):
                     _ajuster_colonnes()
                 return False
         arbre._surveillance_largeur = _SurveillanceLargeur(arbre)
