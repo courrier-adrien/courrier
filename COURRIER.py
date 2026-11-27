@@ -436,7 +436,7 @@ class PontLecture(QObject):
 # n'étaient référencés nulle part ailleurs). ---
 
 # Version de cette build (= date du zip publie) : sert a la mise a jour automatique.
-VERSION_BUILD = "2026-11-25 21h16"
+VERSION_BUILD = "2026-11-27 10h52"
 
 # Version de test autonome : les donnees de l'utilisateur vivent dans
 # %LOCALAPPDATA%\COURRIER, jamais dans le dossier de l'exe.
@@ -6562,9 +6562,8 @@ def _synchro_carnet_telephone(serie):
         liste = noms.get(cle, [])
         if not liste:
             return f"   • {titre} : aucun"
-        montres = liste[:40]
-        suite = f"\n      … et {len(liste) - 40} autre(s)" if len(liste) > 40 else ""
-        return f"   • {titre} : {len(liste)}\n" + "\n".join("      – " + n for n in montres) + suite
+        # 27/11/2026 (demandé) : tous les noms, sans limite à 40 (fenêtres avec ascenseur)
+        return f"   • {titre} : {len(liste)}\n" + "\n".join("      – " + n for n in liste)
     return "\n".join([
         f"Synchro faite : {b.get('contacts', 0)} contacts dans chacun des deux carnets.",
         "",
@@ -24816,6 +24815,54 @@ class DialogueAbonnementsRSS(QDialog):
         self._recuperateur.resultat.connect(_sur_resultat)
         self._recuperateur.start()
 
+from PySide6.QtWidgets import QScrollArea as _QScrollArea
+
+
+class _ZoneStatutDefilante(_QScrollArea):
+    """Ligne d'état du carnet (27/11/2026, demandé) : un message court tient sur sa ligne
+    comme avant ; un long rapport (synchro avec le téléphone, 127 contacts modifiés…)
+    s'affiche en entier, avec un ascenseur au-delà d'environ un tiers de l'écran."""
+
+    def __init__(self, etiquette, parent=None):
+        super().__init__(parent)
+        self.setWidget(etiquette)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+    def _hauteur_voulue(self):
+        etiquette = self.widget()
+        contenu = etiquette.sizeHint().height()
+        ecran = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        plafond = max(120, ecran.height() // 3)
+        return min(contenu, plafond), contenu > plafond
+
+    def sizeHint(self):
+        h, defile = self._hauteur_voulue()
+        largeur = self.widget().sizeHint().width()
+        if defile:
+            largeur += self.verticalScrollBar().sizeHint().width()
+        return QSize(largeur, h)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()   # comme l'ancien QLabel : le texte n'est jamais rogné en largeur
+
+
+class _EtiquetteStatut(QLabel):
+    """QLabel qui prévient sa zone défilante quand son texte change (nouvelle hauteur)."""
+
+    def setText(self, texte):
+        super().setText(texte)
+        zone = self.parentWidget()
+        while zone is not None and not isinstance(zone, _ZoneStatutDefilante):
+            zone = zone.parentWidget()
+        if zone is not None:
+            zone.updateGeometry()
+            zone.verticalScrollBar().setValue(0)   # rapport lu depuis le début
+
+
 class DialogueCarnetAdresses(QDialog):
     """Carnet d'adresses simple : nom + email, organisés par dossiers
     créés librement (moto, boulot, famille...). Import/export CSV, avec
@@ -25062,6 +25109,15 @@ class DialogueCarnetAdresses(QDialog):
         ligne_btns_contact2.addWidget(btn_modifier_contact, 1)
         ligne_btns_contact2.addWidget(btn_supprimer_contact, 1)
         colonne_contacts.addLayout(ligne_btns_contact2)
+        # Boutons des contacts jamais rognés non plus (27/11/2026 : « Copie
+        # cachée à tous » coupé) : largeur mini = texte, la fenêtre suit
+        for _ligne in (ligne_btns_contact, ligne_btns_contact2):
+            for _i in range(_ligne.count()):
+                _w = _ligne.itemAt(_i).widget()
+                if _w is not None:
+                    _w.ensurePolished()
+                    _w.setMinimumWidth(_w.sizeHint().width())
+        self._lignes_boutons_contacts = (ligne_btns_contact, ligne_btns_contact2)
         corps.addLayout(colonne_contacts, 1)
 
         layout_principal.addLayout(corps)
@@ -25157,9 +25213,11 @@ class DialogueCarnetAdresses(QDialog):
 
         layout_principal.addLayout(ligne_fichiers)   # imports / exports (16/11/2026)
         ligne_bas = QHBoxLayout()
-        self.lbl_statut = QLabel("")
-        ligne_bas.addWidget(self.lbl_statut)
-        ligne_bas.addStretch(1)
+        # 27/11/2026 (demandé) : le rapport de synchro en entier, avec ascenseur si trop long
+        self.lbl_statut = _EtiquetteStatut("")
+        self.lbl_statut.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.lbl_statut.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        ligne_bas.addWidget(_ZoneStatutDefilante(self.lbl_statut), 1)
         for libelle in self._champs_cibles:
             btn_ajouter_cible = QPushButton(f"  Ajouter en {libelle}  ")
             btn_ajouter_cible.setStyleSheet(STYLE_BOUTON)
@@ -25176,6 +25234,9 @@ class DialogueCarnetAdresses(QDialog):
         btn_fermer.setStyleSheet(STYLE_BOUTON)
         btn_fermer.clicked.connect(self.accept)
         ligne_bas.addWidget(btn_fermer)
+        # Boutons en bas de la ligne quand un long rapport l'agrandit
+        for i in range(1, ligne_bas.count()):
+            ligne_bas.itemAt(i).setAlignment(Qt.AlignmentFlag.AlignBottom)
         layout_principal.addLayout(ligne_bas)
 
         self._charger_dossiers()
@@ -25948,21 +26009,6 @@ class DialogueCarnetAdresses(QDialog):
         liste.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         lay.addWidget(liste, 1)
 
-        def _ajuster_hauteur():
-            hauteur_ligne = max(liste.sizeHintForRow(0), 20)
-            voulu = hauteur_ligne * liste.count() + 2 * liste.frameWidth() + 4
-            ecran = (dlg.screen() or QApplication.primaryScreen()).availableGeometry()
-            # Titre, texte et boutons autour de la liste (+ barre de titre
-            # Windows, inconnue avant l'affichage)
-            habillage = max(dlg.frameGeometry().height() - liste.height(),
-                            dlg.sizeHint().height() - liste.sizeHint().height() + 40)
-            liste.setFixedHeight(max(hauteur_ligne * 3, min(voulu, ecran.height() - habillage - 10)))
-            dlg.adjustSize()
-        # 1re mesure avant l'affichage : Qt place alors la fenêtre dans l'écran
-        # (pas de calcul de position à la main : y faux à 150 % barre en haut)
-        _ajuster_hauteur()
-        QTimer.singleShot(0, _ajuster_hauteur)
-
         ligne = QHBoxLayout()
         ligne.addStretch(1)
         btn_ok = QPushButton("  Copier  ")
@@ -25972,6 +26018,22 @@ class DialogueCarnetAdresses(QDialog):
         ligne.addWidget(btn_ok)
         ligne.addWidget(btn_annuler)
         lay.addLayout(ligne)
+
+        # Hauteur calculée une seule fois, AVANT l'affichage, boutons en place
+        # (27/11/2026 : sur le Dell la liste était rognée à mi-écran — avant
+        # l'affichage, frameGeometry() vaut 640×480 par défaut et faussait
+        # l'habillage). Seules les tailles « idéales » (sizeHint) sont fiables
+        # à ce stade. Qt place ensuite la fenêtre dans l'écran lui-même (pas
+        # de calcul de position à la main : y faux à 150 % barre en haut).
+        dlg.ensurePolished()
+        liste.ensurePolished()
+        hauteur_ligne = max(liste.sizeHintForRow(0), 16)
+        voulu = hauteur_ligne * liste.count() + 2 * liste.frameWidth() + 4
+        ecran = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        barre_titre = dlg.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight) + 16
+        habillage = dlg.sizeHint().height() - liste.sizeHint().height() + barre_titre
+        liste.setFixedHeight(max(hauteur_ligne * 3, min(voulu, ecran.height() - habillage - 10)))
+        dlg.resize(max(dlg.sizeHint().width(), dlg.minimumWidth()), dlg.sizeHint().height())
 
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -26025,6 +26087,8 @@ class DialogueCarnetAdresses(QDialog):
         largeur = 220 + 75 + 14 + LARGEUR_COLONNE_DOSSIER + 10 + 20 + plus_long
         for _ligne in getattr(self, "_lignes_boutons", ()):   # les lignes de boutons entières (16/11/2026)
             largeur = max(largeur, _ligne.minimumSize().width() + 40)
+        for _ligne in getattr(self, "_lignes_boutons_contacts", ()):   # à droite de la colonne des dossiers (27/11/2026)
+            largeur = max(largeur, 220 + 75 + _ligne.minimumSize().width())
         ecran = QApplication.primaryScreen()
         maxi = int(ecran.availableGeometry().width() * 0.95) if ecran else 1600
         return max(820, min(largeur, maxi))
@@ -26286,6 +26350,45 @@ class DialogueCarnetAdresses(QDialog):
                       self.champ_autres_tel, self.champ_notes):
             champ.clear()
 
+    def _afficher_bilan_synchro(self, bilan, ok):
+        """Bilan de la synchro du carnet en fenêtre (27/11/2026) : texte entier, avec ascenseur
+        seulement s'il dépasse la hauteur de l'écran (une QMessageBox débordait de l'écran)."""
+        from PySide6.QtWidgets import QPlainTextEdit
+        from PySide6.QtGui import QFontMetrics
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Synchronisation des carnets d'adresses")
+        dlg.setStyleSheet(self.styleSheet() + f"""
+            QDialog {{ background-color: #2a2a2a; }}
+            QPlainTextEdit {{ background-color: #1e1e1e; color: {'#80c080' if ok else '#e08080'};
+                             border: 1px solid #5a5a5a; font-family: Verdana; font-size: 12px; }}
+        """)
+        lay = QVBoxLayout(dlg)
+        zone = QPlainTextEdit(bilan)
+        zone.setReadOnly(True)
+        zone.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        lay.addWidget(zone, 1)
+        ligne = QHBoxLayout()
+        ligne.addStretch(1)
+        btn_ok = QPushButton("  OK  ")
+        btn_ok.clicked.connect(dlg.accept)
+        btn_ok.setDefault(True)
+        ligne.addWidget(btn_ok)
+        lay.addLayout(ligne)
+        # Taille : tout le texte si l'écran le permet (même méthode que « Copier vers… »)
+        dlg.ensurePolished()
+        zone.ensurePolished()
+        fm = QFontMetrics(zone.font())
+        lignes = bilan.split("\n")
+        ecran = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        marge = 2 * zone.frameWidth() + 2 * int(zone.document().documentMargin()) + 24
+        largeur = min(max(fm.horizontalAdvance(l) for l in lignes) + marge + 20, ecran.width() - 40)
+        barre_titre = dlg.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight) + 16
+        habillage = dlg.sizeHint().height() - zone.sizeHint().height() + barre_titre
+        hauteur = min(fm.lineSpacing() * len(lignes) + marge, ecran.height() - habillage - 10)
+        zone.setMinimumSize(max(largeur, 360), hauteur)
+        dlg.resize(dlg.sizeHint())
+        dlg.exec()
+
     def _synchro_android(self):
         """Bouton Synchro ANDROID (16/11/2026) : le téléphone est prévenu par adb, il envoie son carnet,
         COURRIER fusionne (_traiter_synchro_carnet) et les deux carnets deviennent identiques."""
@@ -26306,14 +26409,13 @@ class DialogueCarnetAdresses(QDialog):
                 self.btn_synchro_android.setEnabled(True)
                 ok = str(bilan).startswith("Synchro faite")
                 self.lbl_statut.setStyleSheet("color: #80c080;" if ok else "color: #e08080;")
+                # 27/11/2026 (demandé) : bilan complet aussi dans la fenêtre du carnet,
+                # avec ascenseur s'il est long (_ZoneStatutDefilante)
                 self.lbl_statut.setText(str(bilan))
                 self._charger_dossiers()
                 self._rafraichir_contacts()
                 # le bilan en fenêtre (16/11/2026, demandé : la ligne d'état passait inaperçue)
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox(QMessageBox.Icon.Information if ok else QMessageBox.Icon.Warning,
-                            "Synchronisation des carnets d'adresses", str(bilan),
-                            QMessageBox.StandardButton.Ok, self).exec()
+                self._afficher_bilan_synchro(str(bilan), ok)
             except RuntimeError:
                 pass  # fenêtre fermée entre-temps
 
@@ -35173,7 +35275,7 @@ def creer_cadre_presse_papiers(style_bouton, barre_redaction=False, seulement=No
 class ClientMail(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("COURRIER ADRIEN — 25/11/2026 21h16")
+        self.setWindowTitle("COURRIER ADRIEN — 27/11/2026 10h52")
         _ico = os.path.join(DOSSIER_ICONES, "courrier.ico")
         if os.path.exists(_ico):
             self.setWindowIcon(QIcon(_ico))
@@ -40711,7 +40813,7 @@ if (typeof module === 'object') {
         lbl_titre.setStyleSheet("color: #A52A2A; font-weight: bold; font-size: 22px;")
         layout.addWidget(lbl_titre)
 
-        lbl_version = QLabel("Version du 25/11/2026 à 21h16")
+        lbl_version = QLabel("Version du 27/11/2026 à 10h52")
         lbl_version.setStyleSheet("color: #dddddd; font-size: 13px;")
         layout.addWidget(lbl_version)
 
@@ -44006,10 +44108,13 @@ if (typeof module === 'object') {
         layout.addWidget(rb_actuel)
         layout.addWidget(rb_tous)
         layout.addWidget(rb_comptes)
-        # Une case par compte sous « Tous les comptes » (25/11/2026, comme
-        # COURRIER ADRIEN ANDROID) : cocher « Tous les comptes » les coche
-        # toutes ; décocher un compte le retire de la recherche ; cocher un
-        # compte seul passe sur ce périmètre avec ce compte-là.
+        # Une case par compte (25/11/2026, comme COURRIER ADRIEN ANDROID).
+        # 27/11/2026 (demandé) : « Tous les comptes » est une option comme les
+        # deux autres. Les comptes ne sont plus en retrait sous elle, une ligne
+        # vide les sépare. Elle ne s'allume que si on la coche, et allume alors
+        # tous les comptes. Cocher un compte n'allume que ce compte (les 3
+        # options s'éteignent) ; la recherche porte alors sur les comptes cochés.
+        layout.addSpacing(10)
         cases_comptes = []      # [(case, adresse)]
         maj_cases = {"en_cours": False}
         for c in COMPTES:
@@ -44017,9 +44122,9 @@ if (typeof module === 'object') {
             if not adresse_c:
                 continue
             case = QCheckBox(self._nom_compte_recherche(adresse_c))
-            case.setStyleSheet("margin-left: 24px;")
             layout.addWidget(case)
             cases_comptes.append((case, adresse_c))
+        options = (rb_actuel, rb_tous, rb_comptes)
 
         def _cocher_comptes(etat):
             maj_cases["en_cours"] = True
@@ -44029,18 +44134,38 @@ if (typeof module === 'object') {
             finally:
                 maj_cases["en_cours"] = False
 
-        def _sur_case_compte(case_cliquee, coche):
-            if maj_cases["en_cours"] or not coche or rb_comptes.isChecked():
-                return
-            rb_comptes.setChecked(True)      # coche toutes les cases…
-            _cocher_comptes(False)           # … puis ne garde que celle-ci
+        def _eteindre_options():
+            # Des boutons radio exclusifs ne se décochent pas tous d'eux-mêmes
             maj_cases["en_cours"] = True
-            case_cliquee.setChecked(True)
-            maj_cases["en_cours"] = False
+            try:
+                for rb in options:
+                    rb.setAutoExclusive(False)
+                    rb.setChecked(False)
+                    rb.setAutoExclusive(True)
+            finally:
+                maj_cases["en_cours"] = False
+
+        def _sur_case_compte(coche):
+            if maj_cases["en_cours"]:
+                return
+            if coche and not rb_comptes.isChecked():
+                # Un compte coché à la main : seuls les comptes cochés comptent
+                if rb_actuel.isChecked() or rb_tous.isChecked():
+                    _eteindre_options()
+            elif not coche and rb_comptes.isChecked():
+                # Un compte décoché : ce n'est plus « Tous les comptes »,
+                # les autres comptes restent cochés
+                _eteindre_options()
+
+        def _sur_option(rb, coche):
+            if maj_cases["en_cours"] or not coche:
+                return
+            _cocher_comptes(rb is rb_comptes)   # tous allumés, ou tous éteints
 
         for case, _a in cases_comptes:
-            case.toggled.connect(lambda coche, c=case: _sur_case_compte(c, coche))
-        rb_comptes.toggled.connect(lambda coche: _cocher_comptes(coche) if not maj_cases["en_cours"] else None)
+            case.toggled.connect(_sur_case_compte)
+        for rb in options:
+            rb.toggled.connect(lambda coche, r=rb: _sur_option(r, coche))
 
         # État de l'index, rafraîchi tant que la fenêtre est ouverte
         lbl_index = QLabel("")
@@ -44093,11 +44218,10 @@ if (typeof module === 'object') {
             # même fenêtre de résultats (24/11/2026, demandé) ; seul le
             # périmètre change.
             compte = self.compte_actif
-            if rb_comptes.isChecked():
-                choisis = [(case.text(), a) for case, a in cases_comptes if case.isChecked()]
-                if not choisis:
-                    self._lbl_recherche_progress.setText("Cochez au moins un compte.")
-                    return
+            # Comptes cochés (par « Tous les comptes » ou à la main) ; rien de
+            # coché du tout : tous les dossiers du compte affiché, comme avant
+            choisis = [(case.text(), a) for case, a in cases_comptes if case.isChecked()]
+            if choisis:
                 dossier = None
                 if len(choisis) == len(cases_comptes):
                     adresses, titre = None, "tous les comptes"
